@@ -1,10 +1,10 @@
-# Super Dodgeball NES — Recompilation
+# Super Dodgeball NES — Recompilation *(early WIP)*
 
 Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C using the [NESRecomp](https://github.com/mstan/nesrecomp) framework and run it on PC.
 
 ![Super Dodge Ball title screen (recompiled build)](docs/assets/title.png)
 
-> **Status:** Title screen ~99.8% structural match vs Mesen frame 11. `smoke 30` exits 0 with 0 dispatch misses. Start tunnels past the title into mode/skill/team-select menus (400 frames; only benign `$A3C7` interp skips); court BG draw is the current frontier. TAS harness (`tools/tas/`) replays TASVideos #4976 on both sides with first-divergence diffing — first gameplay divergence at the mode-menu confirm (~TAS frame 44).
+> **Status:** super early WIP — it boots to a ~99.8% title screen and stumbles through a few menus (mode/skill/team-select) with music mostly correct, and that's the whole show so far. Past team confirm the court BG stalls as tile-soup; gameplay isn't there yet. See `docs/plan.md` for the frontier.
 
 > *Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong here. This port is in development — expect rough edges.*
 
