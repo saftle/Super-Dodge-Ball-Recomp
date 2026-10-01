@@ -1,0 +1,49 @@
+# title_to_team_select.txt — headless input driver: title -> mode menu
+# -> skill -> team-select (CHANGE POSITION?). Verified green (0 misses).
+# Usage: ./build/super_dodgeball "rom.nes" --script tools/input/title_to_team_select.txt --smoke 400
+# (smoke count ends the run inside team-select).
+WAIT 10
+HOLD START
+WAIT 15
+RELEASE START
+WAIT 10
+HOLD A
+WAIT 3
+RELEASE A
+WAIT 25
+HOLD A
+WAIT 3
+RELEASE A
+WAIT 120
+HOLD START
+WAIT 3
+RELEASE START
+WAIT 20
+HOLD A
+WAIT 3
+RELEASE A
+WAIT 20
+HOLD B
+WAIT 3
+RELEASE B
+WAIT 30
+HOLD DOWN
+WAIT 3
+RELEASE DOWN
+WAIT 15
+HOLD A
+WAIT 3
+RELEASE A
+WAIT 40
+HOLD DOWN
+WAIT 3
+RELEASE DOWN
+WAIT 15
+HOLD DOWN
+WAIT 3
+RELEASE DOWN
+WAIT 15
+HOLD A
+WAIT 3
+RELEASE A
+WAIT 400

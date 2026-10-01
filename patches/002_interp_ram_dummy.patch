@@ -1,0 +1,32 @@
+--- a/runner/src/interp.c
++++ b/runner/src/interp.c
+@@ -708,10 +708,27 @@
+     /* CPU RAM and cartridge SRAM code cannot have a generated function. It is
+      * intentional dynamic execution rather than static-discovery fallback, so
+      * keep it available under fallback=off. Mapper 40 is the exception: its
+-     * $6000-$7FFF window is PRG ROM and must retain normal strict dispatch. */
++     * $6000-$7FFF window is PRG ROM and must retain normal strict dispatch.
++     *
++     * Native JSR/JMP sites are plain C calls that push no 6502 return
++     * address, but RAM code routinely ends in RTS (e.g. Super Dodgeball's
++     * $07B4 STA-trampoline: JMP $07B4 executes STA abs + RTS). Without a
++     * pushed pair the terminal RTS pops two bytes of live caller data
++     * (lifting S by 2 per call), which eventually wraps S into the $0100
++     * page and clobbers handshake bytes. Pre-push a dummy pair standing in
++     * for the missing hardware push: a terminal RTS then consumes the
++     * dummies and the stack-lift rule exits with S exactly restored. If the
++     * RAM code exits another way with the dummies still on top (S one pair
++     * below entry), strip them so the transfer stays net-zero. */
+     if (addr < 0x2000 ||
+         (addr >= 0x6000 && addr < 0x8000 && mapper_get_type() != 40)) {
+-        if (interp_exit_handled(interp_run(addr)))
++        uint8_t s_entry = g_cpu.S;
++        g_ram[0x100 + g_cpu.S] = 0; g_cpu.S--;
++        g_ram[0x100 + g_cpu.S] = 0; g_cpu.S--;
++        int handled = interp_exit_handled(interp_run(addr));
++        if (g_cpu.S == (uint8_t)(s_entry - 2))
++            g_cpu.S = s_entry;
++        if (handled)
+             return 1;
+         fprintf(stderr, "[Interp] RAM/SRAM entry $%04X could not be interpreted\n", addr);
+         return 0;

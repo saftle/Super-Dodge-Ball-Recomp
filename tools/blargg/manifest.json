@@ -1,0 +1,31 @@
+{
+  "_comment": "blargg suite manifest for tools/blargg/run_blargg.py. Paths are relative to the nes-test-roms root (christopherpow/nes-test-roms @ master; exact filenames verified via GitHub API 2026-10-01, iNES headers read 2026-10-01). Tier 'cpu' = instruction/behavior tests that must all PASS (patch-impact signal). Tier 'info' = timing-sensitive tests reported but non-blocking (pre-existing runner timing gaps, not patch regressions). Measured mappers: 20x mapper-0 NROM (16 singles, cpu_timing_test6, 3 branch), 4x mapper-1 MMC1 (official_only, all_instrs, instr_timing, instr_misc), 1x mapper-3 CNROM (cpu_dummy_reads), 1x mapper-1 (ppu_vbl_nmi, info tier). The default NROM-only gate SKIPs banked mappers; --any-mapper builds them with a minimal game.toml (no bank_switch prophecy — diagnostics only).",
+  "roms": [
+    {"name": "instr_official_only", "path": "instr_test-v5/official_only.nes", "tier": "cpu"},
+    {"name": "instr_all", "path": "instr_test-v5/all_instrs.nes", "tier": "cpu"},
+    {"name": "instr_01_basics", "path": "instr_test-v5/rom_singles/01-basics.nes", "tier": "cpu"},
+    {"name": "instr_02_implied", "path": "instr_test-v5/rom_singles/02-implied.nes", "tier": "cpu"},
+    {"name": "instr_03_immediate", "path": "instr_test-v5/rom_singles/03-immediate.nes", "tier": "cpu"},
+    {"name": "instr_04_zero_page", "path": "instr_test-v5/rom_singles/04-zero_page.nes", "tier": "cpu"},
+    {"name": "instr_05_zp_xy", "path": "instr_test-v5/rom_singles/05-zp_xy.nes", "tier": "cpu"},
+    {"name": "instr_06_absolute", "path": "instr_test-v5/rom_singles/06-absolute.nes", "tier": "cpu"},
+    {"name": "instr_07_abs_xy", "path": "instr_test-v5/rom_singles/07-abs_xy.nes", "tier": "cpu"},
+    {"name": "instr_08_ind_x", "path": "instr_test-v5/rom_singles/08-ind_x.nes", "tier": "cpu"},
+    {"name": "instr_09_ind_y", "path": "instr_test-v5/rom_singles/09-ind_y.nes", "tier": "cpu"},
+    {"name": "instr_10_branches", "path": "instr_test-v5/rom_singles/10-branches.nes", "tier": "cpu"},
+    {"name": "instr_11_stack", "path": "instr_test-v5/rom_singles/11-stack.nes", "tier": "cpu"},
+    {"name": "instr_12_jmp_jsr", "path": "instr_test-v5/rom_singles/12-jmp_jsr.nes", "tier": "cpu"},
+    {"name": "instr_13_rts", "path": "instr_test-v5/rom_singles/13-rts.nes", "tier": "cpu"},
+    {"name": "instr_14_rti", "path": "instr_test-v5/rom_singles/14-rti.nes", "tier": "cpu"},
+    {"name": "instr_15_brk", "path": "instr_test-v5/rom_singles/15-brk.nes", "tier": "cpu"},
+    {"name": "instr_16_special", "path": "instr_test-v5/rom_singles/16-special.nes", "tier": "cpu"},
+    {"name": "instr_timing", "path": "instr_timing/instr_timing.nes", "tier": "cpu"},
+    {"name": "instr_misc", "path": "instr_misc/instr_misc.nes", "tier": "cpu"},
+    {"name": "cpu_timing_test6", "path": "cpu_timing_test6/cpu_timing_test.nes", "tier": "cpu"},
+    {"name": "cpu_dummy_reads", "path": "cpu_dummy_reads/cpu_dummy_reads.nes", "tier": "cpu"},
+    {"name": "branch_1_basics", "path": "branch_timing_tests/1.Branch_Basics.nes", "tier": "cpu"},
+    {"name": "branch_2_backward", "path": "branch_timing_tests/2.Backward_Branch.nes", "tier": "cpu"},
+    {"name": "branch_3_forward", "path": "branch_timing_tests/3.Forward_Branch.nes", "tier": "cpu"},
+    {"name": "ppu_vbl_nmi", "path": "ppu_vbl_nmi/ppu_vbl_nmi.nes", "tier": "info"}
+  ]
+}

@@ -1,0 +1,65 @@
+diff --git a/runner/src/main_runner.c b/runner/src/main_runner.c
+index 1dd7853..859a71f 100644
+--- a/runner/src/main_runner.c
++++ b/runner/src/main_runner.c
+@@ -1378,12 +1378,18 @@ smoke_skip_input:
+             nes_fring_push('N', (uint16_t)runtime_get_vblank_depth());
+             game_run_nmi();
+             nes_dring_mark('n', (uint16_t)runtime_get_vblank_depth());
+-            if (g_rti_target == 0) {
++            if (g_rti_target == 0 && g_cpu.S == s_pre) {
+                 g_cpu.S = s_pre;
+                 g_cpu.A = a_pre; g_cpu.X = x_pre; g_cpu.Y = y_pre;
+                 g_cpu.N = n_pre; g_cpu.V = v_pre; g_cpu.D = d_pre;
+                 g_cpu.I = i_pre; g_cpu.Z = z_pre; g_cpu.C = c_pre;
+             }
++            /* Else: RTS-terminated NMI tail (FDS-style: PLA/PLP/RTS unwind
++             * instead of RTI, e.g. Super Dodge Ball $FF4C) or an explicit
++             * TXS stack reset intentionally left S elsewhere. Rewinding
++             * S/registers would undo the unwind and re-enter the NMI-off
++             * spin the tail just escaped, so keep the handler's CPU state
++             * exactly like the RTI-hijack case above. */
+         } else {
+             /* Legacy: skip the handler (would corrupt mid-VRAM transfer
+              * state), but still set $1A/$20 to resolve any spin-wait (SMB).
+@@ -1433,12 +1439,38 @@ smoke_skip_input:
+              * the interrupted context. If the handler hijacked RTI, though,
+              * func_NMI has already run the hijacked post-NMI code as resumed
+              * game code; keep its CPU state instead of rewinding to the
+-             * interrupt-time snapshot. */
+-            if (g_rti_target == 0) {
++             * interrupt-time snapshot.
++             *
++             * RTS-terminated NMI tails (FDS-style PLA/RTS unwind, e.g. Super
++             * Dodge Ball $FF4C): the native RTS is a C return, so control
++             * would resume inside the NMI-off spin the tail just escaped.
++             * Honor the 6502 unwind instead: pop the return address the RTS
++             * skipped, resume the guest there at frame end (the C stack
++             * parked in the spin is discarded by the longjmp, exactly like
++             * the tail discards the 6502 stack). Fall back to the snapshot
++             * rewind when the popped target is not ROM. */
++            if (g_rti_target == 0 && g_cpu.S == s_pre_nmi) {
+                 g_cpu.S = s_pre_nmi;
+                 g_cpu.A = a_pre; g_cpu.X = x_pre; g_cpu.Y = y_pre;
+                 g_cpu.N = n_pre; g_cpu.V = v_pre; g_cpu.D = d_pre;
+                 g_cpu.I = i_pre; g_cpu.Z = z_pre; g_cpu.C = c_pre;
++            } else if (g_rti_target == 0) {
++                uint8_t rts_lo = g_ram[0x100 + ((uint8_t)(g_cpu.S + 1))];
++                uint8_t rts_hi = g_ram[0x100 + ((uint8_t)(g_cpu.S + 2))];
++                uint16_t unwind_target =
++                    (uint16_t)(((uint16_t)rts_hi << 8) | rts_lo) + 1;
++                g_cpu.S = (uint8_t)(g_cpu.S + 2);
++                fprintf(stderr, "[UNWIND] f=%llu target=$%04X\n",
++                        (unsigned long long)g_frame_count, unwind_target);
++                fflush(stderr);
++                if (unwind_target >= 0x8000)
++                    runtime_request_guest_resume(unwind_target, 0);
++                else {
++                    g_cpu.S = s_pre_nmi;
++                    g_cpu.A = a_pre; g_cpu.X = x_pre; g_cpu.Y = y_pre;
++                    g_cpu.N = n_pre; g_cpu.V = v_pre; g_cpu.D = d_pre;
++                    g_cpu.I = i_pre; g_cpu.Z = z_pre; g_cpu.C = c_pre;
++                }
+             }
+         }
+     }

@@ -1,0 +1,53 @@
+name: CI
+
+# ROM-less validation: the full game build needs a user-supplied ROM
+# (gitignored, never committed), so CI covers everything up to that point:
+# engine checkout + patch application, recompiler build, script syntax,
+# and config parsing.
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init nesrecomp submodule only
+        run: git submodule update --init external/nesrecomp
+
+      - name: Check runner patches are consistent with the pin
+        # The submodule pin already contains the patches, so on a fresh
+        # checkout they reverse-apply (already applied). Either direction
+        # passing means pin + patch files agree; both failing is a conflict.
+        run: |
+          for p in patches/*.patch; do
+            if git -C external/nesrecomp apply --check "$GITHUB_WORKSPACE/$p" 2>/dev/null; then
+              echo "applies clean: $p"
+            elif git -C external/nesrecomp apply --reverse --check "$GITHUB_WORKSPACE/$p" 2>/dev/null; then
+              echo "already in pin: $p"
+            else
+              echo "CONFLICT: $p vs submodule pin"; exit 1
+            fi
+          done
+
+      - name: Install build tools
+        run: sudo apt-get update -q && sudo apt-get install -qy cmake ninja-build
+
+      - name: Build recompiler (pure C11, no extra deps)
+        run: |
+          cmake -S external/nesrecomp/recompiler -B build-recompiler -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-recompiler
+
+      - name: Shell syntax (setup + helpers)
+        run: |
+          bash -n setup.sh
+          bash -n build_and_run.sh
+          bash -n tools/frame_gen/run_frames.sh
+
+      - name: Python compiles
+        run: python3 -m compileall -q compare_frames.py rom_to_asm.py run_roundtrip.py tools/
+
+      - name: game.toml parses
+        run: python3 -c "import tomllib; tomllib.load(open('src/game.toml','rb')); print('game.toml OK')"

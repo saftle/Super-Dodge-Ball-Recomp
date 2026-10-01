@@ -1,0 +1,8 @@
+[submodule "external/nesrecomp"]
+	path = external/nesrecomp
+	url = https://github.com/mstan/nesrecomp
+
+[submodule "external/mesence"]
+	path = external/mesence
+	url = https://github.com/nesdev-org/MesenCE
+	branch = master

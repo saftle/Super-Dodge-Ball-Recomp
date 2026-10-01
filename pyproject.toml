@@ -1,0 +1,29 @@
+[project]
+name = "super-dodgeball-recomp"
+version = "1.0.0"
+description = "Super Dodge Ball (NES) static recompilation via NESRecomp"
+requires-python = ">=3.10"
+dependencies = [
+    "nesasm>=0.0.8",
+    "lexical>=0.0.3",
+    "capstone>=5.0.7",
+    "py65>=1.2.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
+
+[tool.pip]
+require-hashes = false
+
+[tool.blargg]
+# Defaults for tools/blargg/run_blargg.py (CLI flags override all of these).
+# roms_dir is relative to the repo root.
+roms_dir = "external/nes-test-roms"
+max_frames = 3600
+wall_timeout = 120
+tier = "all"

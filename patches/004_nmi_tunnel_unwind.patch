@@ -1,0 +1,99 @@
+diff --git a/runner/include/nes_runtime.h b/runner/include/nes_runtime.h
+index 4d79561..1bc9811 100644
+--- a/runner/include/nes_runtime.h
++++ b/runner/include/nes_runtime.h
+@@ -6,6 +6,7 @@
+ #pragma once
+ #include <stdint.h>
+ #include <stdbool.h>
++#include <setjmp.h>
+ 
+ /* ---- CPU State ---- */
+ typedef struct {
+@@ -377,6 +378,18 @@ void maybe_fire_pending_vblank(void);
+ void runtime_set_vblank_firing(int active);
+ int  runtime_get_vblank_depth(void);
+ void runtime_note_interrupt_entry(void);
++uint16_t runtime_get_guest_pc(void);
++
++/* NMI-tunnel unwind (opt-in, default off): some games relocate their main
++ * loop from inside the NMI handler via LDX #$FF; TXS; JMP <main> (here the
++ * title→menu tunnel at the scheduler-loop TXS site). A C-call into the main
++ * loop never returns, freezing frame advancement. When armed with a TXS-site
++ * address, a scheduler-loop marker reached inside NMI unwinds via longjmp to
++ * the armed main-context landing instead. Zero effect unless a game arms it
++ * (g_tunnel_site = 0 disables). Re-arm per tunnel; single-shot on fire. */
++extern jmp_buf g_tunnel_buf;
++extern volatile int g_tunnel_armed;
++extern volatile uint16_t g_tunnel_site;
+ uint64_t runtime_get_interrupt_epoch(void);
+ void runtime_reset_vblank_depth(void);
+ void runtime_begin_post_nmi(void);
+diff --git a/runner/src/coroutine.c b/runner/src/coroutine.c
+index 3323e22..8798f99 100644
+--- a/runner/src/coroutine.c
++++ b/runner/src/coroutine.c
+@@ -13,6 +13,30 @@
+ #include <stdio.h>
+ #include <stdlib.h>  /* getenv (NESRECOMP_NO_COROUTINE diagnostic gate) */
+ 
++/* NMI-tunnel unwind storage (see nes_runtime.h). Opt-in; all zero/off.
++ * Shared scope: used by both the fiber and ucontext implementations. */
++jmp_buf g_tunnel_buf;
++volatile int g_tunnel_armed = 0;
++volatile uint16_t g_tunnel_site = 0;
++
++/* Shared tunnel check for both implementations: a TXS-site marker reached
++ * while armed, at the registered site, inside NMI means the game is
++ * relocating its main loop out of the handler — unwind to the main-context
++ * landing instead of C-calling forever. Single-shot. */
++static void tunnel_check_unwind(void) {
++    if (!g_tunnel_armed || !g_tunnel_site)
++        return;
++    if (runtime_get_guest_pc() != g_tunnel_site)
++        return;
++    if (runtime_get_vblank_depth() <= 0)
++        return;
++    g_tunnel_armed = 0;
++    fprintf(stderr, "[TUNNEL] NMI-tunnel unwind at $%04X (frame %llu)\n",
++            (int)g_tunnel_site, (unsigned long long)g_frame_count);
++    runtime_reset_vblank_depth();
++    longjmp(g_tunnel_buf, 1);
++}
++
+ #ifdef _WIN32
+ #include <windows.h>
+ 
+@@ -124,6 +148,7 @@ int coroutine_scheduler_setjmp(void)
+      * coroutine subsystem never activates. Used to confirm that a routine
+      * misdetected as a scheduler (LDX #$FF; TXS) is the cause of a bug. */
+     if (getenv("NESRECOMP_NO_COROUTINE")) return 0;
++    tunnel_check_unwind();
+     if (!s_active) {
+         s_active = 1;
+         /* Convert main thread to fiber (required for SwitchToFiber) */
+@@ -368,6 +393,7 @@ static void coroutine_entry(void)
+ 
+ int coroutine_scheduler_setjmp(void)
+ {
++    tunnel_check_unwind();
+     if (!s_active)
+         s_active = 1;
+ 
+diff --git a/runner/src/runtime.c b/runner/src/runtime.c
+index dc3df1d..512dfde 100644
+--- a/runner/src/runtime.c
++++ b/runner/src/runtime.c
+@@ -986,6 +986,12 @@ static void set_guest_execution_point(uint16_t cpu_pc, int tick_charged) {
+     s_guest_tick_charged = tick_charged ? 1 : 0;
+ }
+ 
++/* Current guest PC as of the last instruction boundary (for the NMI-tunnel
++ * unwind site check). */
++uint16_t runtime_get_guest_pc(void) {
++    return s_guest_pc;
++}
++
+ /* [LOOP] trace state (NESRECOMP_TRACE_LOOP) */
+ static unsigned     s_loop_iters   = 0;
+ static uint16_t     s_loop_last_pc = 0;

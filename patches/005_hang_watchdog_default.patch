@@ -1,0 +1,51 @@
+diff --git a/runner/src/runtime.c b/runner/src/runtime.c
+index dc3df1d..ee26a7a 100644
+--- a/runner/src/runtime.c
++++ b/runner/src/runtime.c
+@@ -1155,18 +1161,29 @@ void maybe_trigger_vblank(int cycles) {
+         s_dbg_cycles_ticked += _c;
+         s_dbg_instrs_ticked++;
+     }
+-    /* Hang watchdog (env NESRECOMP_HANG_TIMEOUT_S): a hang that never reaches
+-     * a frame boundary starves every observability surface (the TCP poll runs
+-     * per frame), so probe the wall clock here on the instruction stream and
+-     * dump the dispatch ring + vblank state before exiting. Off by default. */
++    /* Hang watchdog: a hang that never reaches a frame boundary starves
++     * every observability surface (the TCP poll runs per frame), so probe
++     * the wall clock here on the instruction stream and dump the dispatch
++     * ring + vblank state before exiting. Idle-based: fires after N seconds
++     * with no completed frame (default 90; NESRECOMP_HANG_TIMEOUT_S
++     * overrides, 0 disables). Frames complete continuously in every
++     * non-hung state (even idle title), so this only fires on real hangs. */
+     {
+-        static long long s_hang_deadline = -2;   /* -2 uninit, -1 disabled */
+-        if (s_hang_deadline == -2) {
++        static long long s_hang_timeout = -2;   /* -2 uninit */
++        static long long s_hang_last = 0;
++        static unsigned long long s_hang_frame = 0;
++        if (s_hang_timeout == -2) {
+             const char *e = getenv("NESRECOMP_HANG_TIMEOUT_S");
+-            s_hang_deadline = (e && *e) ? (long long)time(NULL) + atoll(e) : -1;
++            s_hang_timeout = (e && *e) ? atoll(e) : 90;
++            s_hang_last = (long long)time(NULL);
++            s_hang_frame = (unsigned long long)g_frame_count;
+         }
+-        if (s_hang_deadline > 0 && (s_dbg_instrs_ticked & 0xFFFFF) == 0 &&
+-            (long long)time(NULL) > s_hang_deadline) {
++        if ((s_dbg_instrs_ticked & 0xFFFFF) == 0) {
++            long long now = (long long)time(NULL);
++            if ((unsigned long long)g_frame_count != s_hang_frame) {
++                s_hang_frame = (unsigned long long)g_frame_count;
++                s_hang_last = now;
++            } else if (s_hang_timeout > 0 && now - s_hang_last > s_hang_timeout) {
+             extern uint64_t g_frame_count;
+             fprintf(stderr, "[HANG] wall-clock timeout: frame=%llu vblank_depth=%d "
+                     "ops=%u budget=%u pending=%d depth_skips=%llu\n",
+@@ -1199,6 +1216,7 @@ void maybe_trigger_vblank(int cycles) {
+             }
+             fflush(stderr); fflush(stdout);
+             exit(42);
++            }
+         }
+     }
+ 

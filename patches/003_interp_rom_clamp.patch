@@ -1,0 +1,22 @@
+--- a/runner/src/interp.c
++++ b/runner/src/interp.c
+@@ -740,7 +740,18 @@
+             nes_dispatch_miss_interp_declined(addr, "non-code dispatch target");
+             return 0;
+         }
+-        if (interp_exit_handled(interp_run(addr))) return 1;   /* handled by fallback */
++        /* Phantom-pop guard (see RAM path above): a native JSR site pushes
++         * no 6502 return address, so a terminal RTS inside the interpreted
++         * run would pop two live-caller bytes (observed +2 S per call at a
++         * match-transition state machine, cascading into bank thrash and
++         * hang). Net pops are erased on a handled exit; persisting pushes
++         * are kept (hardware-faithful). One-sided: never touches S when
++         * the run pushed more than it popped. */
++        { uint8_t s_entry = g_cpu.S;
++          int handled = interp_exit_handled(interp_run(addr));
++          if (handled && (int8_t)(g_cpu.S - s_entry) > 0)
++              g_cpu.S = s_entry;
++          if (handled) return 1; }  /* handled by fallback */
+         s_stats.policy_traps++;
+         nes_dispatch_miss_interp_declined(addr, s_last_decline_reason);
+         return 0;
