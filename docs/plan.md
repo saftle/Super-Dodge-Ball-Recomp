@@ -1,21 +1,23 @@
 # Super Dodgeball NES Recompilation — Project Plan
 
-> Title plays through team-select; the court BG draw is the current frontier.
+> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Frontier: court verification past team-select, then enhancements (widescreen, flicker fix).
 
 ## Where Things Stand
 
-- **Title**: 99.8% structural match vs Mesen frame 11 from frame 1, `smoke 30` exit 0. NMI-wait spin handled game-side via split `[[replace_func]] $FCA0` (instant pre-menu, faithful park post-tunnel); `$0100` untouched so EFD9/EF9F run every frame.
-- **Input**: Start tunnels reliably to team-select (title → city → lineup → mode menu → skill → team-select, renders perfectly, music perfect, all inputs process). Verified to 400 frames with only benign `$A3C7` interp skips (LOG_RETURN-safe).
-- **Frontier**: court BG draws as tile-soup past team confirm (sprites/sound/logic run; strips drain top rows only). Mode-menu confirm diverges ~TAS frame 44 of TASVideos #4976 (hardware advances to team-select, recomp stays) — next debug target (`$06B1`/`$F5` edge trace, see research §21).
-- **Runner patches** `002/003/004/005` active (`001` archived dormant with revival conditions).
+- **Backend**: cycle-accurate (`./build_and_run.sh` → `build-cycle/nes_game`, upstream `runner/cyc`). No game hooks, no patches — stock ROM on accurate timing. The legacy runner is retired (files removed 2026-10-02, backup in `/tmp/legacy_backup/` + git history; game knowledge preserved in research §§18–19).
+- **Verification**: TAS 400 frames reach team-select with RAM/OAM/palette/CIRAM byte-exact vs Mesen from boot (`tools/tas/`); blargg cpu tier 25/25 (20 RAM-text PASS + 5 screen-confirmed).
+- **Upstream**: maintainer is moving to cycle-default; legacy goes antiquated. Our migration is done early. The one legacy artifact worth saving is patch 002 (S-latch guard) — proposed upstream below, then it lapses with the rest.
+- **Frontier**: court BG past team-select is unverified on cycle; after that, enhancements.
 
 ## Open Items
 
-1. Mode-menu confirm divergence ~TAS frame 44 (see research §21).
-2. Court BG stalls as tile-soup past team confirm (see research §19).
-3. Whether post_nmi `func_DB4E` is still load-bearing for frame advancement (untested).
-4. C-stack lap growth (cross-function loop laps, ~5 C-frames/frame) — slow-burn; `merge_range` blocked on recompiler dedup.
-5. `docs/known-issues.md` and `src/game.discovery.toml` still to create.
+1. Court BG past team-select — verify on cycle via full-run TAS vectors (game runs underneath on legacy evidence; confirm on cycle).
+2. Propose 002 S-latch guard upstream (draft below), then done with patches forever.
+3. Widescreen via `HOST_EXTRAS` custom compositor (SMB pattern: stock center authoritative, host re-draws margins).
+4. Flicker fix via `[[mod_function_hook]]`: capture pre-cull OAM at the cull routine, draw host-side, suppress native slots. First step is locating the OAM-cull routine.
+5. Resolution honesty: wider canvas only — no upscaling path exists upstream (CHR PNG replacement at most). Don't promise HD.
+6. Submodule stays pristine (`git -C external/nesrecomp status` clean; reset 2026-10-02).
+7. Docs reconciled to cycle (README, AGENTS.md, plan, research §§21–22, harness READMEs); research §§18–19 stay as game-knowledge history.
 
 ## What Other Successful NESRecomp Projects Do Differently
 
@@ -112,38 +114,41 @@ Booting is not done. A useful bring-up checklist: file identity works, title scr
 
 ### Iterative Testing Procedure
 
-After any code change to `src/extras.c` or `src/game.toml`:
+After any `src/game.toml` change (display name, discovery, seeds):
 
-1. **Regen (if `game.toml` changed)**: run the recompiler manually (cmake does not reliably retrigger) and confirm `[Eval] Coverage` with no parse error
-2. **Rebuild**: `cmake --build build -j$(nproc)`
-3. **Smoke**: `timeout 25 ./build/super_dodgeball "roms/Super Dodge Ball (USA).nes" --smoke 5 --smoke-interval 1` — must exit 0 with `frames_run` ≥ requested and 0 dispatch misses
-4. **Compare**: `--save-screenshot` + `tools/compare_frames.py` vs `nes_reference/` — frame 11 structural match ≥90% (current ~99.8%)
+1. **Rebuild**: the cyc project reconfigures on ROM/config change — `cmake --build build-cycle -j$(nproc)` (each revision gets its own generated dir; old ones can be discarded with the build dir).
+2. **TAS**: `python3 tools/tas/run_tas.py --tas tas/sdb_4976.tas.json --frames 400 --out tas/runs/rXXX` + `diff_tas.py` — liveness 400/400 exit 0, state MATCH (mirrors masked), images informational.
+3. **Engine changes** (submodule bumps): add `python3 tools/blargg/run_blargg.py --tier cpu` — 25/25 (20 PASS + 5 screen-confirmed) required; any flip blocks.
 
-**Known baseline**: 30 frames, exit 0, static title hash `a84564b5`, 0 misses. Menus to team-select verified via `tools/input/title_to_team_select.txt` (400 frames; only benign `$A3C7` interp skips).
+**Known baseline**: cyc 400 TAS frames → team-select, state byte-exact vs Mesen (RAM/OAM/palette/CIRAM, mirrors masked); blargg 25/25.
 
 ---
 
-## Detailed Action Items
+## Backend Decision Record (2026-10-02: cycle default, legacy retired)
 
-### Completed Foundation (title, NMI, input, config — see research §19 for the how)
+The cycle backend runs the stock ROM flawlessly (team-select matching Mesen, 25/25 blargg) with zero game-specific work. The legacy function-level runner is retired: `src/extras.c`, `src/CMakeLists.txt`, `patches/`, `tools/input/`, `tools/blargg/{blargg_extras.c,selftest}`, `tools/tas/{emit_script.py,edgewatch.lua}` removed (backup: `/tmp/legacy_backup/` + git history). Game knowledge (NMI dispatcher, tunnel mechanics, input path) lives on in research §§18–19 and transfers to mod work. `setup.sh` no longer applies patches or builds legacy; `./build_and_run.sh` targets cycle.
 
-- nesrecomp submodule tracks `origin/master` (+ runner patches `002,003,004,005`; `001` archived dormant)
-- Title renders via the real NMI path (`func_NMI()` gated on PPUCTRL bit 7, nested `$C0`-only policy, one-service-per-frame pacing); split `[[replace_func]] $FCA0`; Start tunnels past title (`[TUNNEL]` at frame 10) via longjmp unwind, `$F09F` native on the main context
-- `game.toml` minimal by design (no `sram_map`, empty `force_interp`, dis65-verified `extra_func`, two `[[replace_func]]`); `func_RESET()` runs natively with no RAM pre-seeding
-- Verification infrastructure: MesenCE reference frames + `--save-screenshot` comparison, TAS differential harness (`tools/tas/`), blargg engine suite (`tools/blargg/`), raw `--testRunner` + Lua oracle, `tools/dis65.py` + `memwatch.lua`
+## Upstream Proposal: 002 S-latch guard (to send, then lapse the rest)
 
-### Game Loop & Gameplay (frontier work)
+- **Symptom**: interpreter RTS after native JSR lifted S +6..+48/call, clobbered `$0106` to `$90` (polls died), corrupted A into the MMC1 bit-bang (bank-8 `$8003` miss), BRK slides (`$0001`/`$00A2`/`$0600`).
+- **Root**: native C calls push no 6502 return address; the `$86C2 JMP $07B4` RAM trampoline runs via interp dispatch whose terminal RTS pops 2 live-caller bytes per trampoline (3/frame).
+- **Fix** (`002_interp_ram_dummy`): in `nes_interp_dispatch_bank`'s RAM/SRAM path, pre-push a dummy 6502-stack pair before `interp_run`, strip on exit if untouched — terminal RTS consumes dummies, S restored exactly.
+- **Evidence**: post-fix `$0106` clean, balanced S, 0 misses, 0 BRKs (research §19.1). Patches 003 (companion clamp), 004 (game-specific tunnel), 005 (watchdog taste) lapse.
+- **Status**: [ ] proposed upstream; on acceptance or legacy-drop, delete local copies (already removed from tree).
 
-- [ ] Mode-menu confirm divergence ~TAS frame 44 (`$06B1`/`$F5` edge trace; see research §21)
-- [ ] Court BG tile-soup past team confirm (main-area rows never staged; see research §19)
-- [ ] Re-verify whether post_nmi `func_DB4E` is still load-bearing (untested)
-- [ ] `func_D98A` stays out of the NMI path until gameplay boots (do NOT `force_interp` blindly)
-- [ ] Verify `func_FE34()` (sound) works from `game_run_nmi()`; verify `func_FE8A` via recompiled code
-- [ ] Verify OAM flicker fix extends from title to gameplay
-- [ ] TCP debug server in `extras.c` (port 4370): read RAM, breakpoints, registers
+## Enhancement Roadmap
 
-### Verification Follow-ups
+Principle from SMB (reference implementation): rendering never changes guest edges — game logic runs stock, the host re-draws. All three items build on `HOST_EXTRAS` + `[[mod_function_hook]]` (content-keyed, no game bytes in repo).
 
-- [ ] TAS harness: full-19k storage policy; `fm2` vectors if any appear
-- [ ] blargg harness: `nestest` (`$C0
+1. **Widescreen** (supported mechanism, real work): custom compositor (256 → 426/560/854, pillarbox fallback for menus), stock center pass authoritative, margins re-drawn from observed world + captured sprites. Port the SMB pattern.
+2. **Flicker fix** (no toggle exists anywhere — Method 2 strips sprites in-game): locate the OAM-cull routine → hook it → capture pre-cull OAM → draw host-side → suppress native flicker slots. Same machinery as widescreen; one project, two consumers. Note: the cycle PPU implements real 8-sprite evaluation, so keeping sprites in OAM is not enough — host-side drawing is the robust fix.
+3. **Resolution** (honest limit): wider canvas, same chunky pixels. No upscaling path upstream (CHR PNG replacement only). Don't promise HD.
+
+## Removed Legacy Action Items (retired with the backend — kept as a struck record)
+
+- ~~Mode-menu confirm divergence (legacy transition pacing)~~ — moot on cycle.
+- ~~`func_DB4E` load-bearing, `func_D98A` NMI path, `func_FE34`/`FE8A` checks, OAM-fix extension, TCP server in `extras.c`~~ — legacy-code questions; extras.c deleted.
+- ~~C-stack lap growth / `merge_range` dedup~~ — legacy codegen shape; cycle blocks don't lap.
+- ~~`game.discovery.toml`, `known-issues.md` creation~~ — superseded (seeds replace discovery tuning; this plan is the issues list).
+- Kept: TAS full-19k storage policy; `fm2` vectors if any appear; `nestest` entry-point work (all backend-agnostic).
 ...[truncated 1583 chars]

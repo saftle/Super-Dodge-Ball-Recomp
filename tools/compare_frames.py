@@ -121,7 +121,7 @@ def compare_frames(ref_dir, recomp_dir, num_frames, output_file=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Compare NES frames (Mesen reference vs recompiled)')
     parser.add_argument('--ref', default='nes_reference', help='Reference frame directory (from Mesen)')
-    parser.add_argument('--recomp', default='recomp_output', help='Recompiled frame directory (from --save-screenshot)')
+    parser.add_argument('--recomp', default='cyc_shots', help='Cycle screenshot directory (from --shot-every)')
     parser.add_argument('--frames', type=int, default=10, help='Number of frames to compare')
     parser.add_argument('--output', default=None, help='CSV output file')
     args = parser.parse_args()

@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
-"""diff_tas.py — first-divergence report for a TAS run dir.
+"""diff_tas.py — first-divergence report for a TAS run dir (cycle backend).
 
 Usage:
   python3 tools/tas/diff_tas.py tas/runs/r400 [--image-threshold 90]
 
 Layers (stops at first red):
-  1. liveness: recomp rc, frames_run == requested, [HANG] scan, dispatch misses
-  2. cosim chain: first f where any recomp sub-hash changes run-over-run
-     (A-vs-A determinism) — cross-side sub-hash compare needs mesen-side
-     hashing (future); today reports recomp chain + WRAM/PPU deltas
-  3. WRAM/PPUMEM delta streams: first frame with changes, top addrs
-  4. images: mesen_*.ppm vs recomp shots/frame_*.png (stride-aware join),
-     palette-index structural match via compare_frames.image_to_palette_indices
+  1. liveness: cyc rc 0, logged frames == requested
+  2. state (primary cross-side signal): CYCFRAME snapshots (CPU RAM, CIRAM,
+     palette indices, OAM) byte-compared against Mesen bins, joined on
+     video-frame index. No stack masking: the cycle CPU pushes real return
+     addresses, so the stack page must match too.
+  3. images (informational): cyc shot_*.png vs mesen mesen_*.ppm —
+     cross-renderer RGB always differs by palette emulation; same-index only.
 
-Exit 0 iff liveness green; image/chain findings are reported, not gated (yet).
+Exit 0 iff liveness green; state/image findings are reported, not gated (yet).
 """
 import glob
 import json
 import os
+import struct
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from compare_frames import image_to_palette_indices  # noqa: E402
+from tools.compare_frames import image_to_palette_indices  # noqa: E402
 import numpy as np
 from PIL import Image
 
@@ -37,49 +38,60 @@ def load_jsonl(path):
                         rows.append(json.loads(line))
                     except json.JSONDecodeError:
                         print(f"NOTE {path}:{lineno}: skipping unparseable line")
-                # else: header/comment lines (e.g. apu.jsonl "cycle,addr,val")
     return rows
 
 
-def replay_deltas(path, size):
-    """Reconstruct per-frame full images from a WRAM/PPUMEM delta trace.
+def parse_frame_log(path):
+    """Parse CYCFRAME v2 log -> {frame: {ram, ciram, pal, oam}}.
 
-    Returns {frame: bytearray}. Frame rows carry full baseline; later rows
-    only changed bytes (applied cumulatively)."""
-    if not os.path.exists(path):
-        return {}
-    cur = bytearray(size)
+    Header: "CYCFRAME" + u32 version(2); per frame: u32 frame, u32 cycles_lo,
+    u32 cycles_hi, u32 lengths[6] (ram, ciram, cart, chr, picture, fds-audio),
+    u8 pal[32], u8 oam[256], then blobs (ram 0x800, ciram, cart?, chr?,
+    picture u16[], audio?). Picture/cart blobs are skipped (lengths known).
+    """
     out = {}
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            a = int(r["adr"], 16)
-            if 0 <= a < size:
-                cur[a] = int(r["val"], 16)
-            out[int(r["f"])] = bytearray(cur)
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return out
+    if data[:8] != b"CYCFRAME":
+        print(f"NOTE {path}: bad magic — skipped")
+        return out
+    (ver,) = struct.unpack_from("<I", data, 8)
+    if ver != 2:
+        print(f"NOTE {path}: version {ver} != 2 — skipped")
+        return out
+    pos = 12
+    while pos + 36 + 32 + 256 <= len(data):
+        (fr, _, _, lr, lc, lcart, lchr, lpict, laud) = struct.unpack_from("<9I", data, pos)
+        pos += 36
+        pal = data[pos:pos + 32]
+        pos += 32
+        oam = data[pos:pos + 256]
+        pos += 256
+        ram = data[pos:pos + 0x800]
+        pos += 0x800
+        ciram = data[pos:pos + lc]
+        pos += lc
+        pos += lcart + lchr + lpict + laud
+        if len(ram) < 0x800 or len(ciram) < lc:
+            break
+        out[fr] = {"ram": ram, "ciram": ciram, "pal": pal, "oam": oam}
     return out
 
 
 def diff_state(rundir):
     """Renderer-independent cross-side gate: guest memory byte-compare.
 
-    Recomp WRAM/PPUMEM delta traces are replayed to full per-vframe images
-    and compared against Mesen's per-stride bin dumps. Joins on video-frame
-    index (recomp g_cosim_vframe / mesen f), never wall-clock. Stack page
-    ($0100-$01FF) masked: native JSR pushes nothing cross-impl (expected-diff).
-    Returns True iff all compared frames match (or nothing comparable)."""
-    out_r = os.path.join(rundir, "recomp")
+    Cycle snapshots (real CPU state, stack included) vs Mesen bins, joined
+    on video-frame index. Returns True iff all compared frames match
+    (or nothing comparable).
+    """
+    out_c = os.path.join(rundir, "cyc")
     out_m = os.path.join(rundir, "mesen")
-    wram = replay_deltas(os.path.join(out_r, "wram.jsonl"), 0x800)
-    ppu = replay_deltas(os.path.join(out_r, "ppu.jsonl"), 0xA00)
-    if not wram and not ppu:
-        print("state: no recomp traces — skipped")
+    cyc = parse_frame_log(os.path.join(out_c, "frames.bin"))
+    if not cyc:
+        print("state: no cycle snapshots — skipped")
         return True
     bins = sorted(glob.glob(os.path.join(out_m, "mesen_*.ram.bin")))
     if not bins:
@@ -88,28 +100,33 @@ def diff_state(rundir):
     ok, ncmp = True, 0
     for bp in bins:
         f = int(os.path.basename(bp).split("_")[1].split(".")[0])
-        if f in wram:
-            a = wram[f]
-            b = open(bp, "rb").read()
-            # stack page masked (expected cross-impl diff)
-            diff = [ad for ad in range(0x800)
-                    if not (0x100 <= ad < 0x200) and a[ad] != b[ad]]
-            ncmp += 1
-            if diff:
-                ok = False
-                show = " ".join(f"${ad:04X}(r={a[ad]:02X},m={b[ad]:02X})" for ad in diff[:8])
-                print(f"  state RAM f={f}: {len(diff)} bytes differ (stack masked): {show}")
-        if f in ppu:
-            p = ppu[f]
-            oam = open(bp.replace(".ram.bin", ".oam.bin"), "rb").read()
-            pal = open(bp.replace(".ram.bin", ".pal.bin"), "rb").read()
-            ncmp += 1
-            do = sum(1 for i in range(0x100) if p[i] != oam[i])
-            dp = sum(1 for i in range(0x20) if p[0x100 + i] != pal[i])
-            if do or dp:
-                ok = False
-                print(f"  state PPU f={f}: OAM {do}/256 differ, pal {dp}/32 differ")
-    print(f"state: {ncmp} frame-surfaces compared — {'MATCH' if ok else 'DIVERGE'}")
+        if f not in cyc:
+            continue
+        s = cyc[f]
+        b = open(bp, "rb").read()
+        ncmp += 1
+        diff = [ad for ad in range(min(0x800, len(b))) if s["ram"][ad] != b[ad]]
+        if diff:
+            ok = False
+            show = " ".join(f"${ad:04X}(c={s['ram'][ad]:02X},m={b[ad]:02X})" for ad in diff[:8])
+            print(f"  state RAM f={f}: {len(diff)} bytes differ: {show}")
+        oam = open(bp.replace(".ram.bin", ".oam.bin"), "rb").read()
+        pal = open(bp.replace(".ram.bin", ".pal.bin"), "rb").read()
+        cir = open(bp.replace(".ram.bin", ".ciram.bin"), "rb").read()
+        do = sum(1 for i in range(min(0x100, len(oam))) if s["oam"][i] != oam[i])
+        # Sprite entry-0 bytes ($3F10/$3F14/$3F18/$3F1C) are the same physical
+        # byte as the backdrop ($3F00) on hardware; Mesen exposes the mirror,
+        # the cycle palette RAM keeps stale power-on bytes there (hw_ppu.c
+        # writes index (vbus & 0x0F) only). Masked; index 0 must still match.
+        MIRRORS = {16, 20, 24, 28}
+        dp = sum(1 for i in range(min(0x20, len(pal)))
+                 if i not in MIRRORS and s["pal"][i] != pal[i])
+        n = min(len(cir), len(s["ciram"]))
+        dc = sum(1 for i in range(n) if s["ciram"][i] != cir[i])
+        if do or dp or dc:
+            ok = False
+            print(f"  state PPU f={f}: OAM {do}/256 differ, pal {dp}/32 differ, ciram {dc}/{n} differ")
+    print(f"state: {ncmp} frames compared — {'MATCH' if ok else 'DIVERGE'}")
     return ok
 
 
@@ -119,43 +136,31 @@ def main():
     if "--image-threshold" in sys.argv:
         thr = float(sys.argv[sys.argv.index("--image-threshold") + 1])
     run = json.load(open(os.path.join(rundir, "run.json")))
-    out_r = os.path.join(rundir, "recomp")
+    out_c = os.path.join(rundir, "cyc")
     out_m = os.path.join(rundir, "mesen")
-    print(f"TAS frames={run['tas_frames']} mesen_rc={run['mesen_rc']} recomp_rc={run['recomp_rc']}")
+    cyc = run.get("cyc") or {}
+    print(f"TAS frames={run['tas_frames']} mesen_rc={run['mesen_rc']} cyc={cyc}")
 
     # 1. liveness
     ok = True
-    smoke = {}
-    sp = os.path.join(out_r, "smoke.json")
-    if os.path.exists(sp):
-        smoke = json.load(open(sp))
-        print(f"smoke: frames_run={smoke.get('frames_run')} "
-              f"misses={smoke.get('dispatch_miss_count')} unique={smoke.get('dispatch_miss_unique')} "
-              f"miss_keys={smoke.get('dispatch_miss_keys')}")
-        if smoke.get("frames_run") != run["tas_frames"]:
-            print(f"RED liveness: frames_run {smoke.get('frames_run')} != {run['tas_frames']}")
-            ok = False
-        if smoke.get("dispatch_miss_count"):
-            print("RED liveness: dispatch misses nonzero")
-            ok = False
-    else:
-        print("RED liveness: no smoke.json (hang/crash — see recomp/recomp.log)")
+    if cyc.get("rc") != 0:
+        print(f"RED liveness: cycle run rc={cyc.get('rc')}")
         ok = False
-    logp = os.path.join(out_r, "recomp.log")
+    if cyc.get("frames") != run["tas_frames"]:
+        print(f"RED liveness: cycle frames {cyc.get('frames')} != {run['tas_frames']}")
+        ok = False
+    print(f"cycle native: {cyc.get('native_pct')}%")
+    logp = os.path.join(out_c, "cyc.log")
     if os.path.exists(logp):
         log = open(logp).read()
-        for sig in ("[HANG]", "[TUNNEL]", "BRK"):
-            n = log.count(sig)
-            if n:
-                print(f"log: {sig} x{n}")
         if "[HANG]" in log:
+            print("RED liveness: [HANG] in cyc log")
             ok = False
-
-    # 2/3. recomp trace streams
-    for name in ("cosim.jsonl", "wram.jsonl", "ppu.jsonl", "apu.jsonl"):
-        p = os.path.join(out_r, name)
-        rows = load_jsonl(p)
-        print(f"recomp/{name}: {len(rows)} rows" + (f" first_f={rows[0].get('f')}" if rows else ""))
+    for name in ("miss.txt",):
+        p = os.path.join(out_c, name)
+        if os.path.exists(p):
+            n = sum(1 for ln in open(p) if ln.strip() and not ln.startswith("#"))
+            print(f"cyc/{name}: {n} uncompiled-seed lines")
 
     # mesen side
     mstate = load_jsonl(os.path.join(out_m, "mesen_state.jsonl"))
@@ -163,24 +168,26 @@ def main():
     if mstate and len(mstate) != run["tas_frames"]:
         print(f"NOTE mesen rows {len(mstate)} != {run['tas_frames']} (early emu.stop?)")
 
-    # 4. renderer-independent state gate (primary cross-side signal)
+    # 2. state gate (primary cross-side signal)
     if not diff_state(rundir):
         ok = False
 
-    # 5. images, secondary: cross-renderer RGB always differs by palette
-    # emulation; same-index only, informational (see state gate above)
-    ppms = sorted(glob.glob(os.path.join(out_m, "mesen_*.ppm")))
-    print(f"image pairs: {len(ppms)} mesen dumps, threshold {thr}% (informational)")
+    # 3. images, secondary: cross-renderer RGB always differs by palette
+    # emulation; same-index only, informational
+    shots = sorted(glob.glob(os.path.join(out_c, "shots", "shot_*.png")))
+    print(f"image pairs: {len(shots)} cyc shots, threshold {thr}% (informational)")
     worst = None
-    for ppm in ppms:
-        base = os.path.basename(ppm)
-        f = int(base.split("_")[1].split(".")[0])
-        rp = os.path.join(out_r, "shots", f"frame_{f:04d}.png")
-        if not os.path.exists(rp):
-            print(f"  f={f}: missing recomp shot")
+    for sp in shots:
+        base = os.path.basename(sp)
+        try:
+            f = int(base.split("_")[1].split(".")[0])
+        except (IndexError, ValueError):
             continue
-        ref = np.array(Image.open(ppm).convert("RGB"))
-        rec = np.array(Image.open(rp).convert("RGB"))
+        mp = os.path.join(out_m, f"mesen_{f:05d}.ppm")
+        if not os.path.exists(mp):
+            continue
+        ref = np.array(Image.open(mp).convert("RGB"))
+        rec = np.array(Image.open(sp).convert("RGB"))
         if ref.shape != rec.shape:
             print(f"  f={f}: shape {ref.shape} vs {rec.shape} — skipped")
             continue
@@ -190,7 +197,7 @@ def main():
         flag = "" if pct >= thr else "  <-- BELOW THRESHOLD"
         if worst is None or pct < worst[1]:
             worst = (f, pct)
-        if flag or f < 3 or f % 50 == 0:
+        if flag or f < 2:
             print(f"  f={f}: palette_idx {pct:5.1f}%{flag}")
     if worst:
         print(f"worst frame: f={worst[0]} {worst[1]:.1f}%")

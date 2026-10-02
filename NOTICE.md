@@ -19,13 +19,13 @@ carries its own license and third-party attribution. `external/mesence`
 never committed) likewise carries its own license; see that repository.
 
 **SDL2** is a system dependency resolved at configure time
-(`find_package(SDL2)` in `src/CMakeLists.txt`) and is not shipped here.
-`src/third_party/SDL2/`, if present on a machine, is a local gitignored
-build artifact only — never committed. SDL2 itself is zlib-licensed,
+(`-DSDL2_DIR` pointing at the system SDL2 CMake config for the cycle build)
+and is not shipped here. SDL2 itself is zlib-licensed,
 Copyright Sam Lantinga and contributors.
 
-**Runner patches** (`patches/*.patch`) target the NESRecomp runner above and
-are used under the same PolyForm Noncommercial terms.
+**Archived runner patches** (`patches/archived/*.patch`) targeted the retired
+legacy runner and apply to nothing; they are used under the same PolyForm
+Noncommercial terms. See `patches/README.md`.
 
 ## Game content
 

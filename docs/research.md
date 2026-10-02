@@ -849,10 +849,13 @@ verdicts and HANG stall frames); details in `tools/blargg/README.md`.
 
 ---
 
-## 21. TAS-integrated differential harness (2026-10-01, `tools/tas/`)
+## 21. TAS-integrated differential harness (`tools/tas/`)
 
-Shared-input co-sim closing the loop from §§12/16: one TAS drives both the
-MesenCE oracle and the recomp; diffs land on the first divergence.
+Shared-input co-sim: one TAS drives both the MesenCE oracle and the cycle
+backend; diffs land on the first divergence. (Early design ran the legacy
+runner via `--script` + smoke JSON + WRAM/PPUMEM deltas with stack masking —
+retired with the cycle switch; the join-validation and metric lessons below
+survived it.)
 
 - **Vectors**: TASVideos #4976 (ShesChardcore & Dasrik 2022, BizHawk 2.8,
   19692 frames, hardest difficulty) in `tas/vectors/sdb_4976.bk2` —
@@ -862,33 +865,54 @@ MesenCE oracle and the recomp; diffs land on the first divergence.
   binary logs and is validated on an SMB2 `.fm2` sample (1016 frames as
   listed; `RLDUTSBA→0xFF` unit-checked). Manufacturing a USA `.fm2` =
   FCEUX `Tools → Convert FCM` on the #742 `.fcm` (sync not guaranteed).
-- **Design**: bk2/fm2 → canonical `tas.json` (recomp mask bits) → MesenCE
-  `mesen_tas.lua` (per-frame state.jsonl with regs/`$0100`-family/scroll/
-  cycles/input echo + NMI log; RAM/CHR/NT/pal/OAM/ciram bins + PPM at
-  stride; input injected in `inputPolled` only) and recomp `--script`
-  (RLE HOLD/RELEASE/WAIT + `WAIT 1000000` tail so the script outlives
-  `--smoke`; full 19k TAS emits 2361 cmds < 4096 cap) + env traces
-  (WRAM/PPUMEM/cosim/APU) + smoke JSON → `diff_tas.py` gates liveness
-  (`frames_run == N`, 0 misses, no `[HANG]`) → renderer-independent state
-  (delta traces replayed, byte-compared, stack masked, joined on
-  video-frame index) → images informational only. Frame 0 is black warmup
-  (title from frame 1); no offset search — same-index flags real drift.
+- **Design (cycle)**: bk2/fm2 → canonical `tas.json` (button mask bits) →
+  MesenCE `mesen_tas.lua` (per-frame state.jsonl + NMI log; RAM/CHR/NT/
+  pal/OAM/ciram bins + PPM at stride; input in `inputPolled` only) and
+  cycle absolute-state schedule (`<frame> NAMES`, `-` = release) +
+  `--frame-log-at mesen` binary snapshots (RAM/CIRAM/palette/OAM/picture)
+  + `--shot-every` PNGs + `--miss-log` → `diff_tas.py` gates liveness
+  (logged frames == N, exit 0) → renderer-independent state (snapshots
+  byte-compared, stack included — the cycle CPU is real; sprite entry-0
+  mirror bytes masked, §22) → images informational only. Frame 0 is black
+  warmup (title from frame 1); no offset search — same-index flags real
+  drift (neighbor-validated: same-index 9 diffs vs 20–110 off-by-one).
 - **Metric lesson**: `compare_frames.py`'s palette was mostly `[0,0,0]`
   rows, collapsing all dark colors to one index (matched solid-green vs
-  solid-black at "100%"). Table now equals the runner's own
-  `g_nes_palette` (exact for recomp, nearest for Mesen). Cross-renderer
-  RGB is still palette-relative by construction — state bytes are the
-  cross-side signal, pixels are secondary.
-- **Boot datum**: oracle shows backdrop-green at file 0, recomp stages
-  strips over ~10 more files (`$00FF` PPUCTRL-shadow NMI-bit timing differs)
-  — systematic staging lag, filed as timing gap, not failure. Neighbor test
-  (same-index 9 diffs vs 20–110 off-by-one) proves the join is sound.
-- **Honesty**: `NESRECOMP_COSIM_INJECT=5:ram:0x10:0xff` moves `chain`
-  exactly at f=5 (r30inj); A/A byte-identical both sides (r400 vs r400b
-  recomp incl. all 400 shots; r400 vs r400c Mesen incl. bins/PPMs).
-- **First finding**: 400-frame TAS run green on liveness (400/400, 0 misses)
-  but mode-menu confirm diverges ~TAS frame 44 — hardware advances to
-  team-select by f≈50–60, recomp idles on the mode/skill menu (cursor moves,
-  confirms don't land). Suspect: 1–2-frame TAS taps vs edge-driven confirms
-  (`$F5&$10`, `AND #$2F` quirks, §19.5). Next: `$06B1`/`$F5` edge trace
-  around f=44, memwatch vs WRAM-watch.
+  solid-black at "100%"). Table now equals the cycle renderer's palette
+  (exact for cycle shots, nearest for Mesen). Cross-renderer RGB is still
+  palette-relative by construction — state bytes are the cross-side
+  signal, pixels are secondary.
+- **Boot datum**: oracle shows backdrop-green at file 0, cycle stages
+  strips over ~10 more files — systematic staging lag, filed as timing
+  gap, not failure.
+- **Honesty**: cycle snapshots byte-identical across repeat runs; Mesen
+  A/A identical under pinned settings; real modeling gaps (power-on
+  palette, uninitialized CIRAM, palette mirrors) get named byte-exact.
+- **First finding**: 400-frame TAS run green on liveness but mode-menu
+  confirm diverged ~TAS frame 44 on the legacy runner — hardware advances
+  to team-select by f≈50–60, legacy idled on the mode/skill menu.
+  RESOLVED as legacy timing (transition pacing ~2×), see §22.
+
+---
+
+## 22. Cycle backend (default play path, `build-cycle/`)
+
+Upstream `runner/cyc` project integration: `build-cycle/nes_game` from our
+ROM + `src/game.toml`, windowed (`./build_and_run.sh`; headless flags imply
+headless). No game hooks, no patches — stock ROM on accurate hardware
+timing. Schedulable input (`<frame> NAMES` absolute state, same bit map).
+
+- Game, 400 TAS frames: reaches team-select, matching Mesen byte-exact
+  (RAM/OAM/palette/CIRAM from boot, mirrors masked) — the §21 f≈44
+  divergence was legacy timing (transition pacing ~2×), not game logic.
+  (~80% native unseeded; behavior hardware-true regardless.)
+- blargg cpu tier 25/25: 20 RAM-text PASS (incl. `12-jmp_jsr` at 99.4%
+  native — the JSR/RTS case the legacy runner fails) + 5 screen-confirmed
+  PASS (branch_1/2/3, dummy_reads, timing_test6 at ~16 s). Verdicts read
+  from shell text near `$0200` (`--mem-frame`/`--mem-out`; NROM has no
+  `$6000` WRAM here). Screen-only tests save `shot.png` and report
+  UNVERIFIED (non-blocking) instead of a wrong TIMEOUT.
+- Palette-mirror note: sprite entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`)
+  read stale in cycle snapshots (upstream model keeps power-on bytes;
+  hardware mirrors the backdrop). Masked in the TAS diff; rendering
+  unaffected.

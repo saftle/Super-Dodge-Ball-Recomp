@@ -18,13 +18,12 @@
 
 NESRecomp recompiles NES 6502 → native C via a two-part system:
 
-- **Recompiler** (`external/nesrecomp/recompiler/`): Scans ROM bytes for instruction patterns, discovers functions, generates `generated/*.c`
-- **Runner** (`external/nesrecomp/runner/`): NES hardware emulation (PPU, APU, mapper, input, save states). Linked into the game executable
-- **`src/extras.c`**: Game-specific hooks (`game_on_init`, `game_run_nmi`, `game_post_nmi`, `game_on_frame`)
-- **`src/game.toml`**: NESRecomp config — MMC1 mapper, `bank_switch = [0xFF08]` (the MMC1 bit-bang routine, never the `$8000` window), `deduplicate_functions = true`, `disable_ptr_scan = true`, `disable_secondary = true`, minimal `fixed` list, dis65-verified `extra_func` entries (banks 0/1/6), two `[[replace_func]]` (`$FCA0` NMI-sync, `$8393_b6` stack-args tail), empty `[force_interp]`
-- **`generated/`**: Auto-generated C code (gitignored). `_full.c` includes all bank parts; `_dispatch.c` has the `call_by_address` dispatch table
+- **Recompiler** (`external/nesrecomp/recompiler/`): Per-instruction codegen (`cyc_codegen.c`) — one labeled C block per ROM instruction with every CPU cycle's bus activity spelled out, entered per (PRG bank, CPU address).
+- **Cycle backend** (`external/nesrecomp/runner/cyc/`): Cycle-accurate console model (6502, PPU, APU, DMAs, mappers in `hw_*.c`) + host (`cyc_host.c`: input schedules, screenshots, frame-logs, TCP). Built per game via the project integration into `build-cycle/nes_game`.
+- **`src/game.toml`**: Recompiler config — display `name` (window title) plus discovery/seed keys when they exist. The stock ROM needs no function entries.
+- **`build-cycle/`**: Generated per-instruction C (gitignored, one revision dir per ROM/config) + `nes_game` runner. No game-specific hooks — raw ROM on accurate timing.
 
-The recompilation step: `./external/nesrecomp/recompiler/build/NESRecomp "rom.nes" --game src/game.toml --output-prefix "Super_Dodge_Ball_(USA)"` (run from repo root; always confirm `[Eval] Coverage` shows resolved entries)
+Build: `./build_and_run.sh` (windowed) or pass host flags (`--frames`, `--input`, `--shot-every`) for headless scripted runs. Game config changes re-trigger codegen at configure time (each revision gets its own generated dir).
 
 ### ROM Specifications
 - **ROM**: `roms/Super Dodge Ball (USA).nes` — iNES 2.0 format
@@ -43,12 +42,12 @@ The recompilation step: `./external/nesrecomp/recompiler/build/NESRecomp "rom.ne
 ## Setup & Build
 
 ```bash
-cmake -S src -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+./build_and_run.sh                                    # windowed, play it
+./build_and_run.sh --frames 400 --input tas/cyc400.input --screenshot out.png
 ```
 
 ```bash
-./setup.sh    # Handles venv, submodule update, MesenCE build, runner build, blargg test-ROM checkout
+./setup.sh    # Handles venv, submodule update, MesenCE, blargg test-ROM checkout, cycle backend build
 ```
 
 - **Venv**: `venv/` with `nesasm` 0.0.8 — use `venv/bin/python3` for nesasm work only. Venv pip is broken (no installs possible).
@@ -65,20 +64,20 @@ Three options (setup.sh uses Option C by default):
 - **`./setup.sh`** handles everything (clones submodule, builds MesenCE, builds runner)
 
 ### Build scripts
-- `./setup.sh` — Full setup (venv, submodules, MesenCE, runner)
-- `./build_and_run.sh` — Quick build + run (cmake + super_dodgeball)
+- `./setup.sh` — Full setup (venv, submodules, MesenCE, runner, cycle backend)
+- `./build_and_run.sh` — Quick build + run on the cycle backend (windowed; pass `--frames`/`--input`/`--screenshot` for headless scripted runs)
 
 ## Running
 
 ```bash
-./build/super_dodgeball "roms/Super Dodge Ball (USA).nes" [--smoke N] [--smoke-interval N]
+./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" [--frames N] [--input schedule] [--shot-every N --screenshot shot.png] [--mem-frame N --mem-out mem.txt] [--miss-log seeds.txt] [--align 0-3]
 ```
 
-- **Smoke test**: `--smoke 30 --smoke-interval 5` — title renders ~99.8% vs Mesen frame 11, exit 0. Use `--smoke 5` minimum for fix verification (must exceed old 3-frame wall).
-- **Interactive**: Run without `--smoke` — SDL2 window opens, gamepad/keyboard input works
-- **Headless**: `--smoke N` — no display needed
+- **Interactive**: bare run — window opens (`[game] name` is the title), keyboard/gamepad input works
+- **Headless**: any of `--frames`/`--input`/`--screenshot` implies headless — no display needed
+- **Deterministic**: always pass `--ram-init zeros` for comparable runs (default pattern RAM otherwise)
 - **ROM** must be at `roms/Super Dodge Ball (USA).nes` (gitignored)
-- **Save screenshots**: `--save-screenshot [output_dir]` — saves `frame_XXXX.png` per frame
+- **Snapshots**: `--frame-log-at mesen --frame-log frames.bin` writes per-frame CYCFRAME-v2 snapshots (CPU RAM, CIRAM, palette indices, OAM, picture indices) for the TAS diff
 
 ## Critical Rules
 
@@ -99,9 +98,9 @@ Three options (setup.sh uses Option C by default):
 
 - **MesenCE binary is prebuilt** at `external/mesence/Mesen` — no build needed. xvfb-run + isolated HOME with `settings.json` for headless `--testRunner`.
 - **Available Python packages**: venv holds `nesasm` 0.0.8 only (pip broken — `pyproject.toml` entries like capstone/py65 never installed). System `python3` has Pillow + numpy.
-- Build output is in `build/` (gitignored)
+- Build output is in `build-cycle/` (gitignored; windowed SDL build — the vendored SDL2 ships Windows libs only, so configure passes `-DSDL2_DIR=/usr/lib/x86_64-linux-gnu/cmake/SDL2`; see `build_and_run.sh`)
 - ROM files are gitignored and must be placed in `roms/` manually
-- **MesenCE is the oracle** for this project. Frame reference generation uses MesenCE binary directly with `--testRunner` mode and Lua API (`emu.getScreenBuffer()`). Co-simulation compares recompiled game screenshots against MesenCE reference frames.
+- **MesenCE is the oracle** for this project. Frame reference generation uses MesenCE binary directly with `--testRunner` mode and Lua API (`emu.getScreenBuffer()`). Co-simulation compares cycle-backend state (`--frame-log`) and screenshots against MesenCE references.
 
 ### Code and build constraints:
 
@@ -110,47 +109,32 @@ Three options (setup.sh uses Option C by default):
 - Generated C code (`generated/`) is gitignored — do not edit directly
 - `make clean && USE_GCC=true make -j$(nproc)` builds the entire MesenCE with UI
 - Use venv Python (`venv/bin/python3`) for nesasm work, system `python3` for Pillow/numpy scripts — never mix them up
-- `src/` ships code + config + hashes only. Game bytes come from the user's ROM at build/run time via `g_rom_path_for_extras` (set to `argv[1]` before `game_on_init()`): open it, parse the 16-byte iNES header (skip the 512-B trainer iff header[6] bit 2 is set), read at `prg_base + bank*16384 + offset`. Precedents: `tools/rom_to_asm.py`, `tools/frame_gen/oracle_dump.lua`
+- `src/` ships config + hashes only (currently just `game.toml`). Game bytes come from the user's ROM at build/run time: the cycle project reads the ROM at configure time (identity-checked) and the binary takes the ROM path at launch. Precedents: `tools/rom_to_asm.py`, `tools/frame_gen/oracle_dump.lua`
 - Debug byte dumps belong in `tmp/` (gitignored scratch), never in `src/`. Confirm offsets with `tools/dis65.py` plus a python byte-compare against the ROM before coding
 - Pre-commit self-check: `git status --short` and `git ls-files | grep -Ei '\.(nes|png|ppm|bin)$'` must show no game-derived blobs; any new `static const uint8_t …[]` in `src/` needs ROM-provenance justification or gets rejected
 - Every third-party addition ships with provenance + license + posture, recorded at add time (never as later cleanup): who made it, under what license (or "no license file found"), and how redistribution is avoided — submodule pointer (own license, never vendored), gitignored + user-fetched (test ROMs, oracle binaries), or credited test fixture (vectors keep in-file + README author credit, link pages instead of re-hosting). Code/deps go in `NOTICE.md`; test data goes in the nearest README
 - Installed packages (pip/apt) are not distributed — no attribution needed. Code you write from specs (parsers, harnesses) is yours. Data files you didn't create keep their credits intact — never strip author info
-- **nesrecomp submodule tracks pristine `origin/master`** (currently `3ef948c` — the pin must stay fetchable upstream, so patch state is never committed in the submodule); the 4 active patches live only as `patches/*.patch`, applied to the submodule working tree by `setup.sh` — runner experiments go in `patches/` with README notes, never as bare edits
+- **nesrecomp submodule tracks pristine `origin/master`** (currently `3ef948c` — the pin must stay fetchable upstream; never commit in the submodule, never work with a dirty tree: `git -C external/nesrecomp status` must be clean or the dirt is yours to explain); local runner experiments go upstream or they don't happen — no `patches/` anymore (retired, see `patches/README.md`)
 
 ## Known Issues (Current State)
 
-### Critical Bugs
+### Model Notes (cycle backend behavior, verified)
 
-- **Never override the MMC1 bit-bang** — `func_FF08` does serial bank switching, not controller polling. Overriding it (or `force_interp`-ing it) breaks all banked execution and garbles graphics.
-- **`game_run_nmi()` calls `func_NMI()` gated on `g_ppuctrl & 0x80`** — without the hardware frame the RTS-tail misfires and corrupts the main stack.
-- **`func_D98A` stays out of the NMI path** until gameplay boots. `func_F09F` runs on the main context post-tunnel (Start relocates main there via longjmp) — never C-call it from inside NMI.
-- **Input works past the title** — Start tunnels to mode/skill/team-select (verified to 400 frames; only benign `$A3C7` interp skips, LOG_RETURN-safe). Current frontier is the court BG draw (sprites/sound/logic run; background stalls as tile-soup, see research §19).
-
-### Known Workarounds (Current)
-
-- **PPUMASK**: The game writes `0x00` to PPUMASK ($2001) every frame at `$F042` and `$FCBB`. When `g_ppumask_translate = 1` in extras.c, `g_ppumask |= 0x1E` is applied in the runner to keep rendering enabled. This is now in upstream nesrecomp origin/master (PR #22).
-- **game_post_nmi() not called by runner**: The runner skips `game_post_nmi()` when `runtime_get_vblank_depth() > 1`. Keep per-frame NMI work in `game_run_nmi()`; `game_post_nmi()` holds only OAM restore + `func_DB4E`.
-- **Attribute table zeroed each frame**: `func_FF61()` zeroes `g_ppu_nt` every frame. The attribute table (64 bytes) is re-initialized in `game_on_init()` before the first frame.
-- **func_FF61**: Starts at `$FF61`, initializes PPU, calls `func_F036()` (game main, never returns).
-- **func_FE8A**: PPUCTRL-shadow helper ending in RTS (safe natively; has a narrow dispatch-override arm).
+- Sprite palette entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`) read stale power-on bytes in snapshots — hardware mirrors them to the backdrop `$3F00`. Masked in the TAS diff; rendering unaffected. Upstream-noted, not ours to fix.
+- Uninitialized CIRAM differs at power-on (`--ram-init` covers CPU RAM only); the game fills nametables within frames. Boot-frame diffs are init modeling, not divergence.
+- Unseeded runs execute partly on the cycle interpreter (still bit-exact, slower). `--miss-log` seed lines feed future `cycle_seed_file` runs; native share is informational, never a gate.
+- Boot staging order differs from Mesen (backdrop-green vs stripped title at file 0); content converges from file 1. Same-index comparison stands — no offset search.
+- Sprite flickering uses **Method 2 Software Sprite Removal** (game strips OAM past 8/scanline) — "Remove Sprite Limit" emulator settings are non-functional. Fix requires a game mod (hook the cull routine), not a renderer flag.
 
 ### Current Constraints
-- `disable_ptr_scan` and `disable_secondary` are already set in `game.toml` — do NOT remove
-- `game.toml` keeps a minimal `fixed` list plus dis65-verified `extra_func` entries (banks 0/1/6, see `src/game.toml`) — never add opcode byte-pairs (`0xA901`, `0x8500`-class) as entries; each bogus `extra_func` risks splitting a real function
-- `force_interp` stays empty — `0xFF08` in `force_interp` garbles graphics (native MMC1 bit-bang required)
-- `[[merge_range]]` cannot ship while bank codegen splits one bank across part files sharing a TU — merged entries double-emit and break the build (needs a recompiler-side dedup fix; documented in `src/game.toml`)
+- `src/game.toml` stays minimal — the stock ROM needs no function entries; future seed files go in `[game] cycle_seed_file` / `cycle_capture_file`
 - No `sram_map` (no-battery MMC1 has no SRAM code)
-- Sprite flickering uses **Method 2 Software Sprite Removal** — "Remove Sprite Limit" emulator settings are non-functional
-- **nesrecomp submodule tracks pristine `origin/master`** (currently `3ef948c`) plus `patches/002,003,004,005` applied to its working tree by `setup.sh` — never work from a bare checkout without running setup first
+- **nesrecomp submodule tracks pristine `origin/master`** — never work with a dirty tree; `setup.sh` re-checkouts the pin on fresh setups
 
 ### Additional Known Issues
 
-- **Intermittent `$8003` bank-8 CODE miss**: resolved — was downstream of the S-latch (corrupted A at `$FF08`); gone since the interp-guard fix. Current misses are benign interp skips (`$801B`, `$A3C7`, LOG_RETURN-safe, game completes).
-- **BRK `$0001`/`$0600` diag-skips**: silent under DIAG policy, non-fatal (one transient `$0001` seen mid-transition, no fallout). Use `NESRECOMP_BRK=fatal` to convert to loud exits with context.
-- **Frame comparison**: title frame 1+ matches Mesen 11 at ~99.8% structural similarity. Target stays ≥90% on frame 11 with 15+ frames.
+- **Frame comparison**: images are informational only (cross-renderer RGB always differs by palette emulation). Same-renderer pairs are strict; cross-renderer pairs are palette-relative. State bytes (`diff_tas.py`) decide.
 - **`run_roundtrip.py` is trivial**: It only proves `nesasm` preserves bytes through `.db` directives — NOT that recompilation is correct. See `docs/research.md` §12.
-- **C→x86→ROM comparison is unsound**: The recompiled C compiles to x86-64, making assembly-level comparison to original 6502 code meaningless. No recompilation project uses this approach. Verification should use co-simulation and dispatch miss monitoring instead.
-- **Missing `extra_label`/`inline_dispatch` entries**: Zelda uses ~100+ bank-1 `extra_label` entries and `inline_dispatch` at `0xE5E2`. Super Dodgeball has neither; add only with disassembly proof (`tools/dis65.py`).
 
 ### docs/ Directory
 
@@ -159,74 +143,36 @@ Three options (setup.sh uses Option C by default):
 
 ## NESRecomp Submodule Status
 
-**Tracks pristine `origin/master` (currently `3ef948c`); `setup.sh` applies the 4 active `patches/*.patch` to the submodule working tree on fresh checkouts.**
-
-Key upstream commits included:
-- `cfc483f` Merge pull request #22 — PPUMASK rendering fix (`g_ppumask |= 0x1E`)
-- `c32655e` runner: Force rendering enabled when `g_ppumask_translate` is set
-- `fd4b7d5` Integrate PRs 19 and 21 with supported-title regression fixes
-- `d2d9744` runner: Add NES-to-runner PPUMASK bit translation layer
+**Tracks pristine `origin/master` (currently `3ef948c`).** The tree must stay clean — verify with `git -C external/nesrecomp status` before blaming the framework.
 
 ## Codegen Notes
 
-- `bank_switch = [0xFF08]` names the game's MMC1 bit-bang routine for bank prophecy (never a window address like `0x8000`)
-- `call_by_address()` is used for indirect jumps and dynamic dispatch
-- `maybe_trigger_vblank()` is called at every instruction boundary for NMI timing
-- Frame boundaries are determined by CPU cycle count (`s_frame_budget`)
-- `game_run_nmi()` is called at frame boundaries to execute the NMI handler
-- Native RTS is a plain C return (does NOT pop the 6502 stack) — FDS-tail unwinds need runner help, see `patches/`
-- The recompiler supports: `[[extra_func]]`, `[[extra_label]]`, `[[data_region]]`, `[[replace_func]]`, `[[sram_map]]`, `[[inline_dispatch]]`, `[[inline_pointer]]`, `[[nop_jsr]]`, `[[push_jsr]]`, `[[push_jmp]]`, `[force_interp]`, `[mod_function_hook]`, `[[ram_read_hook]]`
+- One labeled C block per ROM instruction, entered per (PRG bank, CPU address); static jumps/branches compile to `goto`s, `cpu.pc` written only when control leaves compiled code
+- Frame boundaries are PPU-driven; `--frame-log-at mesen` aligns snapshot records to Mesen's frame end
+- The recompiler also supports `[[mod_function_hook]]` (content-keyed subroutine hooks for future mods) — see `docs/plan.md` roadmap, not current use
 
-## Applied Patches (Current State)
+## Retired: Legacy Runner (2026-10-02)
 
-The PPUMASK rendering fix is in upstream nesrecomp origin/master (PR #22). Active local patches: `002_interp_ram_dummy` (RAM-trampoline guard), `003_interp_rom_clamp` (ROM-miss pop guard), `004_nmi_tunnel_unwind` (Start-tunnel longjmp), `005_hang_watchdog_default` (90s idle auto-kill) — carried as `patches/*.patch`, applied to the submodule working tree by `setup.sh` (see `patches/active-patches.md`).
-
-- ~~`patches/archived/001_nmi_tail_unwind.patch`~~ (archived 2026-10-01): NMI-tail unwind handling. Written for the `$FCB3` spin hang, bypassed game-side instead (`replace_func $FCA0`), never fired successfully — dormant risk without payoff. Revival conditions documented in `patches/archived/archived-patches.md`.
-
-These game-specific hooks are applied in `src/extras.c`:
-
-1. **`func_FCA0` (`[[replace_func]]`)**: NMI-enable + PPUMASK apply. Instant pre-menu (title stays pixel-perfect); faithful park post-tunnel (`s_menu_phase`) — mirror pushes, NMI-enable, boundary spin till one NMI — pacing the menu loop to hardware rhythm.
-2. **`game_run_nmi()`**: `func_NMI()` gated on `g_ppuctrl & 0x80`, with Start-edge inhibit until `$0100=$C0`, nested gate (only `$C0` runs nested — depth 2 is top-level, truly-nested is >2), one-service-per-frame pacing, code-window scoping.
-3. **`game_run_main()`**: `setjmp` tunnel landing — `runtime_prepare_guest_resume` + native `func_F09F()` on the main context (a bare vblank reset leaves callback depths stuck and freezes frames).
-4. **`game_dispatch_override()`**: only the `0xFE8A` PPUCTRL-shadow arm remains.
-5. **`game_on_init()`**: palette, PPUCTRL shadow, MMC1 4KB CHR force, attribute table (ROM bank 0 offset `0x073C` → `$23C0`).
-6. **`game_post_nmi()`**: OAM flicker restore + `func_DB4E` scroll/PPUCTRL apply (whether still load-bearing is untested).
-7. **`game_on_frame()`**: OAM flicker backup only.
-8. **`func_8393_b6` (`[[replace_func]]`, bank 6)**: shared JMP-tail (STX/PLA/PLA/…) consuming 2 ancestor-pushed arg bytes absent under C tail-calls — dummies stand in (values discarded anyway), else the PLAs eat `$0100/$0101` and cascade into bank thrash.
+The function-level runner (`src/extras.c` hooks, `patches/`, `build/`) is deleted. Its game knowledge (NMI dispatcher, tunnel mechanics, input path) lives on in `docs/research.md` §§18–19 and transfers to mod work. The one artifact proposed upstream is patch 002 (S-latch guard) — see `docs/plan.md`; the rest lapsed. Never re-add game-specific hooks to work around timing again: time it against Mesen, and if the model is wrong, the fix belongs upstream.
 
 ## Verification & Testing
 
-### Iterative Testing Procedure (for compaction recovery)
+### Iterative Testing Procedure
 
-After any code change to `src/extras.c` or `src/game.toml`:
+After any `src/game.toml` change (display name, discovery, seeds):
 
-**CRITICAL: A valid progress test MUST produce JSON output with `frames_run` ≥ requested count. If the process times out or produces no JSON, the change hangs. HEAD (mask toggle) hangs at 3; no-toggle builds must reach 15+.**
+1. **Rebuild**: `cmake --build build-cycle -j$(nproc)` (configure re-triggers codegen; each revision gets its own generated dir)
+2. **TAS**: `python3 tools/tas/run_tas.py --tas tas/sdb_4976.tas.json --frames 400 --out tas/runs/rXXX` + `diff_tas.py` — liveness 400/400 exit 0, state MATCH (mirrors masked)
+3. **FAIL criteria**: nonzero exit, logged frames != requested, any state diff outside the masked mirrors
 
-1. **Rebuild**: `cmake --build build -j$(nproc)` (after `game.toml` edits, force regen first — the cmake custom command does not reliably retrigger: run `./external/nesrecomp/recompiler/build/NESRecomp "roms/Super Dodge Ball (USA).nes" --game src/game.toml --output-prefix "Super_Dodge_Ball_(USA)"` manually and confirm `[Eval] Coverage` shows resolved entries with no parse error)
-2. **Baseline**: back up to `/tmp/` first (never `git checkout`/`restore`/`stash` working files without a backup), rebuild, run `timeout 25 ./build/super_dodgeball "roms/Super Dodge Ball (USA).nes" --smoke 5 --smoke-interval 1`
-3. **PASS criteria**: JSON output with `frames_run` ≥ requested count AND `dispatch_miss_count == 0`
-4. **FAIL criteria**: Process times out (exit 124/137), no JSON output, or any dispatch miss
-5. **Frame 11**: Use `--save-screenshot` + `tools/compare_frames.py` against `nes_reference/`. Target: ≥90% structural match on frame 11 (current: ~99.8%).
+**Known baseline**: cycle 400 TAS frames → team-select, state byte-exact vs Mesen (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25.
 
-**Key commands**:
-```bash
-cmake -S src -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-timeout 25 ./build/super_dodgeball "roms/Super Dodge Ball (USA).nes" --smoke 5 --smoke-interval 1
-```
-
-**IMPORTANT**: If the test times out or produces no JSON output, the change hangs. The game MUST complete all requested smoke frames and produce the JSON summary.
-
-**Hang watchdog**: the runner kills itself with a `[HANG]` dump (C stack + dispatch ring) after 90s without a completed frame (default-on; `NESRECOMP_HANG_TIMEOUT_S=N` overrides, `0` disables). A `[HANG]` line means frozen frames, not a slow test — read the dump, don't lengthen the timeout on the same approach.
-
-**Known baseline**: 30 frames, exit 0, static title hash `a84564b5`, 0 dispatch misses. Menus: Start tunnels at frame 10 (`[TUNNEL]` log), mode/skill/team-select verified to 400 frames via `tools/input/title_to_team_select.txt` (only benign `$A3C7` interp skips). TAS probe: `run_tas.py --tas tas/sdb_4976.tas.json --frames 400` + `diff_tas.py` — liveness 400/400, 0 misses; state first-diverges ~TAS frame 44 (mode-menu confirm, research §21).
-
-### Engine-change procedure (submodule bump, `patches/`, recompiler directives)
+### Engine-change procedure (submodule bumps)
 
 Game checks can't isolate engine regressions, so engine changes get both gates:
 
-1. **Game gate**: rebuild + `smoke 5` per above (must stay green).
-2. **Engine gate**: `python3 tools/blargg/run_blargg.py --tier cpu` (uses `[tool.blargg]` defaults; `NESRECOMP_HANG_TIMEOUT_S=25` shortens HANG triage) — compare `results.json` verdict tuples (`code`/detail/misses/BRKs, HANG stall frames) against the pre-change run. Any PASS→FAIL flip, changed FAIL tuple, or moved stall frame blocks the change. See `tools/blargg/README.md` (pristine A/B via `git stash` of the applied patches; never lose the working-tree patch state without a backup).
+1. **Game gate**: TAS 400 + diff MATCH per above (must stay green).
+2. **Engine gate**: `python3 tools/blargg/run_blargg.py --tier cpu` — 25/25 (20 PASS + 5 screen-confirmed) required; any flip blocks. See `tools/blargg/README.md`.
 
 ### Round-trip decompilation (ROM → Assembly → ROM)
 
@@ -235,8 +181,8 @@ The current `run_roundtrip.py` uses `nesasm` to convert ROM bytes to `.db` direc
 ### Verification approach:
 
 The project uses **co-simulation** against MesenCE as the primary verification method:
-- Compare recompiled game screenshots against MesenCE reference frames (`compare_frames.py`, tolerance-based: exact RGB differs by palette emulation, structural diff is the metric)
-- Monitor dispatch misses (must be zero)
+- Compare cycle state snapshots (`--frame-log`: RAM, CIRAM, palette indices, OAM) byte-exact against MesenCE bins per video-frame (`diff_tas.py`; mirrors masked)
+- Compare screenshots tolerance-based (`tools/compare_frames.py`): exact RGB differs by palette emulation, structural diff is the metric, state bytes decide
 - Disassemble with `tools/dis65.py` (venv pip is broken — no capstone/py65)
 
 **C→x86→ROM comparison is unsound** — the recompiled C compiles to x86-64, making assembly-level comparison to original 6502 code meaningless. No recompilation project uses this approach.
@@ -253,30 +199,30 @@ Official opcodes only, linear sweep (no resync after data). System `python3` (ve
 ### Build & run verification:
 
 ```bash
-# Rebuild game
-cmake -S src -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+# Rebuild cycle backend
+cmake --build build-cycle -j$(nproc)
 
-# Run smoke test
-./build/super_dodgeball "roms/Super Dodge Ball (USA).nes" --smoke 100 --smoke-interval 10
+# Headless scripted run with screenshots + memory snapshot
+./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 100 \
+  --shot-every 1 --screenshot cyc_shots/shot.png --mem-frame 99 --mem-out mem.txt
 ```
 
 ### Frame comparison pipeline:
 
 ```bash
 # Generate reference frames with MesenCE
-./tools/frame_gen/run_frames.sh roms/Super Dodge Ball (USA).nes 100 nes_reference
+./tools/frame_gen/run_frames.sh "roms/Super Dodge Ball (USA).nes" 100 nes_reference
 
-# Build and run recompiled game with screenshots
-./build/super_dodgeball "rom.nes" --smoke 100 --save-screenshot recomp_output
+# Generate cycle-backend frames (shot_00000.png scheme; rename to frame_XXXX.png first)
+./build_and_run.sh --frames 100 --shot-every 1 --screenshot cyc_shots/shot.png
 
 # Compare
-python3 tools/compare_frames.py --ref nes_reference --recomp recomp_output --frames 100
+python3 tools/compare_frames.py --ref nes_reference --recomp cyc_shots --frames 100
 ```
 
-**Critical: Frame 11 is the title screen.** Frame 0 is blank. This is the frame to verify — it must match ≥90% structural similarity with the reference (tolerance-based diff; exact RGB never matches across renderers). Do NOT cite frame 0 as success.
+**Critical: Frame 11 is the title screen.** Frame 0 is blank. Pixels never match exactly across renderers (palette emulation differs) — compare structure tolerance-based, and let state bytes (`diff_tas.py`: RAM/OAM/palette/CIRAM byte-exact) decide. Do NOT cite frame 0 as success.
 
-Current: frame 1+ already matches Mesen 11 at ~99.8% structural similarity (title builds from frame 0 via the real NMI path).
+Current: cycle state matches Mesen byte-exact from boot through team-select (400 TAS frames); title pixels are structurally the same screen in both renderers.
 
 ### MesenCE testrunner (Lua API — MesenCE 2.2.1):
 
@@ -306,7 +252,6 @@ Frame reference generation uses the **prebuilt MesenCE binary** (`external/mesen
 ### Known limitations:
 - The NESRecomp toolchain is one-way (ROM → C). No built-in way to compile C back to ROM.
 - `nesasm` works via Python API only; CLI `nesasm asm` has a `.db` directive bug
-- Code window mapping ($8000-$BFFF via `g_code_window_base = 0xE000`) causes address resolution issues for addresses < $C000
 - MesenCE testrunner exits with code 255 when `emu.resume()` or `emu.reset()` is called
 
 ## RetroPortingToolKit Rules
@@ -349,21 +294,17 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 
 | Path | Purpose |
 |------|---------|
-| `src/extras.c` | Game hooks: `game_on_init`, `game_run_nmi`, `game_post_nmi`, `game_on_frame` |
-| `src/game.toml` | NESRecomp recompiler config |
-| `src/game.discovery.toml` | **TO CREATE** — pointer scan exclusions, inline dispatch tables |
-| `generated/` | Auto-generated C code (gitignored) |
-| `external/nesrecomp/` | NESRecomp submodule (recompiler + runner) — **already at origin/master** |
+| `src/game.toml` | Recompiler config: display `name`, discovery/seed keys (stock ROM needs no function entries) |
+| `external/nesrecomp/` | NESRecomp submodule (recompiler + runners) — **pristine origin/master, tree must stay clean** |
 | `external/mesence/` | MesenCE emulator source/binary |
-| `patches/` | Active runner patches (`002,003,004,005`, auto-applied by `setup.sh`) + `archived/` dormant (see `patches/active-patches.md`) |
+| `patches/` | RETIRED legacy patches, all in `archived/` (see `patches/README.md`) — no new patches, ever |
 | `tools/dis65.py` | Dependency-free 6502 disassembler for entry verification (ROM + addr + count + file offset) |
 | `tools/frame_gen/memwatch.lua` | MesenCE oracle probe: who-writes (with PC) for RAM addrs + optional NMI flag log (`WATCH`, `MAXF`, `START0/1`, `NMI_LOG`) |
-| `tools/input/title_to_team_select.txt` | Headless input driver: title → mode → skill → team-select (verified green) |
 | `tools/frame_gen/oracle_dump.lua` | MesenCE `--testrunner` oracle: frame-N PPU dump + per-NMI `$0100/$0106` log (see `docs/research.md` §16) |
 | `tools/frame_gen/` | Frame export Lua script and wrapper |
-| `tools/blargg/` | blargg test-ROM harness (`run_blargg.py` + `manifest.json` + patch-neutral `blargg_extras.c` + `selftest/` canary); per-test builds in `build-blargg/` (gitignored), ROMs via `--fetch` into `external/nes-test-roms/` (gitignored) |
-| `tools/tas/` | TAS differential harness (bk2/fm2 converters, `run_tas.py` + `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored) — see `tools/tas/README.md`, research §21 |
-| `build-diag/` | Diagnostic build (rings + stack tracking, gitignored); prod `build/` keeps them off |
+| `tools/blargg/` | blargg test-ROM harness on the cycle backend (`run_blargg.py` + `manifest.json`); per-ROM builds in `build-cyc-blargg/` (gitignored), ROMs via `--fetch` into `external/nes-test-roms/` (gitignored) |
+| `tools/tas/` | TAS differential harness on the cycle backend (bk2/fm2 converters, `run_tas.py` + `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored) — see `tools/tas/README.md`, research §21 |
+| `build-cycle/` | Cycle backend build (gitignored; `./setup.sh` builds it, `./build_and_run.sh` runs it) |
 | `config/settings.json` | MesenCE runtime configuration (gitignored) |
 | `pyproject.toml` | Python project configuration |
 | `roms/` | ROM files (gitignored) |
@@ -460,17 +401,3 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 - `Nes.RandomizeMapperPowerOnState: false`
 - `Nes.RandomizeCpuPpuAlignment: false`
 - Remove `mesen.lock` from `external/mesence/` before running
-
----
-
-## Frame/Hang Investigation (resolved 2026-10-01)
-
-- The 3-frame hang was the `g_ppumask = 0x00` direct write in `game_post_nmi()` (commit `3194d28`), bypassing the runner's `|= 0x1E` translation and breaking VBlank timing. Rule: never assign `g_ppumask`/`g_ppuctrl` directly; route through `nes_write`.
-- The `game.toml` in tree never parsed (one-line `addr = X, bank = Y` is invalid TOML), so every historical regen used default config. Rule: multi-line `addr`/`bank` entries; confirm `[Eval] Coverage` on every regen.
-- Manual tile writes cannot survive working bank switches (real code owns the nametable). Title must come from the real NMI path.
-- The `$FCB3` NMI-wait spin deadlocks under C returns (tail unwind unrepresentable). Game-side `$FCA0` replace is split: instant pre-menu, faithful park post-tunnel (`s_menu_phase`) — a full park (also at boot) garbles boot strips, and parking with NMI off deadlocks till the cap.
-- Never `memcpy` bulk data to `$0100-$01FF` (6502 stack) or `$0200-$02FF` (OAM buffer) — the old 512-byte `$0108` fill smashed return addresses into padding jumps (`BRK $0001`).
-- Depth 2 inside `game_run_nmi` IS the top-level NMI (trigger + firing); truly-nested is > 2 — a `> 1` gate silently skips every handler.
-- Native JSR sites push no 6502 return address: any interp transfer ending in RTS pops live-caller bytes (+2 S per call). Guarded runner-side (002); never rely on interp exits preserving S.
-- C-stack lap growth: cross-function loop laps (`F1AA BNE $F13A` via `call_by_address`) add a C frame per lap. `merge_range` cannot ship while parts share a TU. Independent corroboration: blargg `instr_01` template helpers (`E442`/`E458`/`E8CF`) stack 510 deep the same way (see `tools/blargg/README.md`, research §20).
-- Current: 30 frames, exit 0, title ~99.8% vs Mesen frame 11, static hash `a84564b5`; menus verified to team-select at 400 frames (only benign `$A3C7` interp skips).

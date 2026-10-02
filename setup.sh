@@ -40,7 +40,7 @@ else
     echo "WARNING: pip install failed — continuing without Python deps (nesasm/round-trip tooling unavailable, game build unaffected)."
 fi
 
-# ---- NESRecomp submodule ----
+# ---- NESRecomp submodule (pristine upstream; cycle backend needs no patches) ----
 if [ -d "${SCRIPT_DIR}/external/nesrecomp" ]; then
     echo ""
     echo "Updating NESRecomp submodule..."
@@ -58,24 +58,8 @@ else
     cd "${SCRIPT_DIR}"
 fi
 
-# ---- Game-specific runner patches (re-applied after every submodule checkout) ----
-# Active patches live in patches/*.patch (sorted order); patches/archived/
-# holds dormant ones that setup.sh deliberately ignores. See
-# patches/active-patches.md.
-if [ -d "${SCRIPT_DIR}/patches" ]; then
-    echo ""
-    echo "Applying game patches to NESRecomp submodule..."
-    cd "${SCRIPT_DIR}/external/nesrecomp"
-    for p in "${SCRIPT_DIR}"/patches/*.patch; do
-        [ -e "$p" ] || break
-        if git apply --check "$p" 2>/dev/null; then
-            git apply "$p" 2>&1 && echo "  applied: $(basename "$p")"
-        else
-            echo "  skipped (already applied or conflicts): $(basename "$p")"
-        fi
-    done
-    cd "${SCRIPT_DIR}"
-fi
+# (Legacy runner patches retired with the cycle switch; the submodule stays
+# pristine. The 002 S-latch guard is proposed upstream instead — see docs/plan.md.)
 
 # ---- MesenCE (build or use pre-built binary) ----
 mkdir -p "${MESENCE_DIR}"
@@ -128,18 +112,22 @@ echo ""
 echo "Setting up frame generation tools..."
 mkdir -p "${FRAME_GEN_DIR}"
 
-# ---- Build the runner ----
+# ---- Cycle-accurate backend (default play path) ----
 echo ""
-echo "Building NESRecomp runner..."
-cmake -S "${SCRIPT_DIR}/src" -B "${SCRIPT_DIR}/build" -G Ninja -DCMAKE_BUILD_TYPE=Release 2>&1
-cmake --build "${SCRIPT_DIR}/build" -j$(nproc) 2>&1
+echo "Configuring cycle-accurate backend..."
+cmake -S "${SCRIPT_DIR}/external/nesrecomp/runner/cyc/project" -B "${SCRIPT_DIR}/build-cycle" \
+  -DNESRECOMP_ROM="${SCRIPT_DIR}/roms/Super Dodge Ball (USA).nes" \
+  -DNESRECOMP_GAME_CONFIG="${SCRIPT_DIR}/src/game.toml" \
+  -DNESRECOMP_HEADLESS=OFF \
+  -DSDL2_DIR=/usr/lib/x86_64-linux-gnu/cmake/SDL2 2>&1
+cmake --build "${SCRIPT_DIR}/build-cycle" -j$(nproc) 2>&1
 
 # ---- Verify setup ----
 echo ""
 echo "=== Setup complete ==="
 echo ""
-echo "To build the game: cmake -S src -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build -j\$(nproc)"
-echo "To run: ./build/super_dodgeball \"roms/Super Dodge Ball (USA).nes\" [--smoke N] [--save-screenshot DIR]"
+echo "Play: ./build_and_run.sh (windowed)"
+echo "Headless: ./build_and_run.sh --frames 400 --input tas/cyc400.input --screenshot out.png"
 echo ""
 echo "=== MesenCE / Frame Generation ==="
 echo "  Mesen binary: ${MESEN_BIN}"
@@ -150,6 +138,6 @@ echo "  MESEN_BIN=${MESEN_BIN} \\"
 echo "    ./tools/frame_gen/run_frames.sh \"roms/Super Dodge Ball (USA).nes\" 100 nes_reference --start"
 echo ""
 echo "Then compare frames:"
-echo "  ./build/super_dodgeball \"rom.nes\" --smoke 100 --save-screenshot recomp_output"
-echo "  python3 tools/compare_frames.py --ref nes_reference --recomp recomp_output --frames 100"
+echo "  ./build_and_run.sh --frames 100 --shot-every 1 --screenshot cyc_shots/shot.png"
+echo "  python3 tools/compare_frames.py --ref nes_reference --recomp cyc_shots --frames 100"
 echo ""

@@ -4,7 +4,7 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 
 ![Super Dodge Ball title screen (recompiled build)](docs/assets/title.png)
 
-> **Status:** super early WIP — it boots to a ~99.8% title screen and stumbles through a few menus (mode/skill/team-select) with music mostly correct, and that's the whole show so far. Past team confirm the court BG stalls as tile-soup; gameplay isn't there yet. See `docs/plan.md` for the frontier.
+> **Status:** super early WIP — it boots to the title screen and plays through team-select verified byte-exact vs Mesen (state, not just pixels), with music correct, and that's the verified show so far. Past team confirm is unverified territory (court BG next); gameplay feel beyond that is untested. See `docs/plan.md` for the frontier.
 
 > *Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong here. This port is in development — expect rough edges.*
 
@@ -13,24 +13,18 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 ## Quick Start
 
 ```bash
-# Full setup (venv, submodules, MesenCE, runner, blargg test ROMs)
+# Full setup (venv, submodules, MesenCE, cycle backend, blargg test ROMs)
 ./setup.sh
 
-# Or build and run in one go
+# Or build and run in one go (window opens, play it)
 ./build_and_run.sh
 
-# Rebuild game
-cmake -S src -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+# Headless scripted run (input schedule + last-frame screenshot)
+./build_and_run.sh --frames 400 --input tas/cyc400.input --screenshot out.png
 
-# Run with smoke test (100 frames, hash each)
-./build/super_dodgeball "roms/Super Dodge Ball (USA).nes" --smoke 100 --smoke-interval 10
-
-# Run interactively
-./build/super_dodgeball "roms/Super Dodge Ball (USA).nes"
-
-# Save screenshots for comparison
-./build/super_dodgeball "rom.nes" --smoke 100 --save-screenshot recomp_output
+# Per-frame screenshots + memory snapshot at frame N (differential checks)
+./build-cycle/nes_game "rom.nes" --frames 400 --input tas/cyc400.input \
+  --shot-every 10 --screenshot shots/shot.png --mem-frame 399 --mem-out mem.txt
 ```
 
 ## Getting MesenCE (for frame comparison)
@@ -82,17 +76,15 @@ Clones `external/mesence` from GitHub, builds with `USE_GCC=true make -j$(nproc)
 
 ## Architecture
 
-Static recompilation, not an emulator. The original 6502 machine code is translated to C at build time, then compiled to native code via the runner library.
+Static recompilation, not an emulator. The original 6502 machine code is translated to C at build time — one block per ROM instruction with every CPU cycle's bus activity spelled out — then compiled to native code and run on a cycle-accurate console model (CPU, PPU, APU, DMAs, mappers).
 
-- **`src/game.toml`** — NESRecomp config (MMC1 mapper, `bank_switch = [0xFF08]`, minimal `fixed` list, dis65-verified `extra_func` entries in banks 0/1/6, two `[[replace_func]]` (`$FCA0`, `$8393_b6`))
-- **`src/extras.c`** — Game hooks (`game_on_init`, gated `game_run_nmi` with nested policy/pacing, `setjmp` tunnel landing in `game_run_main`, `game_post_nmi`, `game_on_frame`) plus the `$FCA0`/`$8393_b6` replacements
-- **`generated/`** — Auto-generated C code (gitignored). `_full.c` includes all bank parts; `_dispatch.c` has the `call_by_address` dispatch table
-- **`external/nesrecomp/`** — NESRecomp framework submodule (recompiler + runner)
-- **`external/mesence/`** — MesenCE emulator source (for reference rendering)
+- **`src/game.toml`** — Recompiler config: display `name` (window title), plus discovery/seed keys when they exist. Fed to the cycle backend at configure time.
+- **`build-cycle/`** — Cycle-backend build (gitignored): per-instruction C (`game_cyc*.c`, one revision dir per ROM/config) + `nes_game` runner. No game-specific hooks — the raw ROM runs on accurate hardware timing.
+- **`external/nesrecomp/`** — NESRecomp framework submodule (recompiler + runners)
+- **`external/mesence/`** — MesenCE emulator (reference rendering + oracle Lua API)
 - **`tools/frame_gen/`** — Mesen frame export Lua script + wrapper
-- **`tools/blargg/`** — blargg test-ROM engine suite (`run_blargg.py`, `manifest.json`, patch-neutral `blargg_extras.c`, `selftest/` canary); per-test builds in `build-blargg/`, ROMs in `external/nes-test-roms/` (both gitignored)
-- **`tools/tas/`** — TAS-integrated differential harness: bk2/fm2 → canonical `tas.json`, shared-input runners for MesenCE + recomp with full state capture, three-layer first-divergence diff (`run_tas.py`, `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored)
-- **`patches/`** — Active runner patches, carried as `*.patch` files auto-applied by `setup.sh` to the submodule working tree (`002` RAM-trampoline guard, `003` ROM-miss pop guard, `004` NMI-tunnel unwind, `005` hang-watchdog default) + `archived/` dormant (see `patches/active-patches.md`)
+- **`tools/blargg/`** — blargg test-ROM suite on the cycle backend (`run_blargg.py`, `manifest.json`); per-ROM builds in `build-cyc-blargg/`, ROMs in `external/nes-test-roms/` (both gitignored)
+- **`tools/tas/`** — TAS-integrated differential harness: bk2/fm2 → canonical `tas.json`, shared-input runners for MesenCE + cycle backend with full state capture, three-layer first-divergence diff (`run_tas.py`, `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored)
 
 ### Project Structure
 
@@ -100,29 +92,24 @@ Static recompilation, not an emulator. The original 6502 machine code is transla
 Super Dodgeball Recomp/
 ├── roms/                          # NES ROM files (gitignored)
 ├── src/                           # Project source
-│   ├── game.toml                  # NESRecomp configuration
-│   ├── extras.c                   # Game hooks and overrides
-│   ├── CMakeLists.txt             # Build configuration
+│   ├── game.toml                  # Recompiler config (display name, discovery, mapper)
 │   └── third_party/               # Local gitignored build scratch (not shipped)
 ├── external/nesrecomp/            # NESRecomp submodule
-├── external/mesence/              # MesenCE emulator source
+├── external/mesence/              # MesenCE emulator (reference rendering)
 ├── external/nes-test-roms/        # blargg suite checkout (gitignored, via setup.sh --fetch path)
-├── patches/                       # Local runner patches (committed in-submodule + .patch files for setup.sh)
-├── build-blargg/                  # blargg per-test builds (gitignored)
+├── build-cyc-blargg/              # blargg per-ROM cycle builds (gitignored)
+├── build-cycle/                   # Cycle-backend build (gitignored)
 ├── tools/
-│   ├── compare_frames.py          # Mesen reference vs recomp frame comparison
+│   ├── compare_frames.py          # Mesen reference vs cycle screenshot comparison
 │   ├── rom_to_asm.py              # ROM → assembly listing helper
 │   ├── run_roundtrip.py           # ROM → asm → ROM byte-preservation check
 │   ├── dis65.py                   # Dependency-free 6502 disassembler
-│   ├── blargg/                    # Engine test-ROM suite (run_blargg.py, manifest, extras, selftest)
+│   ├── blargg/                    # blargg suite on the cycle backend (run_blargg.py, manifest)
 │   ├── tas/                       # TAS differential harness (converters, runners, diff)
-│   ├── frame_gen/                 # Mesen frame export + oracle dump + memwatch scripts
-│   └── input/                     # Headless input drivers (title → team-select)
+│   └── frame_gen/                 # Mesen frame export + oracle dump + memwatch scripts
 ├── tas/
 │   ├── vectors/                   # TAS movies (.bk2 + format samples, committed)
 │   └── runs/                      # Per-TAS run artifacts (gitignored)
-├── generated/                     # Auto-generated C code (gitignored)
-├── build/                         # Build output (gitignored)
 ├── venv/                          # Python virtual environment (gitignored)
 ├── docs/
 │   ├── research.md                # Deep research notes
@@ -134,29 +121,31 @@ Super Dodgeball Recomp/
 │   ├── workflows/ci.yml           # ROM-less CI (engine + scripts + config)
 │   └── raid-discord.png           # R.A.I.D. invite badge (footer)
 ├── setup.sh                       # Environment setup (venv + submodules + build)
-├── build_and_run.sh               # Quick build + run
+├── build_and_run.sh               # Quick build + run (cycle backend, windowed)
 ├── README.md
 └── AGENTS.md                      # Developer reference for AI coding agents
 ```
 
 ## Frame Comparison Pipeline
 
-Compare recompiled output against an accurate NES reference using MesenCE.
+Compare cycle-backend output against an accurate NES reference using MesenCE.
 
 ```bash
 # Step 1: Generate reference frames with MesenCE
 ./tools/frame_gen/run_frames.sh roms/Super Dodge Ball (USA).nes 100 nes_reference --start
 
-# Step 2: Generate recompiled game frames with screenshots
-./build/super_dodgeball "rom.nes" --smoke 100 --smoke-interval 10 --save-screenshot recomp_output
+# Step 2: Generate cycle-backend frames with screenshots
+./build_and_run.sh --frames 100 --shot-every 1 --screenshot cyc_shots/shot.png
 
-# Step 3: Compare pixel-by-pixel
-python3 tools/compare_frames.py --ref nes_reference --recomp recomp_output --frames 100
+# Step 3: Compare pixel-by-pixel (tolerance-based: exact RGB never matches across renderers)
+# (cyc names shots shot_00000.png; rename to the frame_XXXX.png scheme first)
+python3 -c "import glob,os; [os.rename(p,'cyc_shots/frame_%04d.png'%int(p.split('_')[-1].split('.')[0])) for p in glob.glob('cyc_shots/shot_*.png')]"
+python3 tools/compare_frames.py --ref nes_reference --recomp cyc_shots --frames 100
 ```
 
 ### TAS-integrated differential testing (`tools/tas/`)
 
-Same TAS input drives both the MesenCE oracle and the recomp; diffs RAM/VRAM/OAM/palette byte-exact per video-frame to the first divergence (liveness → state → informational images). Vectors: TASVideos #4976 `.bk2` in `tas/vectors/` (headerless MD5 matches our ROM).
+Same TAS input drives both the MesenCE oracle and the cycle backend; diffs CPU RAM, CIRAM, palette indices, and OAM byte-exact per video-frame to the first divergence (liveness → state → informational images). Vectors: TASVideos #4976 `.bk2` in `tas/vectors/` (headerless MD5 matches our ROM).
 
 ```bash
 python3 tools/tas/bk2_to_tas.py tas/vectors/sdb_4976.bk2 tas/sdb_4976.tas.json
@@ -164,7 +153,19 @@ python3 tools/tas/run_tas.py --tas tas/sdb_4976.tas.json --frames 400 --out tas/
 python3 tools/tas/diff_tas.py tas/runs/r400
 ```
 
-Harness honesty is sealed (fault injection pinpoints the exact frame; A/A byte-identical both sides). See `tools/tas/README.md`.
+The cycle side runs with an absolute-state input schedule plus `--frame-log-at mesen` binary snapshots (RAM/CIRAM/palette/OAM/picture per frame) and `--shot-every` screenshots. Honesty is sealed: cycle snapshots are byte-identical across repeat runs, and real differences get reported (sprite entry-0 mirror bytes masked — hardware mirrors them to the backdrop, see `diff_tas.py`). Current state: RAM/OAM/palette/CIRAM match from boot; 400 TAS frames reach team-select. See `tools/tas/README.md`.
+
+### Cycle-accurate backend (`build-cycle/`, gitignored)
+
+This is the backend everything runs on: per-cycle 6502/PPU/APU/DMA with own
+mappers, via the upstream project integration. `./build_and_run.sh` and
+`./setup.sh` target it; `./build-cycle/nes_game` takes the host flags
+(`--frames`, `--input` schedule `<frame> NAMES`, `--ram-init zeros`,
+`--shot-every`, `--mem-frame`/`--mem-out`, `--miss-log`, `--align 0-3`).
+
+Findings: 400 TAS frames reach team-select, matching Mesen; blargg cpu tier
+25/25 green (20 RAM-text PASS incl. `12-jmp_jsr` at 99.4% native, 5
+screen-confirmed PASS: branch_1/2/3, dummy_reads, timing_test6).
 
 ### Deeper oracle work (PPU dumps, per-NMI flag logs)
 
@@ -195,10 +196,10 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 
 ## Known Limitations (current state)
 
-- **Input past title works** — Start tunnels to mode/skill/team-select; `$4016` serves script/keyboard/gamepad; `tools/input/title_to_team_select.txt` drives it headless. TAS playback diverges at the mode-menu confirm (~TAS frame 44 of #4976): hardware advances to team-select, recomp stays — confirm-edge timing under investigation.
-- **Court background stalls as tile-soup** past team confirm (sprites/sound/logic run; strips drain top rows only) — current frontier.
-- **Sprite flickering** — Method 2 Software Sprite Removal; emulator "Remove Sprite Limit" is non-functional. OAM backup/restore in place; menu sprites animate correctly.
-- **PPUMASK** — handled upstream; `g_ppumask |= 0x1E` applied by the runner when `g_ppumask_translate` is set in `extras.c`. Never assign `g_ppumask`/`g_ppuctrl` directly.
+- **Menus work to team-select** — 400 TAS frames (TASVideos #4976) reach `CHANGE POSITION?` with rosters and courts rendering; state matches Mesen byte-exact (RAM/OAM/palette/CIRAM).
+- **Past team-select is unverified** — the court BG draw is the next frontier; TAS vectors exist for the full run when needed.
+- **Sprite flickering** — Method 2 Software Sprite Removal: the game strips sprites from OAM past 8/scanline, so no emulator toggle can restore them. On PC the OAM-culling routine is the future fix target.
+- **Palette mirrors** — sprite entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`) read stale in cycle snapshots (upstream model keeps power-on bytes; hardware mirrors the backdrop). Masked in the TAS diff; rendering unaffected.
 
 ## Developer Docs
 

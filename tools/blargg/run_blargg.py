@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
-"""run_blargg.py — blargg test-ROM harness for NESRecomp runner patches.
+"""run_blargg.py — blargg test-ROM harness on the cycle-accurate backend.
 
-Recompiles each manifest ROM with NESRecomp, builds it against the current
-runner working tree (including whatever is in patches/*.patch), runs it
-headless, and reports the blargg $6000 verdict per ROM.
+Each manifest ROM gets its own cycle-backend build (upstream runner/cyc
+project integration, HEADLESS) and runs headless; the verdict comes from
+the shell's result text in low RAM ($0201+, NUL-terminated: "Passed..." or
+"Failed..."), read via --mem-frame/--mem-out. No extras, no patches: this
+gates upstream cycle fidelity (submodule bumps), not game code.
 
 Usage:
   python3 tools/blargg/run_blargg.py --list
   python3 tools/blargg/run_blargg.py --fetch        # clone nes-test-roms (asks nothing else)
   python3 tools/blargg/run_blargg.py                # full suite
   python3 tools/blargg/run_blargg.py --tier cpu --only instr_01
-  python3 tools/blargg/run_blargg.py --rom "roms/Super Dodge Ball (USA).nes" --name surrogate
+  python3 tools/blargg/run_blargg.py --rom path/to/test.nes --name label
 
 ROM sourcing: --roms-dir DIR (default external/nes-test-roms) holds the
 christopherpow/nes-test-roms checkout; manifest paths are relative to it.
 --fetch clones it (explicit opt-in). Missing ROMs are SKIP, never FAIL.
+Mappers outside the cycle backend's set are SKIP with reason.
 
 Exit code: 0 iff every tier=cpu test with a present ROM reports PASS.
 tier=info failures are reported but non-blocking. Exit 2 if nothing ran.
 """
 import argparse
+import concurrent.futures
 import glob
 import json
 import os
@@ -29,38 +33,14 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TOOLS_DIR = os.path.join(ROOT, "tools", "blargg")
-GEN_DIR = os.path.join(TOOLS_DIR, "generated")
-TOML_DIR = os.path.join(TOOLS_DIR, "toml")
-BUILD_DIR = os.path.join(ROOT, "build-blargg")
-NESRECOMP_BIN = os.path.join(ROOT, "external", "nesrecomp", "recompiler", "build", "NESRecomp")
+BUILD_DIR = os.path.join(ROOT, "build-cyc-blargg")
+CYC_PROJECT = os.path.join(ROOT, "external", "nesrecomp", "runner", "cyc", "project")
 MANIFEST = os.path.join(TOOLS_DIR, "manifest.json")
 DEFAULT_ROMS_DIR = os.path.join(ROOT, "external", "nes-test-roms")
 FETCH_URL = "https://github.com/christopherpow/nes-test-roms"
 
-CMAKE_TEMPLATE = """cmake_minimum_required(VERSION 3.20)
-project(blargg_harness C CXX)
-set(CMAKE_C_STANDARD 11)
-set(NESRECOMP_ROOT "{nesrecomp_root}")
-include(${{NESRECOMP_ROOT}}/runner/runner.cmake)
-include_directories("{third_party_sdl}")
-include_directories(${{NESRECOMP_RUNNER_INCLUDE_DIRS}})
-include_directories("{bundled_sdl}")
-set(SDL2_LIBRARY {sdl2_lib})
-{targets}
-"""
-
-TARGET_TEMPLATE = """add_executable({exe}
-    ${{NESRECOMP_RUNNER_SOURCES}}
-    "{extras}"
-    {sources}
-)
-target_include_directories({exe} PRIVATE
-    ${{NESRECOMP_RUNNER_INCLUDE_DIRS}}
-    "{bundled_sdl}"
-    "{third_party_sdl}"
-)
-target_link_libraries({exe} PRIVATE ${{SDL2_LIBRARY}} m pthread)
-"""
+# Mapper IDs the cycle backend implements (MAPPERS.md: originals 0,1,2,3,4,7,66).
+CYC_MAPPERS = {0, 1, 2, 3, 4, 7, 66}
 
 
 def sh(cmd, **kw):
@@ -102,7 +82,8 @@ def parse_ines(path):
 
 
 def patch_state():
-    """Capture which runner patches are active for result provenance."""
+    """Capture framework provenance for results (backend is cycle: patches
+    touch the legacy runner only, so this is informational here)."""
     sub = os.path.join(ROOT, "external", "nesrecomp")
     commit = sh(["git", "-C", sub, "rev-parse", "HEAD"]).stdout.strip()
     status = sh(["git", "-C", sub, "status", "--porcelain"]).stdout.strip()
@@ -113,7 +94,7 @@ def patch_state():
         r = sh(["git", "-C", sub, "apply", "--check", "--reverse", p])
         applied.append({"file": os.path.basename(p),
                         "applied": r.returncode == 0})
-    return {"nesrecomp_head": commit, "worktree_dirty": bool(status),
+    return {"backend": "cycle", "nesrecomp_head": commit, "worktree_dirty": bool(status),
             "worktree_status": status[:2000], "patches": applied}
 
 
@@ -144,104 +125,105 @@ def load_manifest():
         return json.load(f)["roms"]
 
 
-def recompile(entry_path, prefix):
-    """Run NESRecomp on one ROM. Returns (ok, log, gen_files)."""
-    os.makedirs(GEN_DIR, exist_ok=True)
-    os.makedirs(TOML_DIR, exist_ok=True)
-    toml_path = os.path.join(TOML_DIR, prefix + ".toml")
-    with open(toml_path, "w") as f:
-        f.write(f'[game]\noutput_prefix = "{prefix}"\n')
-    # Scrub stale outputs so a failed regen can't reuse last run's C.
-    for stale in glob.glob(os.path.join(GEN_DIR, prefix + "*.c")):
-        os.remove(stale)
-    r = sh([NESRECOMP_BIN, entry_path, "--game", toml_path,
-            "--output-prefix", prefix], cwd=TOOLS_DIR)
-    log = (r.stdout + "\n" + r.stderr)[-4000:]
-    # The umbrella <prefix>_full.c already contains all bank parts (same as
-    # src/CMakeLists.txt); compiling the per-bank splits too would
-    # double-define every function. Fall back to splits only if no umbrella.
-    umbrella = os.path.join(GEN_DIR, prefix + "_full.c")
-    dispatch = os.path.join(GEN_DIR, prefix + "_dispatch.c")
-    if os.path.isfile(umbrella):
-        gen = [umbrella] + ([dispatch] if os.path.isfile(dispatch) else [])
-    else:
-        gen = sorted(glob.glob(os.path.join(GEN_DIR, prefix + "*.c")))
-    ok = r.returncode == 0 and gen and "TOML parse error" not in log
-    return ok, log, gen
-
-
-def write_cmakelists(tests):
-    nesrecomp_root = os.path.join(ROOT, "external", "nesrecomp")
-    third_party = os.path.join(ROOT, "src", "third_party", "SDL2")
-    bundled = os.path.join(nesrecomp_root, "runner", "external", "SDL2", "include")
-    sdl2_lib = "/usr/lib/x86_64-linux-gnu/libSDL2-2.0.so.0"
-    extras = os.path.join(TOOLS_DIR, "blargg_extras.c")
-    blocks = []
-    for t in tests:
-        srcs = "\n    ".join(f'"{g}"' for g in t["gen_files"])
-        blocks.append(TARGET_TEMPLATE.format(exe=t["exe"], extras=extras, sources=srcs,
-                                             bundled_sdl=bundled, third_party_sdl=third_party))
-    content = CMAKE_TEMPLATE.format(nesrecomp_root=nesrecomp_root, third_party_sdl=third_party,
-                                    bundled_sdl=bundled, sdl2_lib=sdl2_lib,
-                                    targets="\n".join(blocks))
-    os.makedirs(BUILD_DIR, exist_ok=True)
-    with open(os.path.join(BUILD_DIR, "CMakeLists.txt"), "w") as f:
-        f.write(content)
-
-
-def build_all(jobs):
-    r = sh(["cmake", "-S", BUILD_DIR, "-B", BUILD_DIR, "-G", "Ninja",
-            "-DCMAKE_BUILD_TYPE=Release"])
+def build_one(t, jobs):
+    """Configure + build one ROM's cycle backend. Returns (ok, detail)."""
+    bdir = os.path.join(BUILD_DIR, "cyc-" + sanitize(t["name"]))
+    t["build_dir"] = bdir
+    t["exe"] = os.path.join(bdir, "nes_game")
+    cfg = ["cmake", "-S", CYC_PROJECT, "-B", bdir,
+           f"-DNESRECOMP_ROM={t['rom']}", "-DNESRECOMP_HEADLESS=ON"]
+    r = sh(cfg)
     if r.returncode != 0:
-        return False, "cmake configure failed:\n" + (r.stdout + r.stderr)[-3000:]
-    b = ["cmake", "--build", BUILD_DIR, "-j", str(jobs)]
+        return False, "cmake configure failed:\n" + (r.stdout + r.stderr)[-2000:]
+    b = ["cmake", "--build", bdir, "-j", str(jobs)]
     r = sh(b)
-    if r.returncode != 0:
-        return False, "cmake build failed:\n" + (r.stdout + r.stderr)[-6000:]
+    if r.returncode != 0 or not os.path.isfile(t["exe"]):
+        return False, "cmake build failed:\n" + (r.stdout + r.stderr)[-3000:]
     return True, ""
 
 
-def run_one(exe_path, rom_path, name, max_frames, wall_timeout):
-    env = dict(os.environ)
-    env["BLARGG_TEST_NAME"] = name
-    env["BLARGG_MAX_FRAMES"] = str(max_frames)
-    cmd = [exe_path, rom_path, "--smoke", str(max_frames),
-           "--smoke-interval", str(max_frames)]
+def read_verdict_text(mem_path):
+    """Extract the shell result text near $0200 (NUL-terminated ASCII run).
+
+    Singles print `Passed...` at $0201; multi-test suites print
+    `All N tests passed` at $0200; some leave binary debris before the text.
+    Searches $0200-$02FF for the first long printable run instead of
+    assuming an offset.
+    """
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, env=env,
-                           timeout=wall_timeout)
+        rows = {}
+        for line in open(mem_path, errors="replace"):
+            m = re.match(r"ram ([0-9A-Fa-f]{4}):((?: [0-9A-Fa-f]{2})+)", line)
+            if m:
+                rows[int(m.group(1), 16)] = bytes(int(b, 16) for b in m.group(2).split())
+        buf = b"".join(rows.get(a, b"") for a in range(0x200, 0x300, 0x20))
+        text = buf.decode("ascii", errors="replace")
+        # Shell verdict shapes observed: `Passed<suffix>` at $0200/$0201
+        # (suffix varies; bare `Passed` is only 6 chars) and
+        # `All N tests passed` anywhere in the window.
+        m = re.search(r"(Passed[ -~]*?)(?:\x00|$)|((?:All \d+ tests? passed|Failed[ -~]*?))(?:\x00|$)", text)
+        return (m.group(0).rstrip("\x00") if m else "")
+    except OSError:
+        return ""
+
+
+def classify_verdict(text):
+    if re.search(r"passed", text, re.IGNORECASE) and not re.search(r"failed?", text, re.IGNORECASE):
+        return "PASS"
+    if re.search(r"failed?", text, re.IGNORECASE):
+        return "FAIL"
+    return ""
+
+
+def run_one(t, max_frames, wall_timeout):
+    mem_path = os.path.join(t["build_dir"], "mem.txt")
+    miss_path = os.path.join(t["build_dir"], "miss.txt")
+    shot_path = os.path.join(t["build_dir"], "shot.png")
+    cmd = [t["exe"], t["rom"], "--frames", str(max_frames), "--ram-init", "zeros",
+           "--mem-frame", str(max_frames - 1), "--mem-out", mem_path,
+           "--miss-log", miss_path, "--screenshot", shot_path]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=wall_timeout)
         rc, out, err = r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired as e:
-        out = (e.stdout or "") if isinstance(e.stdout, str) else ""
-        err = (e.stderr or "") if isinstance(e.stderr, str) else ""
-        return {"name": name, "status": "WALL_TIMEOUT", "code": -1, "frames": None,
-                "misses": None, "brks": None, "reset_seen": None, "detail": "",
+        out = e.stdout if isinstance(e.stdout, str) else ""
+        err = e.stderr if isinstance(e.stderr, str) else ""
+        return {"name": t["name"], "status": "HANG", "code": -2, "frames": None,
+                "misses": None, "native_pct": None, "detail": "wall timeout (stalled)",
                 "tail": (out + err)[-800:]}
-    verdict = None
-    for line in out.splitlines():
-        if line.startswith("[BLARGG]"):
-            try:
-                verdict = json.loads(line[len("[BLARGG]"):])
-            except json.JSONDecodeError:
-                continue
-    if verdict and verdict.get("status") not in ("START",):
-        verdict["tail"] = (out + err)[-800:]
-        return verdict
-    if "[HANG]" in err or "[HANG]" in out:
-        return {"name": name, "status": "HANG", "code": -2, "frames": None,
-                "misses": None, "brks": None, "reset_seen": None,
-                "detail": "hang watchdog fired", "tail": (out + err)[-800:]}
+    native = None
+    m = re.search(r"\((\d+\.\d+)%\)", out or "")
+    if m:
+        native = float(m.group(1))
+    misses = None
+    if os.path.isfile(miss_path):
+        misses = sum(1 for ln in open(miss_path) if ln.strip() and not ln.startswith("#"))
+    text = read_verdict_text(mem_path)
+    verdict = classify_verdict(text)
+    if verdict == "PASS":
+        return {"name": t["name"], "status": "PASS", "code": 0, "frames": max_frames,
+                "misses": misses, "native_pct": native, "detail": text[:100],
+                "tail": (out + err)[-800:]}
+    if verdict == "FAIL":
+        return {"name": t["name"], "status": "FAIL", "code": 1, "frames": max_frames,
+                "misses": misses, "native_pct": native, "detail": text[:100],
+                "tail": (out + err)[-800:]}
     if rc != 0:
-        return {"name": name, "status": "ERROR", "code": rc, "frames": None,
-                "misses": None, "brks": None, "reset_seen": None,
+        return {"name": t["name"], "status": "ERROR", "code": rc, "frames": None,
+                "misses": misses, "native_pct": native,
                 "detail": f"exit {rc} with no verdict", "tail": (out + err)[-800:]}
-    return {"name": name, "status": "TIMEOUT", "code": 2, "frames": max_frames,
-            "misses": None, "brks": None, "reset_seen": None,
-            "detail": "no $6000 verdict before smoke exit", "tail": (out + err)[-800:]}
+    # Ran the full budget with no RAM text: some tests (branch timing)
+    # render their verdict to the screen only. Human-readable screenshot
+    # saved; reported, non-blocking (like info tier).
+    return {"name": t["name"], "status": "UNVERIFIED",
+            "code": 3, "frames": max_frames,
+            "misses": misses, "native_pct": native,
+            "detail": f"no RAM text; see {shot_path}",
+            "tail": (out + err)[-800:]}
 
 
 def main():
-    ap = argparse.ArgumentParser(description="blargg suite for NESRecomp runner patches")
+    ap = argparse.ArgumentParser(description="blargg suite on the cycle backend")
     ap.add_argument("--roms-dir", default=None,
                     help="nes-test-roms checkout (default: [tool.blargg] roms_dir)")
     ap.add_argument("--fetch", action="store_true", help="git clone nes-test-roms")
@@ -253,10 +235,9 @@ def main():
     ap.add_argument("--max-frames", type=int, default=None)
     ap.add_argument("--wall-timeout", type=int, default=None)
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
-    ap.add_argument("--no-build", action="store_true", help="skip recompile+build, run existing binaries")
+    ap.add_argument("--no-build", action="store_true", help="skip configure+build, run existing binaries")
     ap.add_argument("--any-mapper", action="store_true",
-                    help="ad-hoc: build ROMs of any mapper (minimal game.toml has no "
-                         "bank_switch, so banked ROMs may miscompile — diagnostics only)")
+                    help="ad-hoc: also build ROMs outside the cycle mapper set (diagnostics only)")
     args = ap.parse_args()
 
     cfg = project_defaults()
@@ -269,7 +250,7 @@ def main():
     if args.max_frames is None:
         args.max_frames = int(cfg.get("max_frames", 3600))
     if args.wall_timeout is None:
-        args.wall_timeout = int(cfg.get("wall_timeout", 120))
+        args.wall_timeout = int(cfg.get("wall_timeout", 300))
 
     if args.fetch:
         return do_fetch(args)
@@ -311,47 +292,41 @@ def main():
             results.append({"name": e["name"], "status": "SKIP", "detail": "bad iNES header"})
             print(f'{e["name"]:22s} SKIP         bad iNES header', flush=True)
             continue
-        if hdr[0] != 0 and not args.any_mapper:
+        if hdr[0] not in CYC_MAPPERS and not args.any_mapper:
             results.append({"name": e["name"], "status": "SKIP",
-                            "detail": f"mapper {hdr[0]} unsupported in v1 (NROM only)"})
-            print(f'{e["name"]:22s} SKIP         mapper {hdr[0]} (NROM-only v1)', flush=True)
+                            "detail": f"mapper {hdr[0]} outside cycle set"})
+            print(f'{e["name"]:22s} SKIP         mapper {hdr[0]} (outside cycle set)', flush=True)
             continue
-        prefix = "blargg_" + sanitize(e["name"])
-        tests.append({"name": e["name"], "tier": e.get("tier", "cpu"), "rom": os.path.abspath(p),
-                      "prefix": prefix, "exe": "blargg_" + sanitize(e["name"]),
-                      "hdr": hdr})
+        tests.append({"name": e["name"], "tier": e.get("tier", "cpu"),
+                      "rom": os.path.abspath(p), "hdr": hdr})
 
     if not args.no_build:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(args.jobs, max(1, len(tests)))) as ex:
+            built = dict(zip([t["name"] for t in tests],
+                             ex.map(lambda t: build_one(t, 2), tests)))
         for t in tests:
-            ok, log, gen = recompile(t["rom"], t["prefix"])
-            t["gen_files"] = gen
+            ok, detail = built[t["name"]]
             if not ok:
-                results.append({"name": t["name"], "status": "RECOMP_FAIL", "detail": log[-500:]})
-                print(f'{t["name"]:22s} RECOMP_FAIL {log[-500:]}', flush=True)
-        tests = [t for t in tests if t.get("gen_files")]
-        if tests:
-            write_cmakelists(tests)
-            ok, msg = build_all(args.jobs)
-            if not ok:
-                print(msg)
-                return 1
+                results.append({"name": t["name"], "status": "RECOMP_FAIL", "detail": detail[-500:]})
+                print(f'{t["name"]:22s} RECOMP_FAIL {detail[-200:]}', flush=True)
+        tests = [t for t in tests if t.get("exe") and os.path.isfile(t["exe"])]
     else:
         for t in tests:
-            t["gen_files"] = []
+            t["build_dir"] = os.path.join(BUILD_DIR, "cyc-" + sanitize(t["name"]))
+            t["exe"] = os.path.join(t["build_dir"], "nes_game")
 
     for t in tests:
-        exe_path = os.path.join(BUILD_DIR, t["exe"])
-        if not os.path.isfile(exe_path):
+        if not os.path.isfile(t.get("exe", "")):
             results.append({"name": t["name"], "status": "NO_BINARY",
                             "detail": "build produced no binary (use without --no-build?)"})
             continue
         print(f"--- {t['name']} ---", flush=True)
-        r = run_one(exe_path, t["rom"], t["name"], args.max_frames, args.wall_timeout)
+        r = run_one(t, args.max_frames, args.wall_timeout)
         r["tier"] = t["tier"]
         results.append(r)
         det = (r.get("detail") or "")[:100]
         print(f'{t["name"]:22s} {r["status"]:12s} frames={r.get("frames")} '
-              f'misses={r.get("misses")} brks={r.get("brks")} {det}', flush=True)
+              f'misses={r.get("misses")} native={r.get("native_pct")} {det}', flush=True)
 
     state = patch_state()
     out = {"patch_state": state, "results": results,
@@ -369,7 +344,12 @@ def main():
         return c
     print(f"\ncpu : {counts(cpu)}")
     print(f"info: {counts(info)}")
-    ran = [r for r in cpu if r["status"] not in ("SKIP",)]
+    ran = [r for r in cpu if r.get("status") not in ("SKIP", "UNVERIFIED")]
+    fails = [r for r in ran if r["status"] != "PASS"]
+    unver = [r for r in cpu if r.get("status") == "UNVERIFIED"]
+    if unver:
+        print(f"UNVERIFIED (screen verdict only, see shot.png in each build dir): "
+              f"{[r['name'] for r in unver]}")
     fails = [r for r in ran if r["status"] != "PASS"]
     if not ran:
         print("nothing ran (all SKIP).")

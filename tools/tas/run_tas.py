@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
-"""run_tas.py — shared-input TAS run on both MesenCE oracle and recomp.
+"""run_tas.py — shared-input TAS run on both MesenCE oracle and cycle backend.
 
 Usage:
   python3 tools/tas/run_tas.py --tas tas/sdb_4976.tas.json --frames 400 --out tas/runs/r400
-    [--rom "roms/Super Dodge Ball (USA).nes"] [--shot-stride 5] [--skip-mesen|--skip-recomp]
+    [--rom "roms/Super Dodge Ball (USA).nes"] [--shot-stride 5] [--skip-mesen|--skip-cyc]
+
+The cycle backend (build-cycle/nes_game, upstream runner/cyc) is the only
+recompilation under test: per-cycle CPU/PPU/APU, no extras.c, no patches.
+Mesen side: TAS-driven Lua oracle (input in inputPolled, RAM/PPU bins +
+state log per endFrame). Cycle side: absolute-state input schedule +
+--frame-log-at mesen binary snapshots (RAM/CIRAM/palette/OAM/picture).
 
 Outputs in OUT:
-  input.tas.json, input.script, input.lua,
+  input.tas.json, input.lua (mesen), input.cyc (cycle schedule),
   mesen/ (mesen_*.ppm/bin/meta, mesen_state.jsonl, mesen_nmi_log.txt),
-  recomp/ (frame_*.png, smoke.json, wram.jsonl, ppu.jsonl, cosim.jsonl, apu.jsonl, stdout.log),
+  cyc/ (frames.bin CYCFRAME log, miss.txt, shots shot_*.png, cyc.log),
   run.json (provenance: rom sha, framework rev, tas sha, counts, exit codes).
 """
 import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,57 +29,47 @@ import sys
 PROJ = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 ROM_NAME = "Super Dodge Ball (USA).nes"
-GAME_PREFIX = "Super_Dodge_Ball_(USA)"
+CYC_DIR = os.path.join(PROJ, "build-cycle")
+CYC_EXE = os.path.join(CYC_DIR, "nes_game")
 
 
-def ensure_fresh_build(quiet=False):
-    """Rebuild the game binary if inputs are newer than it.
+def ensure_cyc_build(quiet=False):
+    """Reconfigure + rebuild the cycle backend if inputs are newer than it.
 
-    Covers the known cmake gap: the regen custom command does not reliably
-    retrigger after game.toml/extras.c edits, and TAS runs otherwise use
-    whatever binary exists. Compares mtimes; on staleness runs the
-    recompiler manually (confirming [Eval] Coverage) then cmake build.
-    Raises RuntimeError on failure. Returns True if a rebuild ran.
+    The cyc project regenerates code at configure/build time from the ROM +
+    game config, so freshness is a plain mtime compare (no separate regen
+    step, unlike the legacy runner). Raises RuntimeError on failure.
+    Returns True if a build ran.
     """
     def log(*a):
         if not quiet:
-            print("[build]", *a, file=sys.stderr)
+            print("[build-cycle]", *a, file=sys.stderr)
 
-    src_dir = os.path.join(PROJ, "src")
-    gen_dir = os.path.join(PROJ, "generated")
-    build_dir = os.path.join(PROJ, "build")
-    exe = os.path.join(build_dir, "super_dodgeball")
     rom = os.path.join(PROJ, "roms", ROM_NAME)
-    inputs = [os.path.join(src_dir, f) for f in ("game.toml", "extras.c", "CMakeLists.txt")]
-    missing = [p for p in inputs + [rom] if not os.path.exists(p)]
-    if missing:
-        raise RuntimeError(f"missing build inputs: {missing}")
-    exe_mtime = os.path.getmtime(exe) if os.path.exists(exe) else -1
-    stale = [p for p in inputs if os.path.getmtime(p) > exe_mtime]
+    cfg = os.path.join(PROJ, "src", "game.toml")
+    for p in (rom, cfg):
+        if not os.path.exists(p):
+            raise RuntimeError(f"missing build input: {p}")
+    exe_mtime = os.path.getmtime(CYC_EXE) if os.path.exists(CYC_EXE) else -1
+    stale = [p for p in (rom, cfg) if os.path.getmtime(p) > exe_mtime]
     if exe_mtime >= 0 and not stale:
         log("binary fresh, skipping build")
         return False
     log("stale inputs:", [os.path.basename(p) for p in stale] or ["(no binary)"],
-        "— regenerating + rebuilding")
-    recomp = os.path.join(PROJ, "external", "nesrecomp", "recompiler", "build", "NESRecomp")
-    if not os.path.exists(recomp):
-        raise RuntimeError(f"recompiler binary missing: {recomp}")
-    r = subprocess.run([recomp, rom, "--game", os.path.join(src_dir, "game.toml"),
-                        "--output-prefix", GAME_PREFIX],
-                       cwd=PROJ, capture_output=True, text=True)
-    sys.stderr.write(r.stdout or "")
-    sys.stderr.write(r.stderr or "")
-    if r.returncode != 0 or "could not load game config" in (r.stdout or ""):
-        raise RuntimeError("NESRecomp regen failed (see output above)")
-    for step in (["cmake", "-S", "src", "-B", "build", "-G", "Ninja",
-                  "-DCMAKE_BUILD_TYPE=Release"],
-                 ["cmake", "--build", "build", "-j", str(os.cpu_count() or 4)]):
-        log("+", " ".join(step))
+        "— reconfiguring + rebuilding")
+    sdl_dir = "/usr/lib/x86_64-linux-gnu/cmake/SDL2"
+    cfg_cmd = ["cmake", "-S", "external/nesrecomp/runner/cyc/project", "-B", "build-cycle",
+               f"-DNESRECOMP_ROM={rom}", f"-DNESRECOMP_GAME_CONFIG={cfg}",
+               "-DNESRECOMP_HEADLESS=ON"]
+    if os.path.isdir(sdl_dir):
+        cfg_cmd.append(f"-DSDL2_DIR={sdl_dir}")
+    for step in (cfg_cmd, ["cmake", "--build", "build-cycle", "-j", str(os.cpu_count() or 4)]):
+        log("+", " ".join(step[:4]), "...")
         r = subprocess.run(step, cwd=PROJ, capture_output=True, text=True)
         if r.returncode != 0:
             sys.stderr.write((r.stdout or "")[-4000:])
             sys.stderr.write((r.stderr or "")[-4000:])
-            raise RuntimeError(f"build step failed: {' '.join(step[:3])}")
+            raise RuntimeError("cycle build step failed (see output above)")
     log("rebuild complete")
     return True
 
@@ -93,30 +90,20 @@ NAMES = [(0x80, "A"), (0x40, "B"), (0x20, "SELECT"), (0x10, "START"),
          (0x08, "UP"), (0x04, "DOWN"), (0x02, "LEFT"), (0x01, "RIGHT")]
 
 
-def emit_script(frames, path):
-    cmds = ["WAIT 1"]
-    pending, prev = 0, 0
-    for m in frames[1:]:
-        newly, gone = m & ~prev, prev & ~m
-        prev = m
-        if newly or gone:
-            if pending:
-                cmds.append(f"WAIT {pending}")
-                pending = 0
-            for bit, n in NAMES:
-                if newly & bit:
-                    cmds.append(f"HOLD {n}")
-            for bit, n in NAMES:
-                if gone & bit:
-                    cmds.append(f"RELEASE {n}")
-        else:
-            pending += 1
-    if pending:
-        cmds.append(f"WAIT {pending}")
-    # Tail: runner exits when the script completes, so outlive any --smoke count.
-    cmds.append("WAIT 1000000")
-    open(path, "w").write("# generated by run_tas.py\n" + "\n".join(cmds) + "\n")
-    return cmds
+def emit_schedule(frames, path):
+    """tas.json -> cycle absolute-state schedule (`<frame> A+B...`, `-` = release).
+
+    The host applies steps with step.frame <= frame, so TAS frame f state is
+    emitted at f. One step per change (plus frame 0 when nonzero).
+    """
+    steps = []
+    prev = None
+    for f, m in enumerate(frames):
+        if m != prev:
+            steps.append(f"{f} " + ("+".join(n for bit, n in NAMES if m & bit) if m else "-"))
+            prev = m
+    open(path, "w").write("# generated by run_tas.py\n" + "\n".join(steps) + "\n")
+    return steps
 
 
 def run_mesen(rom, lua_tool, tas_lua, out_m, frames, stride, timeout=180):
@@ -145,27 +132,29 @@ def run_mesen(rom, lua_tool, tas_lua, out_m, frames, stride, timeout=180):
     return r.returncode
 
 
-def run_recomp(rom, script, out_r, frames, timeout=120):
-    exe = os.path.join(PROJ, "build", "super_dodgeball")
-    shots = os.path.join(out_r, "shots")
+def run_cyc(rom, sched, out_c, frames, stride, timeout=600):
+    shots = os.path.join(out_c, "shots")
     os.makedirs(shots, exist_ok=True)
-    env = dict(os.environ,
-               NESRECOMP_WRAM_TRACE=os.path.join(out_r, "wram.jsonl"),
-               NESRECOMP_PPUMEM_TRACE=os.path.join(out_r, "ppu.jsonl"),
-               NESRECOMP_COSIM_HASH=os.path.join(out_r, "cosim.jsonl"),
-               NESRECOMP_APU_TRACE=os.path.join(out_r, "apu.jsonl"))
-    cmd = [exe, rom, "--script", script, "--smoke", str(frames),
-           "--smoke-interval", "1", "--save-screenshot", shots,
-           "--smoke-output", os.path.join(out_r, "smoke.json")]
+    shot_base = os.path.join(shots, "shot.png")
+    cmd = [CYC_EXE, rom, "--frames", str(frames), "--input", sched,
+           "--ram-init", "zeros",
+           "--frame-log-at", "mesen", "--frame-log", os.path.join(out_c, "frames.bin"),
+           "--shot-every", str(stride), "--screenshot", shot_base,
+           "--miss-log", os.path.join(out_c, "miss.txt")]
     print("+", " ".join(cmd), file=sys.stderr)
     try:
-        r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         rc = r.returncode
         out = (r.stdout or "") + (r.stderr or "")
     except subprocess.TimeoutExpired as e:
-        rc, out = 124, (e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
-    open(os.path.join(out_r, "recomp.log"), "w").write(out)
-    return rc
+        rc, out = 124, (e.stdout or "") if isinstance(e.stdout, str) else ""
+    open(os.path.join(out_c, "cyc.log"), "w").write(out)
+    m = re.search(r"frames=(\d+).*native_cycles=(\d+)", out)
+    info = {"frames": int(m.group(1)) if m else None}
+    m2 = re.search(r"\((\d+\.\d+)%\)", out)
+    info["native_pct"] = float(m2.group(1)) if m2 else None
+    info["rc"] = rc
+    return info
 
 
 def main():
@@ -176,37 +165,35 @@ def main():
     ap.add_argument("--rom", default=os.path.join(PROJ, "roms", "Super Dodge Ball (USA).nes"))
     ap.add_argument("--shot-stride", type=int, default=1)
     ap.add_argument("--skip-mesen", action="store_true")
-    ap.add_argument("--skip-recomp", action="store_true")
+    ap.add_argument("--skip-cyc", action="store_true")
     ap.add_argument("--no-build", action="store_true",
                     help="skip the freshness rebuild (use existing binary as-is)")
     a = ap.parse_args()
 
     rebuilt = False
-    if not a.skip_recomp and not a.no_build:
-        rebuilt = ensure_fresh_build()
+    if not a.skip_cyc and not a.no_build:
+        rebuilt = ensure_cyc_build()
 
     tas = json.load(open(a.tas))
     frames = tas["frames"][:a.frames]
     os.makedirs(a.out, exist_ok=True)
     out_m = os.path.join(a.out, "mesen")
-    out_r = os.path.join(a.out, "recomp")
+    out_c = os.path.join(a.out, "cyc")
     os.makedirs(out_m, exist_ok=True)
-    os.makedirs(out_r, exist_ok=True)
+    os.makedirs(out_c, exist_ok=True)
 
     json.dump({"source_tas": a.tas, "frames": frames}, open(os.path.join(a.out, "input.tas.json"), "w"))
-    script = os.path.join(a.out, "input.script")
-    cmds = emit_script(frames, script)
+    sched = os.path.join(a.out, "input.cyc")
+    steps = emit_schedule(frames, sched)
     tas_lua = os.path.join(a.out, "input.lua")
     emit_lua(frames, tas_lua)
-    print(f"TAS frames={len(frames)} script_cmds={len(cmds)}", file=sys.stderr)
-    if len(cmds) > 4096:
-        print("WARNING: script exceeds MAX_CMDS 4096 — recomp run will truncate", file=sys.stderr)
+    print(f"TAS frames={len(frames)} cyc_steps={len(steps)}", file=sys.stderr)
 
     rc_mesen = run_mesen(os.path.abspath(a.rom),
                          os.path.join(PROJ, "tools", "tas", "mesen_tas.lua"),
                          tas_lua, out_m, len(frames), a.shot_stride) if not a.skip_mesen else None
-    rc_recomp = run_recomp(os.path.abspath(a.rom), os.path.abspath(script),
-                           out_r, len(frames)) if not a.skip_recomp else None
+    cyc_info = run_cyc(os.path.abspath(a.rom), os.path.abspath(sched),
+                       out_c, len(frames), a.shot_stride) if not a.skip_cyc else None
 
     fw = subprocess.run(["git", "-C", os.path.join(PROJ, "external", "nesrecomp"),
                          "rev-parse", "--short", "HEAD"],
@@ -214,8 +201,8 @@ def main():
     run = {"tas": a.tas, "tas_frames": len(frames),
            "tas_sha1": sha1_file(a.tas), "rom_sha1": sha1_file(a.rom),
            "nesrecomp_head": fw, "shot_stride": a.shot_stride,
-           "rebuilt": rebuilt, "no_build": a.no_build,
-           "mesen_rc": rc_mesen, "recomp_rc": rc_recomp}
+           "backend": "cycle", "rebuilt": rebuilt, "no_build": a.no_build,
+           "mesen_rc": rc_mesen, "cyc": cyc_info}
     json.dump(run, open(os.path.join(a.out, "run.json"), "w"), indent=2)
     print(json.dumps(run, indent=2))
 
