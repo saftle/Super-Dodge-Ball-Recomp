@@ -916,3 +916,36 @@ timing. Schedulable input (`<frame> NAMES` absolute state, same bit map).
   read stale in cycle snapshots (upstream model keeps power-on bytes;
   hardware mirrors the backdrop). Masked in the TAS diff; rendering
   unaffected.
+- Full-movie finding (2026-10-02, #4976 19692f): byte-exact gate extends
+  to frame 450 (RAM/CIRAM/palette/OAM, `$0106/$0107` ignored as volatile
+  NMI/main handshake). First non-handshake split during frame 474
+  (126 zero-page bytes; PPU still identical): entity-walk `$ACF6`
+  (bank 4, `$8000` slot, `prgReg=4`) + shift/multiply `$D9xx` (bank 7)
+  run the same code on both sides with different DATA — downstream, not
+  causal. Cumulative cycle counts agree within +1..+8 over ~586M, so no
+  timing-model drift; root is sub-frame NMI/main phasing or power-on
+  hardware state (APU-phase candidate, untested). `$0100` agrees all
+  19692 frames on both; tipoff visuals match Mesen/cycle/published video.
+  The movie is AI-manipulation-dense (author notes), so it likely needs
+  BizHawk-2.8-exact timing past tipoff — full-movie sync is out of scope
+  for the gate; the gate stays 400 (450 observed).
+- Input-phase ruled out (2026-10-02): ±1-frame shifted schedules run
+  headless on cycle vs Mesen show identical `$0100` mode flow for 600
+  frames under the same shift (both take the same fast/slow menu paths),
+  while either shift breaks vs unshifted at frame 6 (stack byte `$01F6`).
+  Both players share input semantics; the 474 split is execution phasing,
+  not input handling.
+- Windowed == headless (2026-10-02): `--virtual-pad` playback vs
+  `--input` headless, same TAS/schedule/RAM-init, pixel-identical
+  (`--present-out` vs `--screenshot`, 256x240) at frames 1/101/…/501.
+  The window adds no divergence of its own; the only input-path
+  difference anywhere is 9 opposing-dpad frames (first at 5619) the
+  windowed bindings cancel to neutral.
+- Power-on state feeds the game (2026-10-03): Mesen `RamPowerOnState`
+  `Random` vs `AllZeros` splits from cycle-zeros at frame 25 (same 16
+  title/menu bytes, deterministic across boots) while frame-0
+  RAM/OAM/palette/CIRAM dumps are identical — the game clears RAM on
+  boot, so the seed enters via non-cleared state (APU/PPU-latch/mapper
+  candidate, unprobed). Seed sensitivity is real but does not explain
+  the 474 split (identical seeds there) and cannot recover BizHawk's
+  stream.

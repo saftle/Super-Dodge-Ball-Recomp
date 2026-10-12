@@ -35,6 +35,9 @@ movie pages rather than re-hosting.
 | `mesen_tas.lua` | MesenCE player + full capture (input in `inputPolled`) |
 | `run_tas.py` | Runs both sides into `tas/runs/<name>/`, writes `run.json` |
 | `diff_tas.py` | First-divergence report (liveness → state → images) |
+| `watch_tas.py` | Watch the TAS in the cycle backend's own window (`--virtual-pad`) |
+| `watch_mesen.py` / `watch_mesen.lua` | Watch the TAS in the MesenCE GUI (playback only, hands P1 back at the end) |
+| `tas_watch.lua` | Who-writes probe under the TAS (addrs → frame/value/writing PC; `PRGLOG=1` resolves banked PCs) |
 
 ## Capture surfaces
 
@@ -56,6 +59,27 @@ python3 tools/tas/diff_tas.py tas/runs/r400
 # --no-build reuses the existing cycle binary (default reconfigures +
 # rebuilds build-cycle/ when the ROM or src/game.toml are newer than it)
 ```
+
+### Watching instead of diffing
+
+```bash
+python3 tools/tas/watch_tas.py           # cycle backend window, full movie
+python3 tools/tas/watch_mesen.py         # MesenCE window, full movie
+```
+
+Both need a desktop display (don't wrap them in `xvfb-run`). Add
+`--frames N` for a short check, `--no-exit` (watch_tas) to keep the window
+open. Neither is a verification path — `run_tas.py` + `diff_tas.py` is.
+`watch_tas.py` builds `build-cycle` windowed if the binary is currently a
+headless one.
+
+**Known limits**: the full movie diverges from every non-BizHawk player at
+the match tipoff (frame ~474) — see `docs/research.md` §22. Watching
+therefore shows the run until tipoff and then a game that is not the
+recorded one; the inputs still execute exactly as written.
+`watch_tas.py` notes 9 opposing-dpad frames (first at 5619) that the
+windowed bindings cancel to neutral; headless/`--input` and Mesen play
+both bits.
 
 ## Gates (in order, stop at first red)
 
