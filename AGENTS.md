@@ -22,9 +22,11 @@ NESRecomp recompiles NES 6502 → native C via a two-part system:
 - **Cycle backend** (`external/nesrecomp/runner/cyc/`): Cycle-accurate console model (6502, PPU, APU, DMAs, mappers in `hw_*.c`) + host (`cyc_host.c`: input schedules, screenshots, frame-logs, TCP). Built per game into `build-cycle/nes_game`.
 - **`src/game.toml`**: Recompiler config — display `name` (window title), a `cycle_seed_file`, plus the ten content-keyed `[[mod_function_hook]]` sites the character-flicker mod hooks. No discovery tuning; the stock ROM needs none.
 - **`src/cycle_seeds.txt`**: Recompiler discovery roots for the sprite emitters. A mod hook site only exists in recompiled code, and `$8040`/`$821E`/`$E32D`/`$966D`/`$A36C` ran on the interpreter — a hook there compiled, bound and never fired. These six lines fix that; total cycle count unchanged.
-- **`src/sdb_host_extras.c`**: The **character-flicker mod** (`HOST_EXTRAS`). The only game-specific code: it captures every OAM sprite the game emits and presents them host-side, and it overrides the game's own object culling (three gates). The truncation half is presentation only (identical cycle count; only `$02FD`/`$02FF` differ); the culling half is **not** — it makes the guest emit sprites it had dropped. See research.md §2 and §2.1.
+- **`src/sdb_host_extras.c`**: Our two mods (`HOST_EXTRAS`), the only game-specific code. **(1) character-flicker**: captures every OAM sprite the game emits and presents them host-side, and overrides the game's own object culling (three gates). The truncation half is presentation only (identical cycle count; only `$02FD`/`$02FF` differ); the culling half is **not** — it makes the guest emit sprites it had dropped. **(2) PPU overclocking** (section 4): picks a value for `cyc_set_extra_scanlines` so the guest gets more CPU time per frame and runs faster; re-applies it from `power_on`, because `cyc_power_on()` zeroes the field after mods activate. See research.md §2, §2.1 and §23.
 - **`mods/packages/super-dodgeball.character-flicker/`**: The mod *package* — a `manifest.toml` only, copied beside the executable at build time. Data-only by design; `.nesmod` archives may not carry native code, so the package is a declaration and the implementation is `src/sdb_host_extras.c`. Default-on, toggleable in the launcher's Mods screen.
-- **`CMakeLists.txt`** (repo root): our game project — includes the submodule's `runner/cyc/project.cmake` but adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own `runner/cyc/project/CMakeLists.txt` cannot express. This is why the submodule stays pristine.
+- **`mods/packages/super-dodgeball.ppu-overclock/`**: The PPU-overclocking package (same data-only design). Integer `[[option]]` so the launcher exposes the scanline count. Off by default because it changes console timing. Requires `patches/006_ppu_overclock_mmc1`; without it the backend refuses the setting on our MMC1 cart.
+- **`patches/006_ppu_overclock_mmc1.patch`**: The one active submodule patch — widens `cyc_extra_scanlines_supported()` from MMC3-only to MMC1 too. Strictly additive (consulted only when `extra_scanlines != 0`, so stock timing is unchanged for every game) and on its way upstream.
+- **`CMakeLists.txt`** (repo root): our game project — includes the submodule's `runner/cyc/project.cmake` but adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own `runner/cyc/project/CMakeLists.txt` cannot express. This is why we wrap the submodule rather than editing it.
 - **`build-cycle/`**: Generated per-instruction C (gitignored, one revision dir per ROM/config) + `nes_game` runner, `config.ini`, and the preloaded `mods/` catalog.
 - **`external/recomp-ui/`**: Shared recomp-ui launcher (pre-boot settings dashboard) + in-game menu, compiled into the windowed `nes_game`.
 
@@ -96,6 +98,7 @@ Three options (setup.sh uses Option C by default):
 - **ROM** must be at `roms/Super Dodge Ball (USA).nes` (gitignored)
 - **Snapshots**: `--frame-log-at mesen --frame-log frames.bin` writes per-frame CYCFRAME-v2 snapshots (CPU RAM, CIRAM, palette indices, OAM, picture indices) for the TAS diff
 - **Mods**: the window picks them up via the launcher. Headless needs `--mods-root build-cycle/mods` explicitly, or mods stay off and the run is stock.
+- **PPU overclocking**: `--ppu-overclock <0..262>` (blank scanlines before NMI). Needs `patches/006`; refuses with the backend's MMC3 message otherwise. Deliberately changes timing; 0 is stock. The mod's manifest feature does the same thing for the window.
 - **Presentation**: `--present-out` saves what the *window* would show — the only path that exercises the character-flicker mod. `--screenshot`/`--frame-log` capture the machine's native frame and ignore it.
 
 ## Critical Rules
@@ -137,7 +140,7 @@ Three options (setup.sh uses Option C by default):
 - Pre-commit self-check: `git status --short` and `git ls-files | grep -Ei '\.(nes|png|ppm|bin)$'` must show no game-derived blobs; any new `static const uint8_t …[]` in `src/` needs ROM-provenance justification or gets rejected
 - Every third-party addition ships with provenance + license + posture, recorded at add time (never as later cleanup): who made it, under what license (or "no license file found"), and how redistribution is avoided — submodule pointer (own license, never vendored), gitignored + user-fetched (test ROMs, oracle binaries), or credited test fixture (vectors keep in-file + README author credit, link pages instead of re-hosting). Code/deps go in `NOTICE.md`; test data goes in the nearest README
 - Installed packages (pip/apt) are not distributed — no attribution needed. Code you write from specs (parsers, harnesses) is yours. Data files you didn't create keep their credits intact — never strip author info
-- **nesrecomp submodule tracks pristine `origin/master`** (currently `mstan/nesrecomp` @ `2b4fcdb` — the pin must stay fetchable upstream; never commit in the submodule, never work with a dirty tree: `git -C external/nesrecomp status` must be clean or the dirt is yours to explain); local runner experiments go upstream or they don't happen — no `patches/` anymore (retired, see `patches/README.md`)
+- **nesrecomp submodule tracks pristine `origin/master`** (currently `mstan/nesrecomp` @ `2b4fcdb` — the pin must stay fetchable upstream; never commit in the submodule). The **checked-out tree is expected to be dirty** when a patch is applied: `setup.sh` applies `patches/*.patch` after every checkout, so `git -C external/nesrecomp status` showing a patched file is normal, not a mistake. `git -C external/nesrecomp status` must otherwise be clean. Active patches must be **strictly additive** and are headed for upstream PRs — see `patches/README.md`, `patches/active-patches.md`
 
 ## Known Issues (Current State)
 
@@ -182,7 +185,7 @@ Three options (setup.sh uses Option C by default):
 
 ## Retired: Legacy Runner (2026-10-02)
 
-The function-level runner (`src/extras.c` hooks, `patches/`, `build/`) is deleted. Its game knowledge (NMI dispatcher, tunnel mechanics, input path) lives on in `docs/research.md` §§18–19 and transfers to mod work. The one artifact proposed upstream is patch 002 (S-latch guard) — see `docs/plan.md`; the rest lapsed. Never re-add game-specific hooks to work around timing again: time it against Mesen, and if the model is wrong, the fix belongs upstream.
+The function-level runner (`src/extras.c` hooks, `build/`) is deleted. Its game knowledge (NMI dispatcher, tunnel mechanics, input path) lives on in `docs/research.md` §§18–19 and transfers to mod work. `patches/` is back (reopened 2026-10-12 for patch 006): `setup.sh` applies active patches to the submodule after every checkout — see `patches/active-patches.md` — and archived legacy-runner patches stay unapplied in `patches/archived/`. Never re-add game-specific hooks to work around timing again: time it against Mesen, and if the model is wrong, the fix belongs upstream.
 
 ## Verification & Testing
 
@@ -331,9 +334,24 @@ Required `settings.json` for headless operation:
 - `Debugger.BreakOnCpuCrash: false`
 - **Remove `mesen.lock`** from `external/mesence/` before running
 
+**MesenCE reads `settings.json` from the directory its binary sits in — NOT from `$HOME`.**
+Overriding `HOME` does nothing; the real user config is silently used instead. The sandbox must
+own the *executable*: copy `Mesen` + `MesenCore.so` + `lib*.so` + `settings.json` into a temp dir
+and run that copy. Verified by control: `Nes.Region=Pal` only moved cycles/frame 29781 → 33248
+once `settings.json` sat beside a copied binary. `tools/frame_gen/run_frames.sh` does this.
+
+Two more traps in the same script, both of which look like "Mesen produced nothing":
+- **`xvfb-run` word-splits the program path.** It execs via `sh -c`, so a path containing spaces
+  (this repo's own path has one) breaks *even when quoted*. `cd` into the sandbox and run `./Mesen`.
+- **After `cd`, relative ROM paths stop resolving.** Pass an absolute ROM path.
+
+Also: `PpuExtraScanlinesBeforeNmi` exists under **both** `Nes` and `Snes` in the shipped settings.
+A naive `grep` matches whichever comes first in the file and reports the wrong console's value —
+read it back with a JSON parser scoped to the section. See `docs/research.md` §23.
+
 ### MesenCE as Oracle
 
-Frame reference generation uses the **prebuilt MesenCE binary** (`external/mesence/Mesen`) with `--testRunner` mode and a Lua script (`tools/frame_gen/export_frames.lua`). Deeper oracle work (PPU dumps, per-NMI flag logs) uses `tools/frame_gen/oracle_dump.lua` — see `docs/research.md` §16. Headless runs need `xvfb-run` plus an isolated HOME with `settings.json`.
+Frame reference generation uses the **prebuilt MesenCE binary** (`external/mesence/Mesen`) with `--testRunner` mode and a Lua script (`tools/frame_gen/export_frames.lua`). Deeper oracle work (PPU dumps, per-NMI flag logs) uses `tools/frame_gen/oracle_dump.lua` — see `docs/research.md` §16. Headless runs need `xvfb-run` plus a sandbox that owns the Mesen *binary* and its `settings.json` (see the config-location note above; isolating `HOME` alone does not work).
 
 ### Known limitations:
 - The NESRecomp toolchain is one-way (ROM → C). No built-in way to compile C back to ROM.
@@ -382,16 +400,18 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 |------|---------|
 | `CMakeLists.txt` | Game project (root). Wraps the submodule's `runner/cyc/project.cmake`, adds `CXX` + `MODS` + `GAME_ID` + `HOST_EXTRAS`, copies `mods/` beside the executable |
 | `src/game.toml` | Recompiler config: display `name`, a `cycle_seed_file`, plus ten content-keyed `[[mod_function_hook]]` sites (`length`+`crc32`, never `bytes`) |
-| `src/sdb_host_extras.c` | The character-flicker mod: OAM sprite capture + host-side presentation + object-culling override + per-emitter captures. Only game-specific C in the tree |
+| `src/sdb_host_extras.c` | Our mods: the character-flicker mod (OAM sprite capture + host-side presentation + object-culling override) and the PPU-overclocking mod (section 4; sets `cyc_set_extra_scanlines`). Only game-specific C in the tree. Owns the single `cyc_host_extras()` |
 | `src/cycle_seeds.txt` | Recompiler discovery roots for the sprite emitters — a mod hook site only exists in recompiled code |
 | `tas/vectors/sdb_idle.input` | Reproduction vector for the flicker fixes (idle into a match; B blinks at 865-905) |
 | `tas/vectors/sdb_throw.input` | Stress vector for the mod (throw from frame 446; exposes runaway bookkeeping + missing emitters) |
 | `tools/flicker/` | Analysis scripts behind the research.md §2/§2.1 claims (OAM/record dumps, ref-finder, memdiff) + toolkit README |
+| `tools/overclock/` | PPU-overclocking oracle harness behind research.md §23 (MesenCE sandbox + stock-vs-OC comparison). **Its self-check matters: if cycles/frame stays 29781 for a non-zero `Before NMI`, the setting never applied and the run is worthless** |
 | `mods/packages/super-dodgeball.character-flicker/` | Mod package — `manifest.toml` only (data-only by design; implementation is `src/sdb_host_extras.c`). Off by default, toggleable in the launcher's Mods screen; PolyForm NC, same as the project |
-| `external/nesrecomp/` | NESRecomp submodule (recompiler + runners) — **pristine origin/master, tree must stay clean** |
+| `mods/packages/super-dodgeball.ppu-overclock/` | Mod package for PPU overclocking (research.md §23). Manifest-only like the above; has an integer `[[option]]` so the launcher exposes the scanline count. **Needs `patches/006_ppu_overclock_mmc1`** or the backend refuses on mapper 1 |
+| `external/nesrecomp/` | NESRecomp submodule (recompiler + runners) — pinned `origin/master`; **dirty tree is expected** when `patches/*.patch` is applied by `setup.sh` |
 | `external/mesence/` | MesenCE emulator source/binary |
 | `external/recomp-ui/` | recomp-ui submodule (launcher + in-game menu) — **pinned, never floated**; MIT, own license |
-| `patches/` | RETIRED legacy patches, all in `archived/` (see `patches/README.md`) — no new patches, ever |
+| `patches/` | Active runner patches applied to the submodule by `setup.sh` (`*.patch`, strictly additive, documented in `active-patches.md`); `archived/` holds the retired legacy-runner ones `setup.sh` ignores |
 | `tools/dis65.py` | Dependency-free 6502 disassembler for entry verification (ROM + addr + count + file offset) |
 | `tools/frame_gen/memwatch.lua` | MesenCE oracle probe: who-writes (with PC) for RAM addrs + optional NMI flag log (`WATCH`, `MAXF`, `START0/1`, `NMI_LOG`) |
 | `tools/frame_gen/oracle_dump.lua` | MesenCE `--testrunner` oracle: frame-N PPU dump + per-NMI `$0100/$0106` log (see `docs/research.md` §16) |

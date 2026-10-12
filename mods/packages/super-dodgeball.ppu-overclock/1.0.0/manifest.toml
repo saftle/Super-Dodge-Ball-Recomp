@@ -1,0 +1,56 @@
+# Preloaded mod package for Super Dodge Ball. Single-line values only: the
+# manifest parser is line-based (key = value, [[section]]), with # comments.
+#
+# This feature is a deliberate timing CHANGE, so it is default-disabled: a
+# player who wants hardware parity must be able to leave it off, and nobody
+# should get a faster game without asking. Toggle it in the launcher's Mods
+# screen, or headless with --ppu-overclock <lines>.
+#
+# This package is DATA ONLY -- a declaration of a feature whose implementation
+# is src/sdb_host_extras.c, compiled into nes_game and registered by the stable
+# id below. A .nesmod archive cannot carry native code (see the framework's
+# docs/MOD_PACKAGES.md), so the licence here necessarily matches the licence of
+# the code that does the work; it is not separately licensed.
+format_version = 1
+id = "super-dodgeball.ppu-overclock"
+version = "1.0.0"
+name = "PPU Overclocking"
+author = "Super Dodge Ball Recomp"
+description = "Runs the game faster by giving the 6502 more CPU time each frame. Super Dodge Ball's main loop is an NMI-synced spin - it parks waiting for the next NMI, so the guest only gets 262 scanlines of CPU per frame - which makes the original feel sluggish. This adds blank scanlines before the NMI so the guest completes more of its own work per frame. The added lines are blank (rendering is off above scanline 239, audio is paused), so the picture is unchanged at 256x240 and nothing new is drawn: the effect is purely extra CPU time. Same mechanism as MesenCE's 'Additional scanlines before NMI' and FCEUX's post-render scanlines; measured at +12 work-ticks per frame against MesenCE. It changes console timing, so this is not hardware-accurate."
+license = "PolyForm-Noncommercial-1.0.0"
+resolver = "declarative"
+save_compatibility = "shared"
+
+# Lowercase CRC-32 of the cartridge payload after the iNES header.
+[[target]]
+game_id = "super-dodgeball"
+rom_crc32 = "689971f9"
+
+[[feature]]
+id = "ppu-overclock"
+name = "PPU overclocking"
+description = "Extra blank scanlines before NMI, so the game runs faster. Not hardware-accurate."
+group = "Emulation"
+default_enabled = false
+
+# How many extra scanlines before the NMI. 262 is one extra frame's worth,
+# which roughly doubles the per-frame CPU budget (fceumm's "2x-Postrender"
+# preset uses 266 for the same reason). 0 restores stock timing exactly, which
+# is what turning the feature off does.
+[[option]]
+feature = "ppu-overclock"
+id = "scanlines"
+label = "Extra scanlines before NMI"
+type = "integer"
+default = 262
+min = 0
+max = 262
+step = 1
+
+# A [[plugin]] id names an ACTIVATION plugin registered with
+# nes_mod_register_activation_plugin(). It reads the integer option above via
+# nes_mod_get_option_int and applies it with cyc_set_extra_scanlines(); a reset
+# callback restores stock timing.
+[[plugin]]
+feature = "ppu-overclock"
+id = "super-dodgeball.ppu-overclock"

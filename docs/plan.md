@@ -1,24 +1,32 @@
 # Super Dodgeball NES Recompilation — Project Plan
 
-> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). Frontier: full-movie TAS vectors (level-switch screens), then widescreen.
+> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). PPU overclocking **shipped** (opt-in mod; deliberately changes timing). Frontier: full-movie TAS vectors (level-switch screens), then widescreen.
 
 ## Where Things Stand
 
-- **Backend**: cycle-accurate (`./build_and_run.sh` → `build-cycle/nes_game`, upstream `runner/cyc`). Stock ROM on accurate timing; the only game-specific code is the character-flicker mod (`src/sdb_host_extras.c`), which is presentation-only and leaves the guest machine byte-identical. The legacy runner is retired (files removed 2026-10-02, backup in `/tmp/legacy_backup/` + git history; game knowledge preserved in research §§18–19).
+- **Backend**: cycle-accurate (`./build_and_run.sh` → `build-cycle/nes_game`, upstream `runner/cyc`). Stock ROM on accurate timing. Two game-specific mods live in `src/sdb_host_extras.c`: the character-flicker mod (presentation-only; leaves the guest machine byte-identical) and the PPU-overclocking mod (deliberately changes console timing so the guest runs faster). The legacy runner is retired (files removed 2026-10-02, backup in `/tmp/legacy_backup/` + git history; game knowledge preserved in research §§18–19).
 - **Verification**: TAS 400 frames reach team-select with RAM/OAM/palette/CIRAM byte-exact vs Mesen from boot (`tools/tas/`); blargg cpu tier 25/25 (20 RAM-text PASS + 5 screen-confirmed).
-- **Upstream**: maintainer is moving to cycle-default; legacy goes antiquated. Our migration is done early. The one legacy artifact worth saving is patch 002 (S-latch guard) — proposed upstream below, then it lapses with the rest.
+- **Upstream**: maintainer is moving to cycle-default; legacy goes antiquated. Our migration is done early. Patch 006 (PPU overclocking for MMC1) is the live upstream proposal — see `patches/active-patches.md`. The legacy 002 S-latch guard is drafted below.
 - **Frontier**: court BG past team-select is unverified on cycle; after that, widescreen.
 
 ## Open Items
-
 1. Court BG past team-select — substantially verified on cycle: `tas/vectors/sdb_throw.input` plays matches end-to-end (throws land, digits show, menus render correctly, 8000-frame stress clean). What remains is the full-movie TAS path (TASVideos #4976 actually *wins* rounds — needed for level-switch screens), still open.
-2. Propose 002 S-latch guard upstream (draft below), then done with patches forever.
+
+2. Propose 002 S-latch guard upstream (draft below), and 006 PPU-overclock MMC1 gate (see `patches/active-patches.md`).
+
 3. Widescreen via `HOST_EXTRAS` custom compositor (SMB pattern: stock center authoritative, host re-draws margins).
+
 4. ~~Flicker fix~~ — **DONE, all causes.** `super-dodgeball.character-flicker`, opt-in from the launcher's Mods screen (off by default: the culling half shifts guest timing and the level-switch screen shows ghosts with it on — needs a full playthrough test). (a) Hard 64-sprite OAM budget with a `BEQ` bail on `$84B6` — stops emitting. (b) Display-list culling at `$067C` (`$43` bits 4-6 `$20`), three gates overridden. (c) Two sprite classes no bump hook could see: floating damage numbers (bank-3 pair emitter, `ADC #$08` step) and team-select position numbers (bank-4 block copier, no bump at all) — hooked per-emitter plus prefix carry-over and done-freshness for sitters. Ten content-keyed `[[mod_function_hook]]` sites + host-side redraw + six `cycle_seed_file` roots (hook sites need recompiled code; all three emitters were on the interpreter). Truncation: body-ink stdev 8.7 → 0.8 (truncation-only build). Culling: B's box-ink stdev 55.0 → 16.6 with 0 frames still culled (re-verified current binary). Numbers: 108/108 frames steady. Traps and the guest-cost caveat in research.md §2 and §2.1.
-5. Resolution honesty: wider canvas only — no upscaling path exists upstream (CHR PNG replacement at most). Don't promise HD.
-6. Submodule stays pristine (`git -C external/nesrecomp status` clean; reset 2026-10-02).
-7. Docs reconciled to cycle (README, AGENTS.md, plan, research §§21–22, harness READMEs); research §§18–19 stay as game-knowledge history.
-8. **Flicker follow-ups** (not blocking): the mod draws sprites with no scanline evaluation at all, so it also drops the NES 8-per-scanline rule — real hardware behaviour some may want kept, which would be an `[[option]]` on the same feature rather than a second package. The blit also ignores OAM attribute bit 5 (behind-background priority); this ROM never sets it, but a future change would need the coverage buffer.
+
+5. **Run the gates on patch 006 before it lands.** A submodule change is exactly when both are wanted: TAS 400 + `diff_tas.py` (must stay MATCH) and blargg cpu 25/25. Not yet run — AGENTS.md says ask first. The patch is strictly additive and the 600-frame stock run is byte-identical with and without it, but that is not the same as the full gates.
+
+6. ~~PPU overclocking~~ — **DONE.** `super-dodgeball.ppu-overclock`, opt-in, off by default (it changes console timing, so hardware parity must stay the default). Integer `[[option]]` so the launcher exposes the count. Needs patch 006; without it the backend refuses on mapper 1. Measured: 2.0x cycles/frame, and the guest populates its display list on 565 of 800 frames vs 316 stock. Research section 23.
+
+7. Resolution honesty: wider canvas only — no upscaling path exists upstream (CHR PNG replacement at most). Don't promise HD.
+
+8. Docs reconciled to cycle (README, AGENTS.md, plan, research §§21–23, harness READMEs); research §§18–19 stay as game-knowledge history.
+
+9. **Flicker follow-ups** (not blocking): the mod draws sprites with no scanline evaluation at all, so it also drops the NES 8-per-scanline rule — real hardware behaviour some may want kept, which would be an `[[option]]` on the same feature rather than a second package. The blit also ignores OAM attribute bit 5 (behind-background priority); this ROM never sets it, but a future change would need the coverage buffer.
 
 ## What Other Successful NESRecomp Projects Do Differently
 

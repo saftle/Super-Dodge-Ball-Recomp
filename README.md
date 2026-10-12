@@ -51,8 +51,7 @@ See `NOTICE.md` for attribution.
 
 ## Mods
 
-The launcher has a **Mods** screen. One ships with the build and is **off by default**
-(it fixes real flicker, but needs a full playthrough test first — see below):
+The launcher has a **Mods** screen. Two ship with the build, both **off by default**:
 
 - **Remove Character Flicker** — the original release flickered badly, three ways, none of them
   the NES 8-sprites-per-line limit that emulator "remove sprite limit" options target; this game
@@ -78,6 +77,29 @@ with it off the output is byte-identical to the unmodded game.
 
 > **Known issue:** with the mod on, the level-switch screen (after winning a match) briefly
 > shows white ghost sprites. Under investigation — this is why the mod stays off by default.
+
+- **PPU Overclocking** — the game feels slower than it should, because its main loop is
+  an NMI-synced spin: it parks waiting for the next NMI, so the guest only gets 262
+  scanlines of CPU per frame. This adds **blank scanlines before the NMI**, so the guest
+  completes more of its own work each frame and the game runs faster. Nothing new is
+  drawn — the added lines render nothing and audio pauses across them, so the picture
+  stays 256×240; the effect is purely extra CPU time. Same mechanism as MesenCE's
+  *Additional scanlines before NMI* and FCEUX's post-render scanlines. The Mods screen
+  exposes the count (0–262; 262 roughly doubles the per-frame CPU budget).
+
+  **This deliberately changes console timing, so it is off by default and is not
+  hardware-accurate** — leave it off if you want original behaviour.
+
+  Headless:
+
+  ```bash
+  ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 800 \
+    --input tas/vectors/sdb_throw.input --ram-init zeros --ppu-overclock 262
+  ```
+
+  It needs `patches/006_ppu_overclock_mmc1` (applied by `setup.sh`); without it the
+  backend refuses the setting on an MMC1 cartridge. Measured numbers and the
+  three-emulator comparison are in `docs/research.md` §23.
 
 For headless runs the catalog is only read when you point at it, and the feature is
 off unless you ask for it:
@@ -152,6 +174,7 @@ Static recompilation, not an emulator. The original 6502 machine code is transla
 - **`external/nesrecomp/`** — NESRecomp framework submodule (recompiler + runners)
 - **`external/mesence/`** — MesenCE emulator (reference rendering + oracle Lua API)
 - **`tools/frame_gen/`** — Mesen frame export Lua script + wrapper
+- **`tools/overclock/                 # PPU-overclocking oracle harness (research.md 23)
 - **`tools/blargg/`** — blargg test-ROM suite on the cycle backend (`run_blargg.py`, `manifest.json`); per-ROM builds in `build-cyc-blargg/`, ROMs in `external/nes-test-roms/` (both gitignored)
 - **`tools/tas/`** — TAS-integrated differential harness: bk2/fm2 → canonical `tas.json`, shared-input runners for MesenCE + cycle backend with full state capture, three-layer first-divergence diff (`run_tas.py`, `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored)
 
@@ -179,7 +202,8 @@ Super Dodgeball Recomp/
 │   ├── dis65.py                   # Dependency-free 6502 disassembler
 │   ├── blargg/                    # blargg suite on the cycle backend (run_blargg.py, manifest)
 │   ├── tas/                       # TAS differential harness (converters, runners, diff)
-│   └── frame_gen/                 # Mesen frame export + oracle dump + memwatch scripts
+│   ├── frame_gen/                 # Mesen frame export + oracle dump + memwatch scripts
+│   └── overclock/                 # PPU-overclocking oracle harness (research.md 23)
 ├── tas/
 │   ├── vectors/                   # TAS movies (.bk2 + format samples, committed)
 │   └── runs/                      # Per-TAS run artifacts (gitignored)
@@ -280,7 +304,7 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 
 **[AGENTS.md](AGENTS.md)** — Developer reference with present-tense constraints, codegen notes, submodule workflow, MesenCE testrunner API, verification procedures, and current-known issues. The canonical document for AI coding agents.
 
-**[docs/research.md](docs/research.md)** — Deep research: ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map, MesenCE oracle, NMI survey, current build state.
+**[docs/research.md](docs/research.md)** — Deep research: ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map, MesenCE oracle, NMI survey, current build state, PPU overclocking (§23).
 
 ## References
 

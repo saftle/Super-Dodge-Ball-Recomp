@@ -135,6 +135,9 @@ static long s_done_frame = -100;    /* frame the published list was finished */
 static int s_cap_run;                /* consecutive frames with captures */
 static int s_on;                             /* feature active */
 
+/* Requested PPU-overclock lines, re-applied at power_on (see section 4). */
+static int s_oc_lines;
+
 static uint32_t s_picture[256 * 240];
 
 /* ------------------------------------------------------------------ *
@@ -588,6 +591,10 @@ static void sdb_power_on(void *ctx)
 {
     (void)ctx;
     cyc_render_capture_background(true);
+    /* Re-apply the requested CPU-budget enhancement: cyc_power_on() cleared
+     * hw_extra_timing after the mod activated. 0 is the stock default, so with
+     * the feature off this changes nothing. */
+    cyc_set_extra_scanlines((unsigned)s_oc_lines);
     s_build_count = 0;
     s_done_count = 0;
     s_overflow = 0;
@@ -636,16 +643,94 @@ static void sdb_disable(void)
 
 static const CycHostOption SDB_OPTIONS[] = {
     { "--remove-character-flicker", false, "draw every OAM sprite host-side, so characters are never truncated" },
+    { "--ppu-overclock", true, "extra blank scanlines before NMI (0-262); 0 = stock timing" },
 };
+
+/* ------------------------------------------------------------------ *
+ * 4. PPU overclocking (super-dodgeball.ppu-overclock)
+ * ------------------------------------------------------------------ */
+
+/* The game feels slower than it should because its main loop is an NMI-synced
+ * spin: `$FCA0` parks waiting for the next NMI (research.md 19.3, 19.6), so the
+ * guest only gets 262 scanlines of CPU per frame. Hand it more and it completes
+ * more of its own work before parking again, so the game runs faster.
+ *
+ * That is exactly what the cycle backend already offers as
+ * `cyc_set_extra_scanlines` -- "blank scanlines before NMI, APU paused"
+ * (runner/cyc/PROJECTS.md) -- the same mechanism as MesenCE's
+ * `Nes.PpuExtraScanlinesBeforeNmi` and FCEUX's post-render scanlines. Upstream
+ * scopes it to MMC3; patches/006 widens the gate to MMC1, whose IRQ is
+ * write-triggered at $8000/$8001 and never clocked by the PPU. Measured against
+ * MesenCE at 300 lines: +12.0 work-ticks per frame, and the lead grows
+ * (research.md section 23).
+ *
+ * The added lines are BLANK -- rendering is off above scanline 239 and the APU
+ * is paused across them -- so no extra picture appears and the guest's 256x240
+ * output is unchanged. This mod only picks a value for the backend setting.
+ *
+ * It deliberately changes console timing, so it is OFF by default and a player
+ * who wants hardware parity can leave it off.
+ */
+#define SDB_OC_MAX     262    /* what cyc_set_extra_scanlines accepts */
+#define SDB_OC_DEFAULT 262    /* one extra frame's worth, which doubles the CPU
+                               * budget per frame; fceumm's "2x-Postrender"
+                               * preset uses 266 for the same reason. MesenCE
+                               * allows 1000, our backend caps at 262. */
+
+static void sdb_oc_apply(int lines)
+{
+    if (lines < 0) lines = 0;
+    if (lines > SDB_OC_MAX) lines = SDB_OC_MAX;
+    s_oc_lines = lines;
+    if (!cyc_set_extra_scanlines((unsigned)lines))
+        fprintf(stderr, "ppu-overclock: backend refused %d extra scanlines\n", lines);
+    else
+        fprintf(stderr, "ppu-overclock: %d extra scanlines before NMI%s\n", lines,
+                lines ? "" : " (stock timing)");
+}
+
+/* Runs when the launcher or a saved selection enables the feature. */
+static void sdb_oc_enable(void)
+{
+    const char *t = getenv("SDB_PPUSCAN");
+    if (t && t[0]) { sdb_oc_apply(atoi(t)); return; }   /* headless A/B */
+    sdb_oc_apply(nes_mod_get_option_int("super-dodgeball.ppu-overclock",
+                                        "ppu-overclock", "scanlines",
+                                        SDB_OC_DEFAULT));
+}
+
+/* Reset callbacks run before active plugins, so a disabled feature reliably
+ * restores stock timing on every launch. */
+static void sdb_oc_disable(void)
+{
+    s_oc_lines = 0;
+    cyc_set_extra_scanlines(0);
+}
 
 static bool sdb_option(void *ctx, const char *name, const char *value)
 {
-    (void)ctx; (void)value;
-    if (strcmp(name, "--remove-character-flicker")) return false;
-    for (unsigned i = 0; i < sizeof SDB_HOOK_IDS / sizeof SDB_HOOK_IDS[0]; i++)
-        nes_mod_set_function_hook_enabled(SDB_HOOK_IDS[i], 1);
-    s_on = true;
-    return true;
+    (void)ctx;
+    if (!strcmp(name, "--remove-character-flicker")) {
+        for (unsigned i = 0; i < sizeof SDB_HOOK_IDS / sizeof SDB_HOOK_IDS[0]; i++)
+            nes_mod_set_function_hook_enabled(SDB_HOOK_IDS[i], 1);
+        s_on = true;
+        return true;
+    }
+    if (!strcmp(name, "--ppu-overclock")) {
+        if (!value || !value[0]) {
+            fprintf(stderr, "--ppu-overclock needs a value: 0..%d\n", SDB_OC_MAX);
+            return false;
+        }
+        char *end = NULL;
+        long v = strtol(value, &end, 10);
+        if (!end || *end || v < 0 || v > SDB_OC_MAX) {
+            fprintf(stderr, "--ppu-overclock: value must be 0..%d\n", SDB_OC_MAX);
+            return false;
+        }
+        sdb_oc_apply((int)v);
+        return true;
+    }
+    return false;
 }
 
 static const CycHostExtras SDB_EXTRAS = {
@@ -653,7 +738,7 @@ static const CycHostExtras SDB_EXTRAS = {
     .power_on = sdb_power_on,
     .frame_begin = sdb_frame_begin,
     .options = SDB_OPTIONS,
-    .option_count = 1,
+    .option_count = sizeof SDB_OPTIONS / sizeof SDB_OPTIONS[0],
     .option = sdb_option,
 };
 
@@ -682,7 +767,9 @@ static void register_sdb_mods(void)
         { 0xA394, sdb_copy },
     };
     if (!nes_mod_register_activation_plugin("super-dodgeball.character-flicker", sdb_enable) ||
-        !nes_mod_register_reset_callback(sdb_disable))
+        !nes_mod_register_activation_plugin("super-dodgeball.ppu-overclock", sdb_oc_enable) ||
+        !nes_mod_register_reset_callback(sdb_disable) ||
+        !nes_mod_register_reset_callback(sdb_oc_disable))
         fprintf(stderr, "sdb: mod registration failed\n");
     for (unsigned i = 0; i < sizeof sites / sizeof sites[0]; i++)
         if (!nes_mod_register_function_entry_plugin(SDB_HOOK_IDS[i], sites[i].addr, sites[i].fn))

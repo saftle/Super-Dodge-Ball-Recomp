@@ -968,7 +968,7 @@ Current working config: `bank_switch = [0xFF08]`, minimal `fixed` (verified entr
 
 ## 16. MesenCE Oracle: Raw --testrunner + Lua, Not mesen-for-ai
 
-mesen-for-ai (MCP server) adds TCP/xvfb/session machinery for zero extra PPU visibility — every read it does is one `emu.read()` line in plain Lua. Use raw `--testrunner` + file-writing Lua.
+mesen-for-ai (MCP server) adds TCP/xvfb/session machinery for zero extra PPU visibility — every read it does is one `emu.read()` line in plain Lua. Use raw `--testrunner` + file-writing Lua. (Re-evaluated in full for §23: it cannot set emulator config at all, so it is still rejected — but three things in it are worth stealing, and the MesenCE config-location bug it works around is recorded there.)
 
 - Mapped reads (what the game sees, MMC1 applied): `emu.read(addr, emu.memType.nesPpuMemory)` for `$0000–$1FFF` (live CHR), `$2000–$2FFF` (nametables, mirroring applied). Raw ROM: `nesChrRom` (131072 bytes), `nesPrgRom`. RAM: `nesInternalRam`; PPU regs: `nesPaletteRam` (32B), `nesSpriteRam` (256B), `nesNametableRam` (CIRAM 2K pre-mirroring). Prefer `*Debug` memTypes (`nesDebug`, `nesPpuDebug`) — plain reads have side effects (`$2002` clear, `$4016` advance).
 - No mapper-state API. Live CHR banks via `emu.convertAddress(ppuAddr, emu.memType.nesChrRom, emu.cpuType.nes)` per frame, or fingerprint the 4K mapped window against CHR-ROM slices.
@@ -1316,3 +1316,164 @@ input (`<frame> NAMES` absolute state, same bit map).
   candidate, unprobed). Seed sensitivity is real but does not explain
   the 474 split (identical seeds there) and cannot recover BizHawk's
   stream.
+
+---
+
+## 23. PPU Overclocking: what the three emulators do, and that it works here
+
+Goal: make the game feel less sluggish. Researched MesenCE, Nestopia UE and FCEUX,
+then measured against the oracle. **It works**: `Nes.PpuExtraScanlinesBeforeNmi = 300`
+gives the guest **+12.0 extra work-ticks per frame on average**, and the lead *grows*.
+
+### The three implementations are not the same feature
+
+| | mechanism | renders more lines? | NMI scanline moves? |
+|---|---|---|---|
+| **MesenCE** | `_nmiScanline += Before; _vblankEnd += Before+After` (`Core/NES/NesPpu.cpp:154` `UpdateTimings`) | **no** — always 256×240, `_scanline < 240` gate in `ProcessScanline` | **yes** |
+| **FCEUX** | `X6502_Run(postrenderscanlines * 341)` before vblank; `X6502_Run(vblankscanlines * 341)` after NMI (`src/ppu.cpp:1862`, `:1784`). Keys `postrenderscanlines` / `vblankscanlines`, 0–999 | **no** — `normalscanlines` unchanged | **no** |
+| **Nestopia UE** | `Cpu::EndFrame()` runs ~327,360 extra `ExecuteOp()` cycles post-blit, then `cycles.count = startCycle` **rewinds** (`NstCpu.cpp:1887`) | no | no |
+
+All three grant the 6502 more cycles per frame. **None shows more picture** — the
+picture is always 256×240, so this is a *speed* feature, not a resolution one. The
+Nestopia entry is the odd one out: it is a CPU-starvation fix whose cycle counter is
+rewound, so it does not change frame timing at all. Its public API comment
+(`NstApiVideo.hpp`: *"Adds extra scanlines to fix lag"*) is simply wrong — the libretro
+label `"CPU Speed (Overclock)"` is the honest one.
+
+FCEUX ships the only concrete presets (fceumm `libretro_core_options.h:938`):
+`2x-Postrender` = 266 post-render lines, `2x-VBlank` = 266 vblank lines. Both ≈ 2×.
+Documented use case is **removing game slowdown**, naming Contra Force — not 240p.
+
+### Why this game benefits (the part I initially got wrong)
+
+The premise I started from was that extra scanlines only add *drawing* room and so
+could not affect a game paced once per NMI. **That is wrong for this game, and measurably
+so.** The main loop is a *NMI-synced spin*: `$FCA0` parks waiting for the next NMI
+(§19.3, §19.6). Each NMI the guest gets only 262 scanlines of CPU before it must park
+again. Hand it 562 and it completes more of its own work before parking — so it runs
+faster. That is exactly FCEUX's documented mechanism, and exactly the game class the
+feature was written for.
+
+### Measured (MesenCE 2.2.1, `tools/overclock/`)
+
+Start at 11–12, confirm WORLD CUP at 60, SKILL at 140, CHANGE POSITION at 900 — the
+input pattern from `tools/frame_gen/oracle_dump.lua` plus menu walks, which reaches a
+real match (verified by screenshot: full court, HUD, players, energy bars).
+
+| | stock | `Before NMI = 300` |
+|---|---|---|
+| CPU cycles/frame | 29,781 | 63,881 (+34,100) |
+| mean extra `$069E` laps/frame | — | **+12.0** |
+| cumulative extra ticks over 1200 frames | — | 14,424 |
+
+The lead **grows monotonically by window** — +7.3 (frames 1–200) → +17.5 (1001–1200) —
+which is the signature of the guest doing *more work per frame* rather than merely
+running out of phase. Reproduce:
+
+```bash
+./tools/overclock/run_overclock.sh 0   1200 stock
+./tools/overclock/run_overclock.sh 300 1200 oc300
+python3 tools/overclock/compare_runs.py tmp/overclock_run_stock/m.csv \
+                                     tmp/overclock_run_oc300/m.csv
+```
+
+### Our backend already has this mechanism, gated to the wrong mapper
+
+`cyc_set_extra_scanlines()` (`hw_machine.c:580`) does exactly Mesen's thing, and
+`PROJECTS.md` describes it as *"blank scanlines before NMI, APU paused"* — blank lines
+are never rendered, so it is a pure CPU-time grant. But:
+
+```c
+bool cyc_extra_scanlines_supported(void) { return hw_cart.mapper == 4; }
+```
+
+Super Dodge Ball is **mapper 1**, so it is rejected. Lifting that gate (via
+`HOST_EXTRAS`, not by editing the pristine submodule) is the whole implementation.
+
+### Harness bugs found and fixed — all three produced "no difference" when wrong
+
+These are recorded because each one yields a *plausible false negative*, which is worse
+than an error:
+
+1. **MesenCE reads `settings.json` from its own binary directory, not `$HOME`.**
+   Overriding `HOME` silently uses the real user config. Proof: `Nes.Region=Pal` moved
+   cycles/frame 29781 → 33248 (exactly PAL) *only* once `settings.json` sat beside a
+   copied binary. **This was a live bug in `tools/frame_gen/run_frames.sh`**, which had
+   copied config to `$CONFIG_DIR` and exported `HOME` — i.e. it never isolated anything.
+   Fixed; it now owns the executable and fails loudly if no frames appear.
+2. **`xvfb-run` word-splits the program path.** It execs via `sh -c`, so a path
+   containing a space (this repo's own path has one) breaks *even when quoted*. Symptom:
+   `xvfb-run: .../Mesen: not found` while the file is present and executable. Invoke
+   `./Mesen` from inside the sandbox directory.
+3. **After that `cd`, relative ROM paths stop resolving.** Needs an absolute path.
+
+Also: `PpuExtraScanlinesBeforeNmi` exists under **both** `Nes` and `Snes` in the shipped
+`settings.json`, and the `Snes` copy appears *earlier in the file* — a naive `grep`
+reports the SNES value and makes the edit look like it failed. Read it back scoped to
+the section with a JSON parser.
+
+**The meta-lesson, and the mistake I actually made:** the first version of this harness
+set the value, saw identical output, and I reported "overclocking changes nothing".
+It had changed nothing because the setting had never reached the emulator. The control
+that caught it was wall-clock time: a setting that quadruples PPU work *must* change how
+long a run takes, and 0.606 s vs 0.612 s says it didn't. **Validate that a harness can
+detect the effect it is looking for before concluding the effect is absent.** A negative
+result from a tool never tested against a known positive is not a negative result.
+
+### Shipping it: patch 006 + the `ppu-overclock` mod
+
+Our backend already implemented Mesen's mechanism, so the work was to make it
+reachable. `cyc_extra_scanlines_supported()` returned `mapper == 4` (MMC3 only)
+and `--extra-scanlines` refused with *"requires an MMC3 cartridge"* on our
+mapper-1 cart.
+
+**`patches/006_ppu_overclock_mmc1.patch`** widens that to `mapper == 1 || 4` --
+one line. The criterion is principled: the added lines are blank (rendering is
+off above scanline 239) and the APU is paused, so they are inert for any mapper
+whose IRQ is not PPU-clocked; in this engine only MMC3 counts PPU A12 rises,
+while MMC1 triggers its IRQ from writes to `$8000`/`$8001` bit 7. The predicate
+is consulted only when `extra_scanlines != 0`, so **at stock timing nothing
+changes for any game** -- verified: the 600-frame `sdb_throw` run is byte-identical
+(`cycles=17865922 native_cycles=13225160 (74.0%)`) with and without the patch.
+
+A second effect matters: `cyc_state.c` validates a loaded state's
+`extra_scanlines` against the same predicate, so **before** the patch a save
+written while overclocking would have been *rejected on load* for MMC1. The
+patch is what makes the feature save-state-safe.
+
+**The mod** is `super-dodgeball.ppu-overclock` (manifest-only, like the flicker
+one), with an integer `[[option]]` so the launcher exposes the scanline count.
+Implementation is section 4 of `src/sdb_host_extras.c`: it only picks a value
+for the backend setting. Off by default -- it deliberately changes timing.
+
+One trap worth recording: **`cyc_power_on()` does
+`memset(&hw_extra_timing, 0, ...)` and runs AFTER mods activate**, so a value
+applied in the activation plugin is wiped before the first frame. The mod keeps
+the requested value and re-applies it from `power_on`. Without that the feature
+reported itself active while running stock timing -- the same
+"looks enabled, changes nothing" failure as the broken oracle harness above.
+
+Measured on our own backend (600-frame / 800-frame `sdb_throw`):
+
+| | stock | +262 scanlines |
+|---|---|---|
+| cycles/frame | 29,740 | 59,521 (2.0x) |
+| frames with a populated display list (`$067A`>0), of 800 | 316 | **565** |
+| cycle count, 600 frames | 17,865,922 | unchanged by the patch at stock |
+
+The guest spends far more of its time actually drawing players, on the same
+absolute input schedule -- i.e. it progresses further. Note `$069E` advances at
+the *same* rate in both (202 vs 200 per 800 frames): in a match it is not a work
+counter, so it must not be read as a speed measurement. The clean per-frame work
+comparison is the MesenCE one above.
+
+### `mesen-for-ai` (paulomanrique) — evaluated, still rejected
+
+MCP server + Lua bridge for driving Mesen from an agent. Read in full. It is well made
+but **cannot set the setting**: the only config in the repo is a hardcoded
+`settings.json` heredoc in `scripts/run_headless.sh`, with no CLI flag, env var or Lua
+hook to add a key. Its data path is also worse for batch work — `cpu.read_memory`
+returns a JSON integer array per read, against our `--frame-log` CYCFRAME-v2 snapshots.
+Three things worth stealing: `export DOTNET_ROLL_FORWARD="${DOTNET_ROLL_FORWARD:-Major}"`
+(added to `run_frames.sh`), the isolated-`HOME` rationale, and `scripts/check_socket.lua`
+as a LuaSocket probe. Zero stars, no CI, last commit 2026-09-02, GPL-3.0.

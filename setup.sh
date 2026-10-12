@@ -58,8 +58,24 @@ else
 fi
 echo "nesrecomp: $(git -C "${SCRIPT_DIR}/external/nesrecomp" rev-parse --short HEAD 2>/dev/null || echo 'MISSING')"
 
-# (Legacy runner patches retired with the cycle switch; the submodule stays
-# pristine. The 002 S-latch guard is proposed upstream instead — see docs/plan.md.)
+# ---- Game-specific runner patches (re-applied after every submodule checkout) ----
+# Active patches live in patches/*.patch (sorted order); patches/archived/ holds
+# dormant ones that setup.sh deliberately ignores. See patches/README.md and
+# patches/active-patches.md.
+if [ -d "${SCRIPT_DIR}/patches" ]; then
+    echo ""
+    echo "Applying game patches to NESRecomp submodule..."
+    cd "${SCRIPT_DIR}/external/nesrecomp"
+    for p in "${SCRIPT_DIR}"/patches/*.patch; do
+        [ -e "$p" ] || break
+        if git apply --check "$p" 2>/dev/null; then
+            git apply "$p" && echo "  applied: $(basename "$p")"
+        else
+            echo "  skipped (already applied or conflicts): $(basename "$p")"
+        fi
+    done
+    cd "${SCRIPT_DIR}"
+fi
 
 # ---- recomp-ui submodule (launcher + in-game menu for the window) ----
 # Pinned like nesrecomp, not floated: the launcher's C ABI grows append-only and
