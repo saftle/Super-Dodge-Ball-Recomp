@@ -4,7 +4,7 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 
 ![Super Dodge Ball title screen (recompiled build)](docs/assets/title.png)
 
-> **Status:** super early WIP — it boots to the title screen and plays through team-select verified byte-exact vs Mesen (state, not just pixels), with music correct, and that's the verified show so far. Past team confirm is unverified territory (court BG next); gameplay feel beyond that is untested. See `docs/plan.md` for the frontier.
+> **Status:** super early WIP — it boots to the title screen and plays through team-select verified byte-exact vs Mesen (state, not just pixels), with music correct, and that's the verified show so far. Character sprite flickering is fixed by a default-on mod (see **Known Limitations**); past team confirm is still unverified territory (court BG next). See `docs/plan.md` for the frontier.
 
 > *Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong here. This port is in development — expect rough edges.*
 
@@ -48,6 +48,31 @@ NESRECOMP_RECOMP_UI=OFF ./build_and_run.sh
 ```
 
 See `NOTICE.md` for attribution.
+
+## Mods
+
+The launcher has a **Mods** screen. One ships with the build and is **on by default**:
+
+- **Remove Character Flicker** — the original release flickered badly: characters lost their lower
+  body and swapped between whole and half-drawn. The cause was *not* the NES 8-sprites-per-line
+  limit that emulator "remove sprite limit" options target — this game stops *emitting* sprites
+  once OAM's 64 slots are full, so those sprites never reach the PPU and no emulator setting can
+  bring them back. This mod keeps emission going and draws every sprite the game produces.
+
+It is **presentation only**: game logic runs stock, so sprite-0 hit, the overflow flag, mapper IRQ
+and timing are unchanged (the run has an identical cycle count and differs in 2 bytes of the OAM
+shadow page). Turn it off in the Mods screen and the output is byte-identical to the unmodded game.
+
+For headless runs the catalog is only read when you point at it:
+
+```bash
+./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 470 \
+  --input <schedule> --ram-init zeros --mods-root build-cycle/mods \
+  --present-out out.png --present-every 1
+```
+
+`--present-out` writes what the *window* would show, which is the only path that exercises the mod —
+`--screenshot` and `--frame-log` capture the machine's native frame and ignore it.
 
 ## Getting MesenCE (for frame comparison)
 
@@ -100,8 +125,11 @@ Clones `external/mesence` from GitHub, builds with `USE_GCC=true make -j$(nproc)
 
 Static recompilation, not an emulator. The original 6502 machine code is translated to C at build time — one block per ROM instruction with every CPU cycle's bus activity spelled out — then compiled to native code and run on a cycle-accurate console model (CPU, PPU, APU, DMAs, mappers).
 
-- **`src/game.toml`** — Recompiler config: display `name` (window title), plus discovery/seed keys when they exist. Fed to the cycle backend at configure time.
-- **`build-cycle/`** — Cycle-backend build (gitignored): per-instruction C (`game_cyc*.c`, one revision dir per ROM/config) + `nes_game` runner. No game-specific hooks — the raw ROM runs on accurate hardware timing.
+- **`CMakeLists.txt`** — The game project (root). Wraps the submodule's `runner/cyc/project.cmake` and adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own project file can't express — so the submodule stays pristine.
+- **`src/game.toml`** — Recompiler config: display `name` (window title) plus five content-keyed `[[mod_function_hook]]` OAM-emit sites. Hooks are keyed by `crc32`, never by ROM bytes. Fed to the cycle backend at configure time.
+- **`src/sdb_host_extras.c`** — The **character-flicker mod**: captures every OAM sprite the game emits and presents them host-side. Presentation only — the guest machine runs stock (identical cycle count; only 2 bytes of the OAM shadow page differ).
+- **`mods/`** — The mod package (`manifest.toml` only; `.nesmod` archives can't carry native code). Default-on, toggleable in the launcher's Mods screen.
+- **`build-cycle/`** — Cycle-backend build (gitignored): per-instruction C (`game_cyc*.c`, one revision dir per ROM/config) + `nes_game` runner + the preloaded `mods/` catalog.
 - **`external/nesrecomp/`** — NESRecomp framework submodule (recompiler + runners)
 - **`external/mesence/`** — MesenCE emulator (reference rendering + oracle Lua API)
 - **`tools/frame_gen/`** — Mesen frame export Lua script + wrapper
@@ -114,8 +142,12 @@ Static recompilation, not an emulator. The original 6502 machine code is transla
 Super Dodgeball Recomp/
 ├── roms/                          # NES ROM files (gitignored)
 ├── src/                           # Project source
-│   ├── game.toml                  # Recompiler config (display name, discovery, mapper)
+│   ├── game.toml                  # Recompiler config (display name + mod hook sites)
+│   ├── sdb_host_extras.c          # Character-flicker mod (capture + host-side presentation)
 │   └── third_party/               # Local gitignored build scratch (not shipped)
+├── mods/                          # Mod package(s), copied beside the executable at build time
+│   └── packages/
+│       └── super-dodgeball.character-flicker/   # manifest.toml only (data-only by design)
 ├── external/nesrecomp/            # NESRecomp submodule
 ├── external/mesence/              # MesenCE emulator (reference rendering)
 ├── external/nes-test-roms/        # blargg suite checkout (gitignored, via setup.sh --fetch path)
@@ -144,6 +176,7 @@ Super Dodgeball Recomp/
 │   └── raid-discord.png           # R.A.I.D. invite badge (footer)
 ├── setup.sh                       # Environment setup (venv + submodules + build)
 ├── build_and_run.sh               # Quick build + run (cycle backend, windowed)
+├── CMakeLists.txt                 # Game project: wraps the submodule's project.cmake + MODS/HOST_EXTRAS
 ├── README.md
 └── AGENTS.md                      # Developer reference for AI coding agents
 ```
@@ -220,7 +253,7 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 
 - **Menus work to team-select** — 400 TAS frames (TASVideos #4976) reach `CHANGE POSITION?` with rosters and courts rendering; state matches Mesen byte-exact (RAM/OAM/palette/CIRAM).
 - **Past team-select is unverified** — the court BG draw is the next frontier; TAS vectors exist for the full run when needed.
-- **Sprite flickering** — Method 2 Software Sprite Removal: the game strips sprites from OAM past 8/scanline, so no emulator toggle can restore them. On PC the OAM-culling routine is the future fix target.
+- ~~**Sprite flickering**~~ — **fixed.** The cause was *not* emulator sprite-limit removal: the game's OAM builder has a hard 64-sprite budget and stops emitting, so the dropped tiles were never computed and no emulator toggle could restore them. Characters now stay whole via the default-on `super-dodgeball.character-flicker` mod — toggleable in the launcher's **Mods** screen. Presentation only; the guest machine still runs stock. See `docs/research.md` §2.
 - **Palette mirrors** — sprite entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`) read stale in cycle snapshots (upstream model keeps power-on bytes; hardware mirrors the backdrop). Masked in the TAS diff; rendering unaffected.
 
 ## Developer Docs

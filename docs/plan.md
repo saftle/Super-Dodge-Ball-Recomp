@@ -1,23 +1,24 @@
 # Super Dodgeball NES Recompilation — Project Plan
 
-> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Frontier: court verification past team-select, then enhancements (widescreen, flicker fix).
+> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** (default-on mod). Frontier: court verification past team-select, then widescreen.
 
 ## Where Things Stand
 
-- **Backend**: cycle-accurate (`./build_and_run.sh` → `build-cycle/nes_game`, upstream `runner/cyc`). No game hooks, no patches — stock ROM on accurate timing. The legacy runner is retired (files removed 2026-10-02, backup in `/tmp/legacy_backup/` + git history; game knowledge preserved in research §§18–19).
+- **Backend**: cycle-accurate (`./build_and_run.sh` → `build-cycle/nes_game`, upstream `runner/cyc`). Stock ROM on accurate timing; the only game-specific code is the character-flicker mod (`src/sdb_host_extras.c`), which is presentation-only and leaves the guest machine byte-identical. The legacy runner is retired (files removed 2026-10-02, backup in `/tmp/legacy_backup/` + git history; game knowledge preserved in research §§18–19).
 - **Verification**: TAS 400 frames reach team-select with RAM/OAM/palette/CIRAM byte-exact vs Mesen from boot (`tools/tas/`); blargg cpu tier 25/25 (20 RAM-text PASS + 5 screen-confirmed).
 - **Upstream**: maintainer is moving to cycle-default; legacy goes antiquated. Our migration is done early. The one legacy artifact worth saving is patch 002 (S-latch guard) — proposed upstream below, then it lapses with the rest.
-- **Frontier**: court BG past team-select is unverified on cycle; after that, enhancements.
+- **Frontier**: court BG past team-select is unverified on cycle; after that, widescreen.
 
 ## Open Items
 
 1. Court BG past team-select — verify on cycle via full-run TAS vectors (game runs underneath on legacy evidence; confirm on cycle).
 2. Propose 002 S-latch guard upstream (draft below), then done with patches forever.
 3. Widescreen via `HOST_EXTRAS` custom compositor (SMB pattern: stock center authoritative, host re-draws margins).
-4. Flicker fix via `[[mod_function_hook]]`: capture pre-cull OAM at the cull routine, draw host-side, suppress native slots. First step is locating the OAM-cull routine.
+4. ~~Flicker fix~~ — **DONE.** `super-dodgeball.character-flicker`, default-on, in the launcher's Mods screen. Mechanism was **not** emulator sprite-limit removal: the game has a hard 64-sprite OAM budget and stops emitting at the `BEQ` bail on `$84B6`, so an emulator toggle cannot help. Fixed with five content-keyed `[[mod_function_hook]]` sites + host-side redraw; body-ink stdev 8.7 → 0.8, guest machine unchanged. Details and the two implementation traps in research.md §2.
 5. Resolution honesty: wider canvas only — no upscaling path exists upstream (CHR PNG replacement at most). Don't promise HD.
 6. Submodule stays pristine (`git -C external/nesrecomp status` clean; reset 2026-10-02).
 7. Docs reconciled to cycle (README, AGENTS.md, plan, research §§21–22, harness READMEs); research §§18–19 stay as game-knowledge history.
+8. **Flicker follow-ups** (not blocking): the mod draws sprites with no scanline evaluation at all, so it also drops the NES 8-per-scanline rule — real hardware behaviour some may want kept, which would be an `[[option]]` on the same feature rather than a second package. The blit also ignores OAM attribute bit 5 (behind-background priority); this ROM never sets it, but a future change would need the coverage buffer.
 
 ## What Other Successful NESRecomp Projects Do Differently
 
@@ -141,7 +142,7 @@ The cycle backend runs the stock ROM flawlessly (team-select matching Mesen, 25/
 Principle from SMB (reference implementation): rendering never changes guest edges — game logic runs stock, the host re-draws. All three items build on `HOST_EXTRAS` + `[[mod_function_hook]]` (content-keyed, no game bytes in repo).
 
 1. **Widescreen** (supported mechanism, real work): custom compositor (256 → 426/560/854, pillarbox fallback for menus), stock center pass authoritative, margins re-drawn from observed world + captured sprites. Port the SMB pattern.
-2. **Flicker fix** (no toggle exists anywhere — Method 2 strips sprites in-game): locate the OAM-cull routine → hook it → capture pre-cull OAM → draw host-side → suppress native flicker slots. Same machinery as widescreen; one project, two consumers. Note: the cycle PPU implements real 8-sprite evaluation, so keeping sprites in OAM is not enough — host-side drawing is the robust fix.
+2. **Flicker fix — SHIPPED** (`super-dodgeball.character-flicker`, default-on). Mechanism measured: the game has a hard 64-sprite OAM budget and stops emitting, so characters lose tiles (79% of match frames). Five content-keyed `[[mod_function_hook]]` sites on the cursor bumps keep emission going and capture every sprite; `src/sdb_host_extras.c` redraws the list over a background capture. Guest machine unchanged (same cycle count; only `$02FD`/`$02FF` differ). Two traps, both documented in research.md §2 and AGENTS.md: emit order differs between builds (never blend lists index-wise), and the blit must walk pixels itself (never `cyc_render_tile` per scanline).
 3. **Resolution** (honest limit): wider canvas, same chunky pixels. No upscaling path upstream (CHR PNG replacement only). Don't promise HD.
 
 ## Removed Legacy Action Items (retired with the backend — kept as a struck record)

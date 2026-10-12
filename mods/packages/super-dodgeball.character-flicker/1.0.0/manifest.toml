@@ -1,0 +1,41 @@
+# Preloaded mod package for Super Dodge Ball. Single-line values only: the
+# manifest parser is line-based (key = value, [[section]]), with # comments.
+#
+# The feature is default_enabled: the game's OAM builder has a hard 64-sprite
+# budget and stops emitting, so characters lose tiles on 79% of match frames.
+# See docs/research.md section 2.
+#
+# This package is DATA ONLY -- a declaration of a feature whose implementation
+# is src/sdb_host_extras.c, compiled into nes_game and registered by the stable
+# id below. A .nesmod archive cannot carry native code (see the framework's
+# docs/MOD_PACKAGES.md), so the licence here necessarily matches the licence of
+# the code that does the work; it is not separately licensed.
+format_version = 1
+id = "super-dodgeball.character-flicker"
+version = "1.0.0"
+name = "Remove Character Flicker"
+author = "Super Dodge Ball Recomp"
+description = "Characters flicker and lose their lower body: the game's sprite list stops at OAM's 64 slots, so the rest of a character is never emitted - an emulator's remove-sprite-limit cannot help, since those sprites never reach the PPU. This draws every sprite the game emits, and lifts the NES 8-per-scanline limit as well. Presentation only: the guest machine runs stock, so sprite-0 hit, the overflow flag, mapper IRQ and timing are unchanged."
+license = "PolyForm-Noncommercial-1.0.0"
+resolver = "declarative"
+save_compatibility = "shared"
+
+# Lowercase CRC-32 of the cartridge payload after the iNES header.
+[[target]]
+game_id = "super-dodgeball"
+rom_crc32 = "689971f9"
+
+[[feature]]
+id = "remove-character-flicker"
+name = "Remove character flicker"
+description = "Draw all OAM sprites host-side; no truncated or dropped sprites."
+group = "Display"
+default_enabled = true
+
+# A [[plugin]] id names an ACTIVATION plugin registered with
+# nes_mod_register_activation_plugin(). The five [[mod_function_hook]] sites in
+# src/game.toml bind to that plugin's function-entry hooks by address and are
+# not manifest plugins of their own.
+[[plugin]]
+feature = "remove-character-flicker"
+id = "super-dodgeball.character-flicker"

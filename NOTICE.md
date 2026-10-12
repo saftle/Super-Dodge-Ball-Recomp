@@ -7,6 +7,19 @@
 - Copyright 2026 Saftle
 - Licensed under the PolyForm Noncommercial License 1.0.0, see [LICENSE.md](LICENSE.md)
 
+**"Remove Character Flicker" mod** (`src/sdb_host_extras.c`,
+`mods/packages/super-dodgeball.character-flicker/`)
+
+- Copyright 2026 Saftle
+- Licensed under the PolyForm Noncommercial License 1.0.0, the same terms as
+  the rest of this project — see [LICENSE.md](LICENSE.md)
+- Not separately licensed, and the package under `mods/` cannot be. A `.nesmod`
+  archive carries data only and may not contain native code, so the package is
+  just a manifest declaring a feature whose implementation is
+  `src/sdb_host_extras.c`, statically linked into `nes_game` and selected by a
+  stable id. Licensing the manifest differently from the code it points at would
+  imply reusable terms the implementation does not carry
+
 **NESRecomp**, which this project is built on
 
 - Copyright 2026 Matthew Stanley and contributors

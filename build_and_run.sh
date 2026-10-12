@@ -16,8 +16,14 @@ RECOMP_UI="${NESRECOMP_RECOMP_UI:-$PWD/recomp-ui}"
 echo "=== Building (cycle backend) ==="
 # Vendored SDL2 ships Windows libs only: point the windowed build at system SDL2.
 # RECOMP_UI is passed explicitly because project.cmake's auto-detect looks in
-# ${CMAKE_SOURCE_DIR}/recomp-ui, which is the nesrecomp project dir here, not ours.
-cmake -S external/nesrecomp/runner/cyc/project -B build-cycle \
+# ${CMAKE_SOURCE_DIR}/recomp-ui, which under our standalone configure is *our*
+# root, so recomp-ui/ is found either way -- but being explicit keeps the two
+# builds from depending on that coincidence.
+#
+# The project's own CMakeLists.txt (not the submodule's runner/cyc/project one)
+# is configured here: it declares CXX and passes MODS / GAME_ID / HOST_EXTRAS,
+# which the stock project file cannot express. The submodule stays pristine.
+cmake -S . -B build-cycle \
   -DNESRECOMP_ROM="$PWD/$ROM" \
   -DNESRECOMP_GAME_CONFIG="$PWD/src/game.toml" \
   -DNESRECOMP_HEADLESS=OFF \

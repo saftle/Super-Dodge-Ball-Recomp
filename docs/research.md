@@ -4,7 +4,18 @@
 
 ## Summary of Findings
 
-TITLE DONE: 99.8% structural match vs Mesen frame 11 from frame 1, `smoke 30` exit 0. Unlocked by `[[replace_func]]` for `$FCA0` (NMI-wait spin removed game-side). Current: Start tunnels to mode/skill/team-select (100+ frames green); active runner patches 002/003/004/005 (`patches/`, auto-applied by `setup.sh`). Full story: §§13-19.
+Cycle backend is the only play path; legacy runner retired (§§18–19 keep its game knowledge).
+Team-select verified byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM, 400-frame TAS); blargg
+cpu tier 25/25.
+
+**Character flicker: SOLVED** (§2). The cause was *not* emulator sprite-limit removal. The game
+builds OAM in place at `$0200` behind an 8-bit cursor `$0617`, characters are 8 sprites each, and
+the `BEQ` bail at `$84B6` stops emission at 64 slots — so the missing tiles are never computed.
+Truncated on 79% of match frames. Fixed by five content-keyed `[[mod_function_hook]]` sites +
+host-side redraw (`src/sdb_host_extras.c`), shipped as the default-on
+`super-dodgeball.character-flicker` mod. Body-ink stdev 8.7 → 0.8; guest machine unchanged.
+
+Frame comparison (MesenCE reference) and the blargg suite are the standing gates.
 
 ---
 
@@ -21,21 +32,109 @@ TITLE DONE: 99.8% structural match vs Mesen frame 11 from frame 1, `smoke 30` ex
 
 ## 2. Sprite Flickering Analysis
 
-### The Mechanism
+> **Measured, not inferred.** Everything below is from `--frame-log` OAM/CIRAM dumps of the
+> cycle backend plus 6502 disassembly (`tools/dis65.py`). Analysis scripts lived in `tmp/scan/`
+> (scratch, gitignored). The earlier "Method 2 software sprite removal" hypothesis is **wrong**.
 
-Super Dodgeball uses **Method 2 Software Sprite Removal**:
-- When more than 8 sprites appear on a scanline, the game **strips sprites from the OAM list entirely** rather than reordering them
-- "Remove Sprite Limit" in emulators is **non-functional** — the game has already removed those sprites from OAM
-- The flickering specifically targets the **ball target indicator** (player/enemy being targeted for a throw)
-- Trigger threshold: approximately 6+ characters on screen
+### The Symptom
 
-### SNES Port Fix
+A character renders as head-and-arms only, lower body missing, and **flickers frame to frame**:
+the same on-screen character is whole on frames 444/446/448 and truncated to 3 tiles on
+450/452/454. Reproduce: drive a TAS past team-select into a match, then `--shot-every 1`.
 
-Rumbleminze's SNES port (`rumbleminze/super-super-dodgeball`) fixes this via hardware advantage (SNES has 128 OAM slots, 32 sprites/scanline vs NES 64/8).
+### Corrected mechanism
 
-### What This Means for PC Port
+The game builds OAM **in place** in the DMA source page and walks an **8-bit byte cursor**:
 
-On PC, there is **no hardware sprite limit**. The fix requires identifying the OAM-culling routine in the recompiled C code and overriding it to write all sprites without the removal logic. Approaches: `nop_jsr` to skip culling code, `extra_func` to replace it, or `force_interp` with custom C code.
+- OAM DMA source is page `$02` — `$FE34`: `LDA #$02 / STA $4014` → OAM = `$0200-$02FF`.
+- The byte cursor is `$0617`, reset to `#$04` (sprite slot 1) each frame. Every emitter writes a
+  complete 4-byte sprite at `$0200+cursor`, then does `LDA $0617 / CLC / ADC #$04 / STA $0617`.
+- Five cursor-bump sites: **`$A2F7`, `$A330`** (bank 4) and **`$8116`, `$8338`, `$84B6`** (bank 5).
+  Each fires once per emitted sprite.
+- **Characters are 8 sprites each** (16×32 px = four 2-tile rows). A full match needs ~9
+  characters ≈ 72 tiles, more than OAM's 64 slots.
+
+**The truncation:** only **`$84B6`** has a bail — `BEQ $84E5` right after the cursor store — so when
+the cursor wraps `$FC → $00` the character emitter **stops emitting**. The other four sites simply
+wrap and overwrite slot 0, so they never truncate.
+
+**The game never computes the dropped tiles.** `$0300+` (just past the DMA window) holds no sprite
+data at the cut, so the missing tiles do not exist anywhere. That is why emulator "Remove Sprite
+Limit" does nothing: the sprites were never emitted, not merely hidden.
+
+**Measured frequency:** over a 466-frame match, **370 frames (79%)** have a truncated character and
+**the cut position moves** (X=46, 63, 70, 207, 37, …) as sprites come and go — that movement *is*
+the flicker. OAM saturates at 64 on 102 frames.
+
+**Secondary, genuine hardware cause:** the cycle PPU implements the real 8-sprites-per-line limit
+(`hw_ppu.c`: `oam2` full + `overflow`), and 8-tile characters push several scanlines over 8, so the
+hardware independently drops ~8 sprites/frame. Real, but far less frequent than truncation.
+
+### Fix (two layers)
+
+1. **Remove the budget truncation.** `[[mod_function_hook]]` at the `$84B6` bail, content-keyed on
+   its bytes so no game bytes live in the repo. When the cursor is about to wrap, capture the sprite
+   just written at `$0200+$FC` into a host-side list and pin `$0617` so the `BEQ` never fires; the
+   game then emits every sprite it intends. Capture the other four bump sites too, so the host list
+   holds *all* emitted sprites in OAM-slot order (slot 0 = frontmost).
+2. **Host-side redraw.** `cyc_render_capture_background(true)` + `cyc_render_background()` for a
+   sprite-free background, then draw the captured list (CHR via `cyc_render_chr`, palette via
+   `cyc_render_palette`, `cyc_render_tile` for 8×8/8×16, H/V flip, palette select). Presented through
+   the `present` callback in `cyc_host_extras.h`, which works at native width 256 — unlike
+   `cyc_render_set_compositor`, which is dormant at width ≤ 256.
+
+Native PPU evaluation, sprite-0 hit and IRQ are untouched; only presentation changes. Ship as a
+`.nesmod` package + trusted plugin, `default_enabled = true`, surfaced in recomp-ui's Mods screen.
+Requires our own `CMakeLists.txt` (declaring `CXX`) calling `nesrecomp_add_cycle_game(... MODS
+GAME_ID ... HOST_EXTRAS ...)`; the shared `project/CMakeLists.txt` is inside the submodule.
+
+**The build spans two frames.** The game resets `$0617` to slot 1, then emits a slice per frame
+until the whole list is in `$0200`. The host list must therefore span a whole build, and emit
+order *differs between builds* - a half-assembled list must never be blended index-wise with the
+previous one (that draws both, out of order, which is a different, worse artefact).
+
+Present the last COMPLETE list only while the build is genuinely still in progress, i.e. on the
+**first** capture frame. From the second capture frame on the build is whole. Falling back on
+*both* capture frames leaves the picture one full build stale on one frame in six - a 6-frame
+pose shimmer, since characters animate on that same 6-frame period.
+
+**Blit.** Walk the pixels yourself, mirroring `cyc_render_sprites` (runner/cyc/cyc_render.c) row
+for row. Do NOT call `cyc_render_tile` once per scanline: it paints a whole 8x8 tile per call, so
+that stacks eight overlapping copies that overwrite each other's pixels - which shows up as
+doubled, wrongly-coloured sprites.
+
+**Verified result** (cycle backend, `--present-out`; "ink" = non-background pixels in the
+recovered character's box, frames 440-469):
+
+| | body ink | stdev |
+|---|---|---|
+| stock | 651-670 | **8.7** (flickers) |
+| mod on | 651 | **0.0** (steady) |
+| mod off | 651-670 | 8.7, byte-identical to stock |
+
+On the frames stock already drew correctly the mod is pixel-identical (3/3). The overrun tail is a
+coherent mirrored character (same Y rows, same tiles, X swapped left/right, `attr=$41` = HFLIP +
+palette 1) - genuine game output, not overrun garbage. Guest machine unchanged: identical cycle
+count and only `$02FD`/`$02FF` differ (sprite slot 63, which the cursor pin overwrites).
+
+**Second artefact (also fixed).** Beyond truncation, on one frame in six the game emits so little
+that a whole character is absent from OAM entirely - at f437 stock renders *nothing* where a
+character stands. It is present in the other five frames, so it is a build-slicing artefact, not
+game logic. Presenting the last complete list on the first capture frame only keeps it drawn. That
+region's ink stdev went 8.7 -> 0.8, and the originally-truncated character's 8.7 -> 0.0.
+
+**Not fixed, and out of scope:** `$8200` (bank 5) removes an entry from the object list at
+`$067C` (count `$067A`) and the SNES port replaces it with `RTS ; disable sprite flickering`. It
+looked like the cause of a character toggling on/off, but `$067A` cycles 0->12 cleanly with no leak
+and the toggle turned out to be our own build-slicing, so that lead is unconfirmed. That port also
+leaves `$84B6` byte-identical and caps its own OAM translation at 64 sprites (`CPY #$100`), i.e. it
+still has the truncation - its "flicker" commits were a list-compaction routine and an inverted
+OAM priority bit.
+
+### SNES Port
+
+Rumbleminze's SNES port (`rumbleminze/super-super-dodgeball`) needs no software fix — the SNES has
+128 OAM slots and 32 sprites/scanline, so the same game logic runs with far more headroom.
 
 ---
 
@@ -488,23 +587,31 @@ MCP server wrapping the Lua API (stdio JSON-RPC + TCP bridge, xvfb, per-session 
 
 ## 10. NESRecomp Submodule Status
 
-**Tracks `origin/master` (currently `3ef948c`) plus active `patches/002,003,004,005` (auto-applied by `setup.sh`; a bare checkout wipes them — `patches/archived/001` stays dormant).**
+**Tracks `mstan/nesrecomp` `origin/master` (currently `2b4fcdb`), pristine.** The `patches/` tree is
+retired with the legacy runner (§§18–19); the one idea worth carrying upstream is the 002 S-latch
+guard (plan.md). Our game project is the repo-root `CMakeLists.txt`, which wraps the submodule's
+`runner/cyc/project.cmake` and adds `CXX` + `MODS` + `GAME_ID` + `HOST_EXTRAS` — the submodule's own
+`runner/cyc/project/CMakeLists.txt` cannot express those, which is why it stays untouched.
 
-Upstream history includes the PPUMASK rendering fix (PR #22) and register-propagation/8x16-sprite fixes. Diagnostic builds enable rings + stack tracking (`build-diag/`, gitignored); prod keeps them off.
+Upstream history includes the PPUMASK rendering fix (PR #22) and register-propagation/8x16-sprite
+fixes. The cycle backend is upstream's primary path; the legacy function-level runner is "retained",
+not primary.
 
 ---
 
 ## 11. Current Project Build State
 
-- **nesrecomp submodule**: `3ef948c` (origin/master) + active `patches/002,003,004,005` (auto-applied by `setup.sh`; see §10 and `patches/active-patches.md`)
-- **Generated C code**: ~40 part files in `generated/`, gitignored, regenerated from valid `game.toml`
-- **Builds**: `build/` (prod, rings off) + `build-diag/` (gitignored, rings + stack tracking)
-- **Coverage**: ~4,399 functions analyzed, 30/30 `extra_func` resolved (check `[Eval] Coverage` each regen)
-- **Dispatch misses**: 0 (benign `$801B`/`$A3C7` interp skips only, LOG_RETURN-safe)
-- **Frame comparison**: frame 1+ ~99.8% structural match vs Mesen frame 11; `smoke 30` exit 0, static title hash `a84564b5`; menus to team-select verified to 330+ frames
+- **nesrecomp submodule**: `mstan/nesrecomp` `2b4fcdb` (origin/master), pristine — see §10
+- **Game project**: repo-root `CMakeLists.txt` (adds `CXX`/`MODS`/`GAME_ID`/`HOST_EXTRAS`); builds `build-cycle/nes_game`
+- **Generated C code**: `build-cycle/cycle-nes_game/<rev>/generated/game_cyc*.c`, gitignored, one revision dir per ROM/config revision
+- **Builds**: `build-cycle/` only (the legacy `build/` and `build-diag/` are gone with the legacy runner)
+- **Config**: `src/game.toml` carries only the display name plus five `[[mod_function_hook]]` sites; no `extra_func`, no `force_interp`, no discovery tuning needed for the stock ROM
+- **Mods**: `super-dodgeball.character-flicker` default-on; package preloaded into `build-cycle/mods/` at build time; window picks it up via the launcher, headless needs `--mods-root build-cycle/mods`
+- **Native share**: ~60–77% of cycles run recompiled code on an unseeded run, the rest via the interpreter — bit-exact either way, informational only, never a gate
+- **Verification**: 400-frame TAS byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25
 - **Venv**: `nesasm` 0.0.8 only (pip broken); system `python3` has Pillow + numpy
-- **MesenCE binary**: `external/mesence/Mesen` (83.5MB pre-built)
-- **keybinds.ini**: Player 1 keyboard and gamepad mappings configured
+- **MesenCE binary**: `external/mesence/Mesen` (pre-built, fetched by `setup.sh`)
+- **Keybinds**: configured in the launcher, persisted to `build-cycle/config.ini` (no `keybinds.ini`)
 
 ---
 
@@ -663,6 +770,11 @@ Status: input flows but the game never reacts; Start press derails. All verified
 ---
 
 ## 19. Input Frontier Resolution (Start Works; Menu Boots; 2026-10-01)
+
+> **Historical.** This section (and §18) documents the *legacy function-level runner*, retired
+> 2026-10-02. Every fix described below belongs to that runner and is **not** in the cycle build.
+> Kept as game-knowledge history — the NMI/tunnel/input findings transfer to mod work, and the
+> `patches/` files they mention no longer exist.
 
 Status: Start tunnels to menus reliably (30/30 through 330/330
 frames, 0 misses, 0 BRKs): title → city → lineup → MODE MENU → skill
@@ -897,10 +1009,15 @@ survived it.)
 
 ## 22. Cycle backend (default play path, `build-cycle/`)
 
-Upstream `runner/cyc` project integration: `build-cycle/nes_game` from our
-ROM + `src/game.toml`, windowed (`./build_and_run.sh`; headless flags imply
-headless). No game hooks, no patches — stock ROM on accurate hardware
-timing. Schedulable input (`<frame> NAMES` absolute state, same bit map).
+Upstream `runner/cyc`, built by our repo-root `CMakeLists.txt` (see §10): `build-cycle/nes_game`
+from our ROM + `src/game.toml`, windowed (`./build_and_run.sh`; headless flags imply headless).
+The guest machine runs **stock** — no patches, and the one mod is presentation-only (§2). Schedulable
+input (`<frame> NAMES` absolute state, same bit map).
+
+- **Mods**: `super-dodgeball.character-flicker` is default-on and changes presentation only. It
+  never appears in `--frame-log`/`--screenshot` output (those capture the machine's native frame);
+  only `--present-out` and the window show it. Guest state is unchanged by it: same cycle count,
+  only `$02FD`/`$02FF` differ. See §2 for the mechanism and the verification procedure.
 
 - Game, 400 TAS frames: reaches team-select, matching Mesen byte-exact
   (RAM/OAM/palette/CIRAM from boot, mirrors masked) — the §21 f≈44

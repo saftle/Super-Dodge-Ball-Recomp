@@ -19,18 +19,23 @@
 NESRecomp recompiles NES 6502 → native C via a two-part system:
 
 - **Recompiler** (`external/nesrecomp/recompiler/`): Per-instruction codegen (`cyc_codegen.c`) — one labeled C block per ROM instruction with every CPU cycle's bus activity spelled out, entered per (PRG bank, CPU address).
-- **Cycle backend** (`external/nesrecomp/runner/cyc/`): Cycle-accurate console model (6502, PPU, APU, DMAs, mappers in `hw_*.c`) + host (`cyc_host.c`: input schedules, screenshots, frame-logs, TCP). Built per game via the project integration into `build-cycle/nes_game`.
-- **`src/game.toml`**: Recompiler config — display `name` (window title) plus discovery/seed keys when they exist. The stock ROM needs no function entries.
-- **`build-cycle/`**: Generated per-instruction C (gitignored, one revision dir per ROM/config) + `nes_game` runner. No game-specific hooks — raw ROM on accurate timing.
+- **Cycle backend** (`external/nesrecomp/runner/cyc/`): Cycle-accurate console model (6502, PPU, APU, DMAs, mappers in `hw_*.c`) + host (`cyc_host.c`: input schedules, screenshots, frame-logs, TCP). Built per game into `build-cycle/nes_game`.
+- **`src/game.toml`**: Recompiler config — display `name` (window title), plus the five content-keyed `[[mod_function_hook]]` OAM-emit sites the character-flicker mod hooks. No discovery/seed entries; the stock ROM needs none.
+- **`src/sdb_host_extras.c`**: The **character-flicker mod** (`HOST_EXTRAS`). The only game-specific code: it captures every OAM sprite the game emits and presents them host-side. Presentation only — the guest machine runs stock (identical cycle count; only `$02FD`/`$02FF` differ). See research.md §2.
+- **`mods/packages/super-dodgeball.character-flicker/`**: The mod *package* — a `manifest.toml` only, copied beside the executable at build time. Data-only by design; `.nesmod` archives may not carry native code, so the package is a declaration and the implementation is `src/sdb_host_extras.c`. Default-on, toggleable in the launcher's Mods screen.
+- **`CMakeLists.txt`** (repo root): our game project — includes the submodule's `runner/cyc/project.cmake` but adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own `runner/cyc/project/CMakeLists.txt` cannot express. This is why the submodule stays pristine.
+- **`build-cycle/`**: Generated per-instruction C (gitignored, one revision dir per ROM/config) + `nes_game` runner, `config.ini`, and the preloaded `mods/` catalog.
 - **`recomp-ui/`**: Shared recomp-ui launcher (pre-boot settings dashboard) + in-game menu, compiled into the windowed `nes_game`.
 
 Build: `./build_and_run.sh` (windowed) or pass host flags (`--frames`, `--input`, `--shot-every`) for headless scripted runs. Game config changes re-trigger codegen at configure time (each revision gets its own generated dir).
+
+A headless run does **not** read the mod catalog unless you pass `--mods-root build-cycle/mods`; without it mods stay off and the output is byte-identical to stock. That is the intended way to A/B the mod, and it is what the "mod off" baselines below were measured against.
 
 ### The launcher (recomp-ui)
 
 nesrecomp already integrates recomp-ui for the cycle host (`runner/cyc/project.cmake` auto-detects a checkout; the glue is `cyc_ui_launcher.c`/`cyc_ui_menu.c`/`cyc_ui_imgui.cpp`). **The work here is pointing it at our checkout, not writing a launcher.** Nothing game-specific: console identity, bindings, and the picture all come from nesrecomp's adapter.
 
-- Both `build_and_run.sh` and `setup.sh` pass `-DNESRECOMP_RECOMP_UI="$PWD/recomp-ui"`. This is required, not redundant: the framework's auto-detect looks in `${CMAKE_SOURCE_DIR}/recomp-ui`, and under our standalone configure `CMAKE_SOURCE_DIR` is the *nesrecomp* project dir, not ours.
+- Both `build_and_run.sh` and `setup.sh` pass `-DNESRECOMP_RECOMP_UI="$PWD/recomp-ui"`. The framework's auto-detect looks in `${CMAKE_SOURCE_DIR}/recomp-ui`, and our own root `CMakeLists.txt` makes `${CMAKE_SOURCE_DIR}` *our* repo, so auto-detect would find it anyway — passing it explicitly keeps that from depending on an accident.
 - `-DNESRECOMP_RECOMP_UI=OFF` builds the window without launcher or menu. `NESRECOMP_NO_LAUNCHER=1` skips the launcher at runtime (for debugging).
 - Windowed only. A headless run (`--frames` and friends) sets headless before `cyc_sdl_prelaunch()`, so the launcher is never reached — verified: recomp-ui ON and OFF builds emit byte-identical `--frame-log` output over the 400-frame TAS.
 - Settings, bindings and the launcher state live in `build-cycle/config.ini` beside the executable. The Menu shortcut (Escape by default) opens the in-game menu.
@@ -81,7 +86,7 @@ Three options (setup.sh uses Option C by default):
 ## Running
 
 ```bash
-./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" [--frames N] [--input schedule] [--shot-every N --screenshot shot.png] [--mem-frame N --mem-out mem.txt] [--miss-log seeds.txt] [--align 0-3]
+./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" [--frames N] [--input schedule] [--shot-every N --screenshot shot.png] [--mem-frame N --mem-out mem.txt] [--miss-log seeds.txt] [--align 0-3] [--mods-root DIR] [--present-out FILE --present-every N]
 ```
 
 - **Interactive**: bare run — window opens (`[game] name` is the title), keyboard/gamepad input works
@@ -89,6 +94,8 @@ Three options (setup.sh uses Option C by default):
 - **Deterministic**: always pass `--ram-init zeros` for comparable runs (default pattern RAM otherwise)
 - **ROM** must be at `roms/Super Dodge Ball (USA).nes` (gitignored)
 - **Snapshots**: `--frame-log-at mesen --frame-log frames.bin` writes per-frame CYCFRAME-v2 snapshots (CPU RAM, CIRAM, palette indices, OAM, picture indices) for the TAS diff
+- **Mods**: the window picks them up via the launcher. Headless needs `--mods-root build-cycle/mods` explicitly, or mods stay off and the run is stock.
+- **Presentation**: `--present-out` saves what the *window* would show — the only path that exercises the character-flicker mod. `--screenshot`/`--frame-log` capture the machine's native frame and ignore it.
 
 ## Critical Rules
 
@@ -122,12 +129,12 @@ Three options (setup.sh uses Option C by default):
 - Generated C code (`generated/`) is gitignored — do not edit directly
 - `make clean && USE_GCC=true make -j$(nproc)` builds the entire MesenCE with UI
 - Use venv Python (`venv/bin/python3`) for nesasm work, system `python3` for Pillow/numpy scripts — never mix them up
-- `src/` ships config + hashes only (currently just `game.toml`). Game bytes come from the user's ROM at build/run time: the cycle project reads the ROM at configure time (identity-checked) and the binary takes the ROM path at launch. Precedents: `tools/rom_to_asm.py`, `tools/frame_gen/oracle_dump.lua`
+- `src/` ships **config + our own C only** — `game.toml` and `sdb_host_extras.c`. No game bytes: the cycle project reads the user's ROM at configure time (identity-checked) and the binary takes the ROM path at launch. Hooks identify code by `crc32`, never by `bytes`. Precedents: `tools/rom_to_asm.py`, `tools/frame_gen/oracle_dump.lua`
 - Debug byte dumps belong in `tmp/` (gitignored scratch), never in `src/`. Confirm offsets with `tools/dis65.py` plus a python byte-compare against the ROM before coding
 - Pre-commit self-check: `git status --short` and `git ls-files | grep -Ei '\.(nes|png|ppm|bin)$'` must show no game-derived blobs; any new `static const uint8_t …[]` in `src/` needs ROM-provenance justification or gets rejected
 - Every third-party addition ships with provenance + license + posture, recorded at add time (never as later cleanup): who made it, under what license (or "no license file found"), and how redistribution is avoided — submodule pointer (own license, never vendored), gitignored + user-fetched (test ROMs, oracle binaries), or credited test fixture (vectors keep in-file + README author credit, link pages instead of re-hosting). Code/deps go in `NOTICE.md`; test data goes in the nearest README
 - Installed packages (pip/apt) are not distributed — no attribution needed. Code you write from specs (parsers, harnesses) is yours. Data files you didn't create keep their credits intact — never strip author info
-- **nesrecomp submodule tracks pristine `origin/master`** (currently `3ef948c` — the pin must stay fetchable upstream; never commit in the submodule, never work with a dirty tree: `git -C external/nesrecomp status` must be clean or the dirt is yours to explain); local runner experiments go upstream or they don't happen — no `patches/` anymore (retired, see `patches/README.md`)
+- **nesrecomp submodule tracks pristine `origin/master`** (currently `mstan/nesrecomp` @ `2b4fcdb` — the pin must stay fetchable upstream; never commit in the submodule, never work with a dirty tree: `git -C external/nesrecomp status` must be clean or the dirt is yours to explain); local runner experiments go upstream or they don't happen — no `patches/` anymore (retired, see `patches/README.md`)
 
 ## Known Issues (Current State)
 
@@ -137,10 +144,13 @@ Three options (setup.sh uses Option C by default):
 - Uninitialized CIRAM differs at power-on (`--ram-init` covers CPU RAM only); the game fills nametables within frames. Boot-frame diffs are init modeling, not divergence.
 - Unseeded runs execute partly on the cycle interpreter (still bit-exact, slower). `--miss-log` seed lines feed future `cycle_seed_file` runs; native share is informational, never a gate.
 - Boot staging order differs from Mesen (backdrop-green vs stripped title at file 0); content converges from file 1. Same-index comparison stands — no offset search.
-- Sprite flickering uses **Method 2 Software Sprite Removal** (game strips OAM past 8/scanline) — "Remove Sprite Limit" emulator settings are non-functional. Fix requires a game mod (hook the cull routine), not a renderer flag.
+- Sprite flickering is **not** emulator sprite-limit removal — the game's OAM builder has a hard **64-sprite budget** (8-bit `$0617` cursor, `BEQ` bail at `$84B6`) and simply **stops emitting**, so the missing tiles are never computed and "Remove Sprite Limit" cannot help. Characters are 8 sprites each (16×32), so 79% of match frames truncate. **Fixed** by the default-on `super-dodgeball.character-flicker` mod (`src/sdb_host_extras.c` + five content-keyed `[[mod_function_hook]]` sites in `src/game.toml`); body-ink stdev 8.7 → 0.8, guest machine unchanged. Full write-up in research.md §2.
+- Two traps when touching that mod, both of which produce a *different* artifact than the one being fixed: emit order **differs between builds**, so never blend a half-built list with the previous one index-wise (draws both, out of order) — present the last complete list only on the *first* capture frame or the picture goes a full build stale one frame in six. And the blit must walk pixels itself mirroring `cyc_render_sprites`; calling `cyc_render_tile` once per scanline stacks eight overlapping 8×8 copies that overwrite their own pixels, which reads as doubled, wrongly-coloured sprites.
+- `$8200` (bank 5) removes an entry from the object list at `$067C` and the SNES port replaces it with `RTS ; disable sprite flickering`. That is **not** our flicker — `$067A` cycles 0→12 with no leak, and that port also leaves `$84B6` byte-identical and caps its own OAM translation at 64 sprites, so it still has the truncation. Unconfirmed lead; don't re-chase it blind.
 
 ### Current Constraints
-- `src/game.toml` stays minimal — the stock ROM needs no function entries; future seed files go in `[game] cycle_seed_file` / `cycle_capture_file`
+- `src/game.toml` carries no discovery/seed entries (the stock ROM needs none) and no `[[mod_function_hook]]` beyond the five OAM-emit sites the character-flicker mod needs. Future seed files go in `[game] cycle_seed_file` / `cycle_capture_file`. **Never add hook content keys as `bytes` unless you intend to commit ROM-derived bytes** — use `length` + `crc32`, which keeps the bytes out of the repo.
+- Hook sites declare **no `id`**: they bind to plugins by address. Sharing one `id` across several sites fails `cyc_hooks_validate`.
 - No `sram_map` (no-battery MMC1 has no SRAM code)
 - **nesrecomp submodule tracks pristine `origin/master`** — never work with a dirty tree; `setup.sh` re-checkouts the pin on fresh setups
 
@@ -156,7 +166,7 @@ Three options (setup.sh uses Option C by default):
 
 ## NESRecomp Submodule Status
 
-**Tracks pristine `origin/master` (currently `3ef948c`).** The tree must stay clean — verify with `git -C external/nesrecomp status` before blaming the framework.
+**Tracks pristine `origin/master` (`mstan/nesrecomp`, currently `2b4fcdb`).** The tree must stay clean — verify with `git -C external/nesrecomp status` before blaming the framework.
 
 ## Codegen Notes
 
@@ -172,13 +182,34 @@ The function-level runner (`src/extras.c` hooks, `patches/`, `build/`) is delete
 
 ### Iterative Testing Procedure
 
-After any `src/game.toml` change (display name, discovery, seeds):
+After any `src/game.toml` change (display name, discovery, seeds, **or a `[[mod_function_hook]]` site**):
 
 1. **Rebuild**: `cmake --build build-cycle -j$(nproc)` (configure re-triggers codegen; each revision gets its own generated dir)
 2. **TAS**: `python3 tools/tas/run_tas.py --tas tas/sdb_4976.tas.json --frames 400 --out tas/runs/rXXX` + `diff_tas.py` — liveness 400/400 exit 0, state MATCH (mirrors masked)
 3. **FAIL criteria**: nonzero exit, logged frames != requested, any state diff outside the masked mirrors
 
 **Known baseline**: cycle 400 TAS frames → team-select, state byte-exact vs Mesen (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25.
+
+### Verifying the character-flicker mod
+
+The mod is presentation-only, so it does **not** move the TAS gate — `--frame-log`/`--screenshot` capture the machine's native frame and never see it. Check it with `--present-out`, which writes what the window would show:
+
+```bash
+# same input both ways: mod on vs off is the whole test
+./build-cycle/nes_game ROM --frames 470 --input <schedule> --ram-init zeros \
+  --present-out out/on_%05d.png --present-every 1 --mods-root build-cycle/mods
+./build-cycle/nes_game ROM --frames 470 --input <schedule> --ram-init zeros \
+  --present-out out/off_%05d.png --present-every 1
+```
+
+Gates, all currently green:
+
+1. **Guest unchanged** — same total cycle count as stock, and only `$02FD`/`$02FF` differ in a full CPU-RAM dump (sprite slot 63, which the cursor pin overwrites). Any other byte is a regression.
+2. **Flicker gone** — pick a character's on-screen box, count non-background pixels per frame: stdev must fall well under stock's (8.7 → ≤1).
+3. **No new artifacts** — on frames stock already drew correctly, the mod is pixel-identical.
+4. **Mod off is stock** — byte-identical output with the feature disabled.
+
+Comparison numbers must come from the *same* schedule and `--ram-init`; a different input changes the match and the figures are meaningless.
 
 **The TAS gate is not currently trustworthy.** Super Dodge Ball is a random game, so a fixed input schedule does not reproduce the same run: RNG divergence between the cycle backend and Mesen puts the two sides on different paths, and a red `diff_tas.py` may be that rather than a real defect. Until pre-seeding exists (pin both sides to the same RNG state before frame 0), treat TAS diffs as advisory — investigate the first divergent frame, don't assume a regression. Blargg is unaffected and remains the real engine gate.
 
@@ -311,7 +342,10 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 
 | Path | Purpose |
 |------|---------|
-| `src/game.toml` | Recompiler config: display `name`, discovery/seed keys (stock ROM needs no function entries) |
+| `CMakeLists.txt` | Game project (root). Wraps the submodule's `runner/cyc/project.cmake`, adds `CXX` + `MODS` + `GAME_ID` + `HOST_EXTRAS`, copies `mods/` beside the executable |
+| `src/game.toml` | Recompiler config: display `name`, plus five content-keyed `[[mod_function_hook]]` OAM-emit sites (`length`+`crc32`, never `bytes`) |
+| `src/sdb_host_extras.c` | The character-flicker mod: OAM sprite capture + host-side presentation. Only game-specific C in the tree |
+| `mods/packages/super-dodgeball.character-flicker/` | Mod package — `manifest.toml` only (data-only by design; implementation is `src/sdb_host_extras.c`). Default-on; PolyForm NC, same as the project |
 | `external/nesrecomp/` | NESRecomp submodule (recompiler + runners) — **pristine origin/master, tree must stay clean** |
 | `external/mesence/` | MesenCE emulator source/binary |
 | `recomp-ui/` | recomp-ui submodule (launcher + in-game menu) — **pinned, never floated**; MIT, own license |

@@ -10,3 +10,46 @@
 [game]
 output_prefix = "Super_Dodge_Ball_(USA)"
 name = "Super Dodge Ball (USA)"
+
+# OAM sprite-emit sites, content-keyed so no ROM bytes live in the repo.
+#
+# The game builds OAM in place at $0200 (the $4014 DMA source page) with an
+# 8-bit byte cursor $0617. Every emitter writes a complete 4-byte sprite and
+# then does `LDA $0617 / CLC / ADC #$04 / STA $0617`. Characters are 8 sprites
+# each (16x32), so a busy match needs more than OAM's 64 slots; when the cursor
+# wraps, $84B6 takes its `BEQ` and the character emitter STOPS EMITTING. The
+# dropped tiles are never computed, which is why no emulator sprite-limit
+# toggle helps. Measured: 79% of match frames truncate (docs/research.md 2).
+#
+# These five sites are the cursor bumps. The mod's hook runs before each one,
+# captures the sprite just written into a host-side list, and pins the cursor
+# so the bail never fires. Sites carry no `id`: they bind to plugins by
+# address (a shared id would fail cyc_hooks_validate).
+#
+# length + crc32 = CRC-32 of those bytes at the address, per nes_crc32()
+# (common/nes_cart.h) -- the standard CRC-32, same as zlib.crc32.
+
+[[mod_function_hook]]
+addr = 0x8116
+length = 10
+crc32 = 0xC179F30C
+
+[[mod_function_hook]]
+addr = 0x8338
+length = 10
+crc32 = 0x221AF81E
+
+[[mod_function_hook]]
+addr = 0x84B6
+length = 10
+crc32 = 0xD2156B5A
+
+[[mod_function_hook]]
+addr = 0xA2F7
+length = 10
+crc32 = 0x1DAFFEC3
+
+[[mod_function_hook]]
+addr = 0xA330
+length = 10
+crc32 = 0x26C1DE0B
