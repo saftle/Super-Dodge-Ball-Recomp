@@ -11,6 +11,61 @@ was refused, but it must not change behaviour for a game that did not ask for
 it. These are meant to become upstream PRs, so a reviewer should be able to
 read the diff and see that no existing title moves.
 
+## 007_window_vsync.patch (active 2026-10-12)
+
+**What:** VSync as a launcher Display setting. `CycSettings` gains `[Display]
+VSync` (default off, persisted in `config.ini`); `cyc_ui_launcher.c` sets
+`gi.has_vsync = 1` — lighting up recomp-ui's existing Graphics row, the same
+one PSX uses — and transfers the value both ways (Adaptive counts as on:
+SDL2 has no adaptive swap API on the 2D renderer); `cyc_sdl.c` builds its
+renderer with `SDL_RENDERER_PRESENTVSYNC` when set, falling back to tearing
+rather than dying if the driver refuses.
+
+**Why written:** stock pacing presents on an `SDL_Delay` + busy-wait timer
+with no vsync, so presents jitter and the 60.0988 Hz guest drifts against a
+fixed-60 Hz panel — choppiness no guest speedup fixes. Vsync paces presents
+to the display's refresh at any rate (60/120/144 Hz); the guest keeps its own
+clock, so this is presentation only.
+
+**Why a setting, not the mod it started as:** vsync is host-global, not
+game-specific — a mod would make every NESRecomp title reinvent it, and the
+launcher row, the `has_vsync` gate and the 1/2/3 encoding already exist
+upstream waiting for a console to opt in. The first version *was* a
+`super-dodgeball.vsync` mod (activation plugin + renderer rebuild on
+runtime toggles); it worked, but the in-game menu has no vsync row and
+cannot gain one without editing the pinned recomp-ui, so the setting won
+and the mod was deleted.
+
+**Why safe:** default off, so `renderer_flags()` equals the old
+`SDL_RENDERER_ACCELERATED` and the launcher row shows Off unless the player
+opts in. Guest timing, save states and headless (which never reaches the
+renderer code) are untouched.
+
+**Three traps worth recording:**
+- SDL2 allows one renderer per window: the mod-era rebuild path created the
+  new renderer before destroying the old and failed every toggle with
+  "Renderer already associated with window" (plus, the menu holds textures
+  on the old renderer, so it needs a shutdown/reinit around the swap).
+  Deleted with the mod; the setting applies once at startup.
+- A `state.toml` entry for a deleted mod is not inert: boot refuses with
+  "The executable does not provide this trusted plugin" plus "Resolve the
+  highlighted mod conflicts", and the game never starts. The vsync entries
+  were removed by hand; the launcher drops unknown entries on its next
+  commit.
+- Deleting a mod package from `mods/packages/` does not remove it from the
+  build: the post-build step is `copy_directory`, which only adds, so the
+  deleted mod keeps showing in the Mods screen until its
+  `build-cycle/mods/packages/<id>/` dir is removed by hand.
+
+**Verified:** `cmake --build build-cycle` clean; windowed `--exit-after 60`
+under xvfb exit 0 both ways — stock config prints no vsync line,
+`VSync = 1` in `config.ini` prints `vsync on: presenting at display
+refresh`, and the launcher path is confirmed on a real display (Graphics →
+VSync → Play prints the same line).
+
+**Afterlife: propose upstream.** Any game can opt in with one
+`has_vsync` line; the request API is deliberately game-agnostic.
+
 ## 006_ppu_overclock_mmc1.patch (active 2026-10-12)
 
 **What:** one line. `cyc_extra_scanlines_supported()` returns

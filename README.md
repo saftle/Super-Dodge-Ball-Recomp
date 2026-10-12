@@ -114,6 +114,14 @@ off unless you ask for it:
 `--present-out` writes what the *window* would show, which is the only path that exercises the mod —
 `--screenshot` and `--frame-log` capture the machine's native frame and ignore it.
 
+## Display
+
+The launcher's **Graphics** section has a **VSync** row. With it on, each present
+syncs to the display's refresh, so motion lands evenly at 60 Hz, 120 Hz or
+anything else. **Presentation only**: the guest keeps its stock clock either way.
+(Adaptive in that row behaves the same as On.) Needs `patches/007_window_vsync`
+(applied by `setup.sh`). See `docs/research.md` §24.
+
 ## Getting MesenCE (for frame comparison)
 
 The recompiled game's frame output can be compared against an accurate NES emulator reference. **MesenCE** (`nesdev-org/MesenCE`) is used as the reference renderer. Three ways to get it:
@@ -168,13 +176,13 @@ Static recompilation, not an emulator. The original 6502 machine code is transla
 - **`CMakeLists.txt`** — The game project (root). Wraps the submodule's `runner/cyc/project.cmake` and adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own project file can't express — so the submodule stays pristine.
 - **`src/game.toml`** — Recompiler config: display `name` (window title), a `cycle_seed_file`, and ten content-keyed `[[mod_function_hook]]` sites. Hooks are keyed by `crc32`, never by ROM bytes. Fed to the cycle backend at configure time.
 - **`src/cycle_seeds.txt`** — Recompiler discovery roots. A mod hook site only exists in *recompiled* code, and the sprite emitters the mod hooks ran on the interpreter; these six lines make them native. Total cycle count unchanged.
-- **`src/sdb_host_extras.c`** — The **character-flicker mod**: captures every OAM sprite the game emits and presents them host-side, and overrides the game's own object culling (three gates, research.md §2.1).
-- **`mods/`** — The mod package (`manifest.toml` only; `.nesmod` archives can't carry native code). Default-on, toggleable in the launcher's Mods screen.
+- **`src/sdb_host_extras.c`** — Our two mods: the **character-flicker mod** (captures every OAM sprite the game emits and presents them host-side, overriding the game's own object culling — research.md §2.1) and the **PPU-overclocking mod** (picks a value for the backend's extra-scanlines setting — research.md §23).
+- **`mods/`** — The mod packages (`manifest.toml` only; `.nesmod` archives can't carry native code). Off by default, toggleable in the launcher's Mods screen.
 - **`build-cycle/`** — Cycle-backend build (gitignored): per-instruction C (`game_cyc*.c`, one revision dir per ROM/config) + `nes_game` runner + the preloaded `mods/` catalog.
 - **`external/nesrecomp/`** — NESRecomp framework submodule (recompiler + runners)
 - **`external/mesence/`** — MesenCE emulator (reference rendering + oracle Lua API)
 - **`tools/frame_gen/`** — Mesen frame export Lua script + wrapper
-- **`tools/overclock/                 # PPU-overclocking oracle harness (research.md 23)
+- **`tools/overclock/`** — PPU-overclocking oracle harness (research.md §23)
 - **`tools/blargg/`** — blargg test-ROM suite on the cycle backend (`run_blargg.py`, `manifest.json`); per-ROM builds in `build-cyc-blargg/`, ROMs in `external/nes-test-roms/` (both gitignored)
 - **`tools/tas/`** — TAS-integrated differential harness: bk2/fm2 → canonical `tas.json`, shared-input runners for MesenCE + cycle backend with full state capture, three-layer first-divergence diff (`run_tas.py`, `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored)
 
@@ -190,6 +198,7 @@ Super Dodgeball Recomp/
 ├── mods/                          # Mod package(s), copied beside the executable at build time
 │   └── packages/
 │       └── super-dodgeball.character-flicker/   # manifest.toml only (data-only by design)
+│       └── super-dodgeball.ppu-overclock/       # manifest.toml only (data-only by design)
 ├── external/nesrecomp/            # NESRecomp submodule
 ├── external/mesence/              # MesenCE emulator (reference rendering)
 ├── external/nes-test-roms/        # blargg suite checkout (gitignored, via setup.sh --fetch path)
@@ -203,7 +212,7 @@ Super Dodgeball Recomp/
 │   ├── blargg/                    # blargg suite on the cycle backend (run_blargg.py, manifest)
 │   ├── tas/                       # TAS differential harness (converters, runners, diff)
 │   ├── frame_gen/                 # Mesen frame export + oracle dump + memwatch scripts
-│   └── overclock/                 # PPU-overclocking oracle harness (research.md 23)
+│   └── overclock/                 # PPU-overclocking oracle harness (research.md §23)
 ├── tas/
 │   ├── vectors/                   # TAS movies (.bk2 + format samples, committed)
 │   └── runs/                      # Per-TAS run artifacts (gitignored)

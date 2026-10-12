@@ -1,0 +1,140 @@
+diff --git a/runner/cyc/cyc_sdl.c b/runner/cyc/cyc_sdl.c
+index a10d0fc..5fb15f6 100644
+--- a/runner/cyc/cyc_sdl.c
++++ b/runner/cyc/cyc_sdl.c
+@@ -257,6 +257,37 @@ static long          s_frames_done;
+ static bool          s_running = true;
+ static bool          s_have_menu;
+ 
++/* Renderer flags follow the VSync setting: SDL_RENDERER_PRESENTVSYNC blocks
++ * each present on the display's refresh, so guest frames pace to vsync
++ * instead of SDL_Delay jitter — at 60 Hz, 120 Hz or anything else, since the
++ * guest keeps its own 60.0988 Hz clock and the display just repeats frames
++ * as needed. Off (default) is exactly the old behavior. A driver that
++ * refuses the flag falls back to tearing rather than dying. */
++static Uint32 renderer_flags(void)
++{
++    return (Uint32)(SDL_RENDERER_ACCELERATED | (s_set.vsync ? SDL_RENDERER_PRESENTVSYNC : 0));
++}
++
++static bool create_renderer(void)
++{
++    s_ren = s_win ? SDL_CreateRenderer(s_win, -1, renderer_flags()) : NULL;
++    if (s_win && !s_ren && (renderer_flags() & SDL_RENDERER_PRESENTVSYNC)) {
++        fprintf(stderr, "SDL window: vsync refused (%s); presenting without it\n", SDL_GetError());
++        s_ren = SDL_CreateRenderer(s_win, -1, SDL_RENDERER_ACCELERATED);
++    }
++    /* offscreen / headless video drivers have no accelerated renderer */
++    if (s_win && !s_ren) s_ren = SDL_CreateRenderer(s_win, -1, SDL_RENDERER_SOFTWARE);
++    return s_ren != NULL;
++}
++
++/* Whether the live renderer actually syncs (a driver may take the flag and
++ * ignore it; GetRendererInfo reports what it honored). */
++static bool renderer_synced(void)
++{
++    SDL_RendererInfo info;
++    return s_ren && SDL_GetRendererInfo(s_ren, &info) == 0 && (info.flags & SDL_RENDERER_PRESENTVSYNC) != 0;
++}
++
+ static uint64_t now_ms(void) { return SDL_GetTicks64(); }
+ static long     frames_done(void) { return s_frames_done; }
+ static void     request_quit(void) { s_running = false; }
+@@ -1237,14 +1268,15 @@ int cyc_sdl_main(const char *title_in, int scale)
+     s_win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w * s_set.window_scale,
+                              logical_h() * s_set.window_scale,
+                              SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (s_hidden ? SDL_WINDOW_HIDDEN : 0));
+-    s_ren = s_win ? SDL_CreateRenderer(s_win, -1, SDL_RENDERER_ACCELERATED) : NULL;
+-    /* offscreen / headless video drivers have no accelerated renderer */
+-    if (s_win && !s_ren) s_ren = SDL_CreateRenderer(s_win, -1, SDL_RENDERER_SOFTWARE);
+-    if (!s_ren || !ensure_texture(w, h)) {
++    s_ren = NULL;
++    if (!create_renderer() || !ensure_texture(w, h)) {
+         fprintf(stderr, "SDL window: %s\n", SDL_GetError());
+         SDL_Quit();
+         return 1;
+     }
++    if (s_set.vsync)
++        fprintf(stderr, "vsync %s\n", renderer_synced() ? "on: presenting at display refresh"
++                                                        : "on: driver did not honor it; tearing as before");
+     apply_settings();
+     /* From here a width request waits for the frame boundary; Fit follows
+      * the drawable from the first frame. */
+diff --git a/runner/cyc/cyc_settings.c b/runner/cyc/cyc_settings.c
+index b94b037..b9fe775 100644
+--- a/runner/cyc/cyc_settings.c
++++ b/runner/cyc/cyc_settings.c
+@@ -19,6 +19,7 @@ void cyc_settings_default(CycSettings *s)
+     s->fullscreen = 0;
+     s->integer_scale = 1;
+     s->linear_filter = 0;
++    s->vsync = 0;
+     s->audio_enabled = 1;
+     s->volume = 100;
+     s->skip_launcher = 0;
+@@ -123,6 +124,7 @@ bool cyc_settings_load(CycSettings *s, const char *path, FILE *log, const CycSet
+             else if (eq_ci(key, "Fullscreen")) bad = !parse_int(val, &v) || (s->fullscreen = clampi(v, 0, 2), 0);
+             else if (eq_ci(key, "IntegerScale")) bad = !parse_int(val, &v) || (s->integer_scale = v != 0, 0);
+             else if (eq_ci(key, "LinearFilter")) bad = !parse_int(val, &v) || (s->linear_filter = v != 0, 0);
++            else if (eq_ci(key, "VSync")) bad = !parse_int(val, &v) || (s->vsync = v != 0, 0);
+             else if (eq_ci(key, "HdPackEnabled")) bad = !parse_int(val, &v) || (s->hdpack_enabled = v != 0, 0);
+             else if (eq_ci(key, "HdPackDir")) snprintf(s->hdpack_dir,sizeof s->hdpack_dir,"%s",val);
+             break;
+@@ -205,8 +207,8 @@ bool cyc_settings_save(const CycSettings *s, const char *path, const CycSettings
+     if (!f) return false;
+     fprintf(f, "# NESRecomp cycle-backend settings: the launcher, the in-game menu and the\n"
+                "# window write this file. Keys are SDL key and controller names.\n");
+-    fprintf(f, "[Display]\nWindowScale = %d\nFullscreen = %d\nIntegerScale = %d\nLinearFilter = %d\n",
+-            s->window_scale, s->fullscreen, s->integer_scale, s->linear_filter);
++    fprintf(f, "[Display]\nWindowScale = %d\nFullscreen = %d\nIntegerScale = %d\nLinearFilter = %d\nVSync = %d\n",
++            s->window_scale, s->fullscreen, s->integer_scale, s->linear_filter, s->vsync);
+     fprintf(f,"HdPackEnabled = %d\nHdPackDir = %s\n",s->hdpack_enabled,s->hdpack_dir);
+     fprintf(f, "[Audio]\nEnabled = %d\nVolume = %d\n", s->audio_enabled, s->volume);
+     fprintf(f, "[Input]\n");
+diff --git a/runner/cyc/cyc_settings.h b/runner/cyc/cyc_settings.h
+index 3a10e1c..0d80d9d 100644
+--- a/runner/cyc/cyc_settings.h
++++ b/runner/cyc/cyc_settings.h
+@@ -35,6 +35,7 @@ typedef struct CycSettings {
+     int  fullscreen;        /* 0 off, 1 borderless, 2 exclusive */
+     int  integer_scale;     /* bool */
+     int  linear_filter;     /* bool */
++    int  vsync;             /* bool: sync presents to the display refresh */
+     int  audio_enabled;     /* bool */
+     int  volume;            /* 0..100 */
+     int  skip_launcher;     /* bool */
+diff --git a/runner/cyc/cyc_ui_launcher.c b/runner/cyc/cyc_ui_launcher.c
+index 66e3bdd..0f1a86d 100644
+--- a/runner/cyc/cyc_ui_launcher.c
++++ b/runner/cyc/cyc_ui_launcher.c
+@@ -56,6 +56,9 @@ static void to_launcher(const CycSettings *s, RecompLauncherCSettings *io, const
+     io->fullscreen = s->fullscreen;
+     io->integer_scale = s->integer_scale;
+     io->linear_filter = s->linear_filter;
++    /* The host's 1/0 predates the setting: always transfer an opinion, so the
++     * row shows ours rather than the model's ON seed. */
++    io->vsync = s->vsync ? RECOMP_LAUNCHER_VSYNC_ON : RECOMP_LAUNCHER_VSYNC_OFF;
+     io->enable_audio = s->audio_enabled;
+     io->volume = s->volume;
+     io->skip_launcher = s->skip_launcher;
+@@ -90,6 +93,9 @@ static void from_launcher(const RecompLauncherCSettings *io, CycSettings *s, con
+     s->fullscreen = io->fullscreen < 0 ? 0 : io->fullscreen > 2 ? 2 : io->fullscreen;
+     s->integer_scale = io->integer_scale != 0;
+     s->linear_filter = io->linear_filter != 0;
++    /* SDL2 cannot do adaptive (no swap-interval API on the 2D renderer), so
++     * Adaptive and On both mean synced presents. */
++    s->vsync = io->vsync == RECOMP_LAUNCHER_VSYNC_ON || io->vsync == RECOMP_LAUNCHER_VSYNC_ADAPTIVE;
+     s->audio_enabled = io->enable_audio != 0;
+     s->volume = io->volume < 0 ? 0 : io->volume > 100 ? 100 : io->volume;
+     s->skip_launcher = io->skip_launcher != 0;
+@@ -214,6 +220,10 @@ int cyc_ui_launcher(CycSettings *settings, const char *settings_path, const CycH
+     gi.hdpack_supported = 0;
+ #endif
+     gi.has_integer_scale = 1;
++    /* Driver vsync at present time: the launcher draws its Graphics row for
++     * it (psx is the only console that sets this today). The host builds its
++     * renderer with SDL_RENDERER_PRESENTVSYNC when the setting is on. */
++    gi.has_vsync = 1;
+     /* a game's view modes are a runtime-menu row (live), not a launcher toggle */
+     gi.widescreen_supported = 0;
+     (void)extras;

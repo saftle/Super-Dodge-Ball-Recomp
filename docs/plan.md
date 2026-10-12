@@ -4,7 +4,7 @@
 
 ## Where Things Stand
 
-- **Backend**: cycle-accurate (`./build_and_run.sh` → `build-cycle/nes_game`, upstream `runner/cyc`). Stock ROM on accurate timing. Two game-specific mods live in `src/sdb_host_extras.c`: the character-flicker mod (presentation-only; leaves the guest machine byte-identical) and the PPU-overclocking mod (deliberately changes console timing so the guest runs faster). The legacy runner is retired (files removed 2026-10-02, backup in `/tmp/legacy_backup/` + git history; game knowledge preserved in research §§18–19).
+- **Backend**: cycle-accurate (`./build_and_run.sh` → `build-cycle/nes_game`, upstream `runner/cyc`). Stock ROM on accurate timing. Two game-specific mods live in `src/sdb_host_extras.c`: the character-flicker mod (truncation half presentation-only; the culling half makes the guest emit sprites it had dropped, so its timing shifts slightly) and the PPU-overclocking mod (deliberately changes console timing so the guest runs faster). VSync is a launcher Graphics setting (patch 007), not a mod. The legacy runner is retired (files removed 2026-10-02, backup in `/tmp/legacy_backup/` + git history; game knowledge preserved in research §§18–19).
 - **Verification**: TAS 400 frames reach team-select with RAM/OAM/palette/CIRAM byte-exact vs Mesen from boot (`tools/tas/`); blargg cpu tier 25/25 (20 RAM-text PASS + 5 screen-confirmed).
 - **Upstream**: maintainer is moving to cycle-default; legacy goes antiquated. Our migration is done early. Patch 006 (PPU overclocking for MMC1) is the live upstream proposal — see `patches/active-patches.md`. The legacy 002 S-latch guard is drafted below.
 - **Frontier**: court BG past team-select is unverified on cycle; after that, widescreen.
@@ -21,6 +21,8 @@
 5. **Run the gates on patch 006 before it lands.** A submodule change is exactly when both are wanted: TAS 400 + `diff_tas.py` (must stay MATCH) and blargg cpu 25/25. Not yet run — AGENTS.md says ask first. The patch is strictly additive and the 600-frame stock run is byte-identical with and without it, but that is not the same as the full gates.
 
 6. ~~PPU overclocking~~ — **DONE.** `super-dodgeball.ppu-overclock`, opt-in, off by default (it changes console timing, so hardware parity must stay the default). Integer `[[option]]` so the launcher exposes the count. Needs patch 006; without it the backend refuses on mapper 1. Measured: 2.0x cycles/frame, and the guest populates its display list on 565 of 800 frames vs 316 stock. Research section 23.
+
+7. ~~VSync~~ — **DONE as a launcher setting** (it started as a `super-dodgeball.vsync` mod and moved: vsync is host-global, and recomp-ui already had the Graphics row waiting behind `has_vsync`). Pre-boot Graphics → VSync toggle, persisted per-player in `config.ini` `[Display]`; needs patch 007. Presentation only — guest clock untouched. Windowed `--exit-after 60` exit 0 both ways via the config key, and the launcher path is confirmed (Graphics → VSync → Play prints the vsync line). Research section 24.
 
 7. Resolution honesty: wider canvas only — no upscaling path exists upstream (CHR PNG replacement at most). Don't promise HD.
 

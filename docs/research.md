@@ -834,9 +834,12 @@ MCP server wrapping the Lua API (stdio JSON-RPC + TCP bridge, xvfb, per-session 
 
 ## 10. NESRecomp Submodule Status
 
-**Tracks `mstan/nesrecomp` `origin/master` (currently `2b4fcdb`), pristine.** The `patches/` tree is
-retired with the legacy runner (§§18–19); the one idea worth carrying upstream is the 002 S-latch
-guard (plan.md). Our game project is the repo-root `CMakeLists.txt`, which wraps the submodule's
+**Tracks `mstan/nesrecomp` `origin/master` (currently `2b4fcdb`), pinned.** The
+checked-out tree is dirty exactly when an active patch is applied: `setup.sh`
+applies `patches/*.patch` after every checkout (006 PPU-overclock MMC1,
+007 window vsync — see `patches/active-patches.md`); archived legacy-runner
+patches stay unapplied. The retried-legacy 002 S-latch guard is drafted in
+plan.md. Our game project is the repo-root `CMakeLists.txt`, which wraps the submodule's
 `runner/cyc/project.cmake` and adds `CXX` + `MODS` + `GAME_ID` + `HOST_EXTRAS` — the submodule's own
 `runner/cyc/project/CMakeLists.txt` cannot express those, which is why it stays untouched.
 
@@ -848,12 +851,12 @@ not primary.
 
 ## 11. Current Project Build State
 
-- **nesrecomp submodule**: `mstan/nesrecomp` `2b4fcdb` (origin/master), pristine — see §10
+- **nesrecomp submodule**: `mstan/nesrecomp` `2b4fcdb` (origin/master), pinned; tree dirty only with active patches 006/007 applied — see §10
 - **Game project**: repo-root `CMakeLists.txt` (adds `CXX`/`MODS`/`GAME_ID`/`HOST_EXTRAS`); builds `build-cycle/nes_game`
 - **Generated C code**: `build-cycle/cycle-nes_game/<rev>/generated/game_cyc*.c`, gitignored, one revision dir per ROM/config revision
 - **Builds**: `build-cycle/` only (the legacy `build/` and `build-diag/` are gone with the legacy runner)
 - **Config**: `src/game.toml` carries the display name plus ten `[[mod_function_hook]]` sites and a `cycle_seed_file`; no `extra_func`, no `force_interp`, no discovery tuning needed for the stock ROM
-- **Mods**: `super-dodgeball.character-flicker` default-on; package preloaded into `build-cycle/mods/` at build time; window picks it up via the launcher, headless needs `--mods-root build-cycle/mods`. Reproduction vector for both fixes: `tas/vectors/sdb_idle.input`
+- **Mods**: `super-dodgeball.character-flicker` and `super-dodgeball.ppu-overclock`, both off by default; packages preloaded into `build-cycle/mods/` at build time; window picks them up via the launcher, headless needs `--mods-root build-cycle/mods`. VSync is a launcher Graphics setting (patch 007), not a mod. Reproduction vector for both flicker fixes: `tas/vectors/sdb_idle.input`
 - **Native share**: ~60–77% of cycles run recompiled code, the rest via the interpreter — bit-exact either way, informational only, never a gate. `src/cycle_seeds.txt` roots the sprite emitter natively so the mod's hooks can exist there at all; total cycle count unchanged by it
 - **Verification**: 400-frame TAS byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25
 - **Venv**: `nesasm` 0.0.8 only (pip broken); system `python3` has Pillow + numpy
@@ -1258,7 +1261,9 @@ survived it.)
 
 Upstream `runner/cyc`, built by our repo-root `CMakeLists.txt` (see §10): `build-cycle/nes_game`
 from our ROM + `src/game.toml`, windowed (`./build_and_run.sh`; headless flags imply headless).
-The guest machine runs **stock** — no patches, and the one mod is presentation-only (§2). Schedulable
+The guest machine runs **stock** — patches 006/007 are inert at stock settings,
+and of the two mods only the truncation half is presentation-only (§2, §22).
+Schedulable
 input (`<frame> NAMES` absolute state, same bit map).
 
 - **Mods**: `super-dodgeball.character-flicker` is opt-in (off by default). It never appears in
@@ -1320,7 +1325,6 @@ input (`<frame> NAMES` absolute state, same bit map).
 ---
 
 ## 23. PPU Overclocking: what the three emulators do, and that it works here
-
 Goal: make the game feel less sluggish. Researched MesenCE, Nestopia UE and FCEUX,
 then measured against the oracle. **It works**: `Nes.PpuExtraScanlinesBeforeNmi = 300`
 gives the guest **+12.0 extra work-ticks per frame on average**, and the lead *grows*.
@@ -1477,3 +1481,49 @@ returns a JSON integer array per read, against our `--frame-log` CYCFRAME-v2 sna
 Three things worth stealing: `export DOTNET_ROLL_FORWARD="${DOTNET_ROLL_FORWARD:-Major}"`
 (added to `run_frames.sh`), the isolated-`HOME` rationale, and `scripts/check_socket.lua`
 as a LuaSocket probe. Zero stars, no CI, last commit 2026-09-02, GPL-3.0.
+
+---
+
+## 24. VSync presentation: pacing fixes the choppiness overclocking cannot
+
+The overclock mod (§23) makes the *guest* run faster, but panning still looked
+choppy — steppy in a way that felt like 30 fps. Two sub-agent research tracks
+agreed on why, and on what does and does not exist to fix it:
+
+- **Super Dodge Ball is already 60 Hz** (NTSC 60.0988, logic per NMI; TASVideos
+  lists it at 60). There is no 30→60 cap to lift. The "low-fps feel" is lag
+  frames under load plus the game's own flicker — both already addressed.
+- **No NES project ships higher FPS.** The recomp efforts that do 120 Hz+
+  (Zelda64Recomp via RT64, Ship of Harkinian's matrix interpolation,
+  psxrecomp's frame blending) all interpolate **3D transforms** or crossfade
+  whole frames ("blending never invents motion: moving objects ghost").
+  Nobody interpolates 2D sprite content: integer-pixel positions, stepped
+  animation cels, no single camera under raster splits.
+- **The choppiness is presentation-side.** Stock `cyc_sdl.c` presents on an
+  `SDL_Delay` + busy-wait timer with no `SDL_RENDERER_PRESENTVSYNC`
+  (renderer created `SDL_RENDERER_ACCELERATED` only, `cyc_sdl.c:1240`), so
+  every present jitters by milliseconds — and the 60.0988 Hz guest drifts
+  against a fixed-60 Hz panel (a repeated frame roughly every ten seconds).
+  Mesen ships Integer FPS mode for exactly this drift; RetroArch's BFI help
+  documents the 60-content-on-144-panel judder.
+
+**Shipped:** patch 007 makes VSync a launcher Display setting:
+`CycSettings` gains `[Display] VSync` (default off, persisted in
+`config.ini`), `cyc_ui_launcher.c` sets `gi.has_vsync = 1` — lighting up
+recomp-ui's existing Graphics row, the same one PSX uses — and `cyc_sdl.c`
+builds its renderer with `PRESENTVSYNC` when set. Guest clock untouched at
+any refresh rate — 60/120/144 Hz all just repeat finished frames as needed.
+No save-state footprint. Windowed `--exit-after 60` exit 0 both ways;
+`VSync = 1` logs the renderer line under xvfb. (This started as a
+`super-dodgeball.vsync` mod with live runtime toggles; it worked, but the
+in-game menu has no vsync row and cannot gain one without editing the pinned
+recomp-ui — and a `state.toml` entry for a deleted mod hard-blocks boot
+("does not provide this trusted plugin"), so the mod was deleted outright
+rather than left dormant.)
+
+Measured scroll granularity (1200-frame `sdb_throw` screenshots, phase
+correlation on the playfield band): every background move is **6-7 px in one
+frame, purely horizontal** (44 of 52 high-motion pairs; the rest are scene
+cuts). No 1-px smooth scrolling exists in this game. A 7-px step at 60 Hz is
+~420 px/s during pans — that is the "individual pixels very fast" feel, and
+no present timing can subdivide a step the guest never drew.

@@ -22,10 +22,11 @@ NESRecomp recompiles NES 6502 → native C via a two-part system:
 - **Cycle backend** (`external/nesrecomp/runner/cyc/`): Cycle-accurate console model (6502, PPU, APU, DMAs, mappers in `hw_*.c`) + host (`cyc_host.c`: input schedules, screenshots, frame-logs, TCP). Built per game into `build-cycle/nes_game`.
 - **`src/game.toml`**: Recompiler config — display `name` (window title), a `cycle_seed_file`, plus the ten content-keyed `[[mod_function_hook]]` sites the character-flicker mod hooks. No discovery tuning; the stock ROM needs none.
 - **`src/cycle_seeds.txt`**: Recompiler discovery roots for the sprite emitters. A mod hook site only exists in recompiled code, and `$8040`/`$821E`/`$E32D`/`$966D`/`$A36C` ran on the interpreter — a hook there compiled, bound and never fired. These six lines fix that; total cycle count unchanged.
-- **`src/sdb_host_extras.c`**: Our two mods (`HOST_EXTRAS`), the only game-specific code. **(1) character-flicker**: captures every OAM sprite the game emits and presents them host-side, and overrides the game's own object culling (three gates). The truncation half is presentation only (identical cycle count; only `$02FD`/`$02FF` differ); the culling half is **not** — it makes the guest emit sprites it had dropped. **(2) PPU overclocking** (section 4): picks a value for `cyc_set_extra_scanlines` so the guest gets more CPU time per frame and runs faster; re-applies it from `power_on`, because `cyc_power_on()` zeroes the field after mods activate. See research.md §2, §2.1 and §23.
-- **`mods/packages/super-dodgeball.character-flicker/`**: The mod *package* — a `manifest.toml` only, copied beside the executable at build time. Data-only by design; `.nesmod` archives may not carry native code, so the package is a declaration and the implementation is `src/sdb_host_extras.c`. Default-on, toggleable in the launcher's Mods screen.
+- **`src/sdb_host_extras.c`**: Our two mods (`HOST_EXTRAS`), the only game-specific code. **(1) character-flicker**: captures every OAM sprite the game emits and presents them host-side, and overrides the game's own object culling (three gates). The truncation half is presentation only (identical cycle count; only `$02FD`/`$02FF` differ); the culling half is **not** — it makes the guest emit sprites it had dropped. **(2) PPU overclocking** (section 4): picks a value for `cyc_set_extra_scanlines` so the guest gets more CPU time per frame and runs faster; re-applies it from `power_on`, because `cyc_power_on()` zeroes the field after mods activate. See research.md §2, §2.1 and §23. (VSync started as a third mod here and moved to the launcher's Graphics section — patch 007, research §24.)
+- **`mods/packages/super-dodgeball.character-flicker/`**: The mod *package* — a `manifest.toml` only, copied beside the executable at build time. Data-only by design; `.nesmod` archives may not carry native code, so the package is a declaration and the implementation is `src/sdb_host_extras.c`. Off by default, toggleable in the launcher's Mods screen.
 - **`mods/packages/super-dodgeball.ppu-overclock/`**: The PPU-overclocking package (same data-only design). Integer `[[option]]` so the launcher exposes the scanline count. Off by default because it changes console timing. Requires `patches/006_ppu_overclock_mmc1`; without it the backend refuses the setting on our MMC1 cart.
-- **`patches/006_ppu_overclock_mmc1.patch`**: The one active submodule patch — widens `cyc_extra_scanlines_supported()` from MMC3-only to MMC1 too. Strictly additive (consulted only when `extra_scanlines != 0`, so stock timing is unchanged for every game) and on its way upstream.
+- **`patches/006_ppu_overclock_mmc1.patch`**: The first active submodule patch — widens `cyc_extra_scanlines_supported()` from MMC3-only to MMC1 too. Strictly additive (consulted only when `extra_scanlines != 0`, so stock timing is unchanged for every game) and on its way upstream.
+- **`patches/007_window_vsync.patch`**: The second active patch — VSync as a launcher Display setting (`[Display] VSync` in `config.ini`, `has_vsync` lighting up recomp-ui's Graphics row, renderer built with `PRESENTVSYNC` when on). Default off, so stock behavior is unchanged unless the player opts in; presentation only, never guest timing or save states.
 - **`CMakeLists.txt`** (repo root): our game project — includes the submodule's `runner/cyc/project.cmake` but adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own `runner/cyc/project/CMakeLists.txt` cannot express. This is why we wrap the submodule rather than editing it.
 - **`build-cycle/`**: Generated per-instruction C (gitignored, one revision dir per ROM/config) + `nes_game` runner, `config.ini`, and the preloaded `mods/` catalog.
 - **`external/recomp-ui/`**: Shared recomp-ui launcher (pre-boot settings dashboard) + in-game menu, compiled into the windowed `nes_game`.
@@ -99,6 +100,7 @@ Three options (setup.sh uses Option C by default):
 - **Snapshots**: `--frame-log-at mesen --frame-log frames.bin` writes per-frame CYCFRAME-v2 snapshots (CPU RAM, CIRAM, palette indices, OAM, picture indices) for the TAS diff
 - **Mods**: the window picks them up via the launcher. Headless needs `--mods-root build-cycle/mods` explicitly, or mods stay off and the run is stock.
 - **PPU overclocking**: `--ppu-overclock <0..262>` (blank scanlines before NMI). Needs `patches/006`; refuses with the backend's MMC3 message otherwise. Deliberately changes timing; 0 is stock. The mod's manifest feature does the same thing for the window.
+- **VSync**: the launcher's Graphics section (needs `patches/007` or the row is absent). Off by default; persisted as `[Display] VSync` in `build-cycle/config.ini`. Presentation only — guest timing untouched.
 - **Presentation**: `--present-out` saves what the *window* would show — the only path that exercises the character-flicker mod. `--screenshot`/`--frame-log` capture the machine's native frame and ignore it.
 
 ## Critical Rules
@@ -161,7 +163,7 @@ Three options (setup.sh uses Option C by default):
 - `src/game.toml` carries no discovery tuning (the stock ROM needs none) and no `[[mod_function_hook]]` beyond the ten the character-flicker mod needs: five OAM-emit sites, three object-culling sites, one damage-number site, one block-copy site. Its `cycle_seed_file` (`src/cycle_seeds.txt`) is **not** optional — the culling/number/block sites sit in code static discovery never reaches, and a hook in interpreted code compiles, binds and never fires. **Never add hook content keys as `bytes` unless you intend to commit ROM-derived bytes** — use `length` + `crc32`, which keeps the bytes out of the repo.
 - Hook sites declare **no `id`**: they bind to plugins by address. Sharing one `id` across several sites fails `cyc_hooks_validate`.
 - No `sram_map` (no-battery MMC1 has no SRAM code)
-- **nesrecomp submodule tracks pristine `origin/master`** — never work with a dirty tree; `setup.sh` re-checkouts the pin on fresh setups
+- **nesrecomp submodule tracks pristine `origin/master`** — the checked-out tree is dirty exactly when an active patch is applied (see above); `setup.sh` re-checkouts the pin on fresh setups
 
 ### Additional Known Issues
 
@@ -175,13 +177,13 @@ Three options (setup.sh uses Option C by default):
 
 ## NESRecomp Submodule Status
 
-**Tracks pristine `origin/master` (`mstan/nesrecomp`, currently `2b4fcdb`).** The tree must stay clean — verify with `git -C external/nesrecomp status` before blaming the framework.
+**Tracks pristine `origin/master` (`mstan/nesrecomp`, currently `2b4fcdb`).** The pin stays fetchable upstream; never commit in the submodule. The checked-out tree is dirty exactly when an active patch is applied (see the constraint above) — verify any *other* dirt is yours before blaming the framework.
 
 ## Codegen Notes
 
 - One labeled C block per ROM instruction, entered per (PRG bank, CPU address); static jumps/branches compile to `goto`s, `cpu.pc` written only when control leaves compiled code
 - Frame boundaries are PPU-driven; `--frame-log-at mesen` aligns snapshot records to Mesen's frame end
-- The recompiler also supports `[[mod_function_hook]]` (content-keyed subroutine hooks for future mods) — see `docs/plan.md` roadmap, not current use
+- The recompiler also supports `[[mod_function_hook]]` (content-keyed subroutine hooks) — used by the character-flicker mod (ten sites); see `docs/plan.md` roadmap for future ones
 
 ## Retired: Legacy Runner (2026-10-02)
 

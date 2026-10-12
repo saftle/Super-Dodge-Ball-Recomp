@@ -23,6 +23,7 @@ Rules:
 | Patch | What | Fate |
 |---|---|---|
 | `006_ppu_overclock_mmc1` | `cyc_extra_scanlines_supported()` also accepts mapper 1, so the existing PPU-overclocking enhancement works on MMC1 | **Propose upstream** (generalisation, not a game hack — `active-patches.md`) |
+| `007_window_vsync` | `[Display] VSync` setting + `has_vsync` so the launcher's Graphics row appears on NES; renderer built with `PRESENTVSYNC` when on | **Propose upstream** (lights up an existing recomp-ui feature — `active-patches.md`) |
 
 Retired with the cycle switch (2026-10-02), kept as a record:
 
