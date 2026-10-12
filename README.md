@@ -51,7 +51,7 @@ See `NOTICE.md` for attribution.
 
 ## Mods
 
-The launcher has a **Mods** screen. Two ship with the build, both **off by default**:
+The launcher has a **Mods** screen. Three ship with the build, all **off by default**:
 
 - **Remove Character Flicker** — the original release flickered badly, three ways, none of them
   the NES 8-sprites-per-line limit that emulator "remove sprite limit" options target; this game
@@ -100,6 +100,36 @@ with it off the output is byte-identical to the unmodded game.
   It needs `patches/006_ppu_overclock_mmc1` (applied by `setup.sh`); without it the
   backend refuses the setting on an MMC1 cartridge. Measured numbers and the
   three-emulator comparison are in `docs/research.md` §23.
+
+- **Widescreen** — presents **16:9 / 21:9 / 32:9** (426 / 560 / 854 columns) or the
+  window's own shape, with the extra columns showing court the NES could not display.
+  The guest is never touched: the extra columns are read out of the nametable, CHR
+  and the frame's own scroll, and the stock 256-column picture stays authoritative
+  in the middle — so the centre of a wide frame is pixel-for-pixel the unmodded game.
+  Reconstruction is verified against the machine's own background every frame, and a
+  frame that fails falls back to the ordinary centred picture, which is why title
+  screens and menus just work.
+
+  Past the court's own 512-pixel world the margin is the backdrop colour: the
+  stadium is 512 pixels wide and an 854-column frame does not fit inside it, so at
+  21:9 and 32:9 there can be a black band at one end. That is deliberate — mirroring
+  or repeating the world was tried and renders the scoreboard backwards.
+
+  It is **not** upscaled: the same chunky pixels on a wider canvas.
+
+  A second feature in the same package, **Remove overscan**, reveals the 8 blank
+  columns at the left that the game hides with PPUMASK — blank in every one of 2112
+  measured frames. Only takes effect together with widescreen.
+
+  Headless:
+
+  ```bash
+  ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 900 \
+    --input tas/vectors/sdb_throw.input --ram-init zeros --widescreen 32:9
+  ```
+
+  Design notes, the four reconstruction bugs the seam check caught, and the
+  overscan measurement are in `docs/research.md` §25.
 
 For headless runs the catalog is only read when you point at it, and the feature is
 off unless you ask for it:
@@ -176,13 +206,14 @@ Static recompilation, not an emulator. The original 6502 machine code is transla
 - **`CMakeLists.txt`** — The game project (root). Wraps the submodule's `runner/cyc/project.cmake` and adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own project file can't express — so the submodule stays pristine.
 - **`src/game.toml`** — Recompiler config: display `name` (window title), a `cycle_seed_file`, and ten content-keyed `[[mod_function_hook]]` sites. Hooks are keyed by `crc32`, never by ROM bytes. Fed to the cycle backend at configure time.
 - **`src/cycle_seeds.txt`** — Recompiler discovery roots. A mod hook site only exists in *recompiled* code, and the sprite emitters the mod hooks ran on the interpreter; these six lines make them native. Total cycle count unchanged.
-- **`src/sdb_host_extras.c`** — Our two mods: the **character-flicker mod** (captures every OAM sprite the game emits and presents them host-side, overriding the game's own object culling — research.md §2.1) and the **PPU-overclocking mod** (picks a value for the backend's extra-scanlines setting — research.md §23).
+- **`src/sdb_host_extras.c`** — Our three mods: the **character-flicker mod** (captures every OAM sprite the game emits and presents them host-side, overriding the game's own object culling — research.md §2.1), the **PPU-overclocking mod** (picks a value for the backend's extra-scanlines setting — research.md §23) and the **widescreen compositor** (reads the nametable to fill a 426/560/854-column canvas, with a seam check against the machine's own background — research.md §25).
 - **`mods/`** — The mod packages (`manifest.toml` only; `.nesmod` archives can't carry native code). Off by default, toggleable in the launcher's Mods screen.
 - **`build-cycle/`** — Cycle-backend build (gitignored): per-instruction C (`game_cyc*.c`, one revision dir per ROM/config) + `nes_game` runner + the preloaded `mods/` catalog.
 - **`external/nesrecomp/`** — NESRecomp framework submodule (recompiler + runners)
 - **`external/mesence/`** — MesenCE emulator (reference rendering + oracle Lua API)
 - **`tools/frame_gen/`** — Mesen frame export Lua script + wrapper
 - **`tools/overclock/`** — PPU-overclocking oracle harness (research.md §23)
+- **`tools/widescreen/`** — Nametable and blank-border measurement behind widescreen (research.md §25)
 - **`tools/blargg/`** — blargg test-ROM suite on the cycle backend (`run_blargg.py`, `manifest.json`); per-ROM builds in `build-cyc-blargg/`, ROMs in `external/nes-test-roms/` (both gitignored)
 - **`tools/tas/`** — TAS-integrated differential harness: bk2/fm2 → canonical `tas.json`, shared-input runners for MesenCE + cycle backend with full state capture, three-layer first-divergence diff (`run_tas.py`, `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored)
 
@@ -193,12 +224,13 @@ Super Dodgeball Recomp/
 ├── roms/                          # NES ROM files (gitignored)
 ├── src/                           # Project source
 │   ├── game.toml                  # Recompiler config (display name + mod hook sites)
-│   ├── sdb_host_extras.c          # Character-flicker mod (capture + host-side presentation)
+│   ├── sdb_host_extras.c          # Flicker / overclock / widescreen mods
 │   └── third_party/               # Local gitignored build scratch (not shipped)
 ├── mods/                          # Mod package(s), copied beside the executable at build time
 │   └── packages/
-│       └── super-dodgeball.character-flicker/   # manifest.toml only (data-only by design)
-│       └── super-dodgeball.ppu-overclock/       # manifest.toml only (data-only by design)
+│       ├── super-dodgeball.character-flicker/   # manifest.toml only (data-only by design)
+│       ├── super-dodgeball.ppu-overclock/       # manifest.toml only (data-only by design)
+│       └── super-dodgeball.widescreen/          # manifest.toml only (data-only by design)
 ├── external/nesrecomp/            # NESRecomp submodule
 ├── external/mesence/              # MesenCE emulator (reference rendering)
 ├── external/nes-test-roms/        # blargg suite checkout (gitignored, via setup.sh --fetch path)
@@ -212,7 +244,8 @@ Super Dodgeball Recomp/
 │   ├── blargg/                    # blargg suite on the cycle backend (run_blargg.py, manifest)
 │   ├── tas/                       # TAS differential harness (converters, runners, diff)
 │   ├── frame_gen/                 # Mesen frame export + oracle dump + memwatch scripts
-│   └── overclock/                 # PPU-overclocking oracle harness (research.md §23)
+│   ├── overclock/                 # PPU-overclocking oracle harness (research.md §23)
+│   └── widescreen/                # Nametable + blank-border measurement (research.md §25)
 ├── tas/
 │   ├── vectors/                   # TAS movies (.bk2 + format samples, committed)
 │   └── runs/                      # Per-TAS run artifacts (gitignored)
@@ -268,7 +301,14 @@ This is the backend everything runs on: per-cycle 6502/PPU/APU/DMA with own
 mappers, via the upstream project integration. `./build_and_run.sh` and
 `./setup.sh` target it; `./build-cycle/nes_game` takes the host flags
 (`--frames`, `--input` schedule `<frame> NAMES`, `--ram-init zeros`,
-`--shot-every`, `--mem-frame`/`--mem-out`, `--miss-log`, `--align 0-3`).
+`--shot-every`, `--mem-frame`/`--mem-out`, `--miss-log`, `--align 0-3`,
+`--mods-root`, `--present-out`/`--present-every`/`--present-size`) plus the
+game's own (`--remove-character-flicker`, `--ppu-overclock N`,
+`--widescreen MODE`, `--overscan`).
+
+`--present-out` is the one that matters for mods: it writes what the *window*
+would show. `--screenshot` and `--frame-log` capture the machine's native frame
+and never see any of them.
 
 Findings: 400 TAS frames reach team-select, matching Mesen; blargg cpu tier
 25/25 green (20 RAM-text PASS incl. `12-jmp_jsr` at 99.4% native, 5
@@ -308,12 +348,14 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 - **Mod off by default** — the flicker mod needs a full-playthrough test first. Known issue with it on: white ghost sprites on the level-switch screen (under investigation).
 - ~~**Sprite flickering**~~ — **fixed, all causes.** Not emulator sprite-limit removal: the game (1) stops emitting once OAM's 64 slots fill, (2) deliberately culls one object off its own display list each frame, rotating which, so a character blinks out 4 frames in 9, and (3) draws its damage numbers and menu digits through emitters no bump hook could see. Characters now stay whole with the opt-in `super-dodgeball.character-flicker` mod — toggleable in the launcher's **Mods** screen. See `docs/research.md` §2 and §2.1.
 - **Palette mirrors** — sprite entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`) read stale in cycle snapshots (upstream model keeps power-on bytes; hardware mirrors the backdrop). Masked in the TAS diff; rendering unaffected.
+- **Widescreen cannot show more world than the game has** — the court is a 512-pixel-wide loop, so at 21:9 and 32:9 the extra columns run off the end and are filled with the backdrop. Expect a black band at whichever end the camera has reached; 16:9 usually fits.
+- **Widescreen margins are background only** — players are not drawn outside the 256-column viewport, because the game only emits sprites for what it can see.
 
 ## Developer Docs
 
 **[AGENTS.md](AGENTS.md)** — Developer reference with present-tense constraints, codegen notes, submodule workflow, MesenCE testrunner API, verification procedures, and current-known issues. The canonical document for AI coding agents.
 
-**[docs/research.md](docs/research.md)** — Deep research: ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map, MesenCE oracle, NMI survey, current build state, PPU overclocking (§23).
+**[docs/research.md](docs/research.md)** — Deep research: ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map, MesenCE oracle, NMI survey, current build state, PPU overclocking (§23), VSync (§24), widescreen and overscan (§25).
 
 ## References
 

@@ -30,6 +30,22 @@ team-select position numbers (§2.1).
 
 Frame comparison (MesenCE reference) and the blargg suite are the standing gates.
 
+**Presentation mods: three, all opt-in** — `super-dodgeball.character-flicker` (§2, §2.1),
+`super-dodgeball.ppu-overclock` (§23) and `super-dodgeball.widescreen` (§25, which also carries
+an `overscan` feature). Only the flicker fix changes guest behaviour, and only in its culling
+half; overclocking changes console *timing*; **widescreen changes nothing at all** — it reads
+the nametable the frame already wrote and re-presents the picture.
+
+**Widescreen: the margins are already in the nametable** (§25). Presenting 16:9 / 21:9 / 32:9
+(426 / 560 / 854 columns) needed **no engine patch** — the widths and the compositor API are
+already upstream. The court's world is a 512-pixel looping stadium that is byte-identical across
+a whole match, so margin pixels are resolved the way the PPU resolves them rather than
+remembered the way wideNES does; wideNES can only ever show what the guest already drew, and
+cannot draw sprites at all. Reconstruction agrees with the machine's own background capture to
+1-2 px in 61440, and the stock 256-column centre is copied back so it stays pixel-identical.
+Overscan is measured, not assumed: the left 8 columns are blank in all 2112 measured frames,
+while the right 8 carry the court and the top/bottom bands are used by a transition frame.
+
 ---
 
 ## 2.1. Second Flicker: the game's own object culling (SOLVED)
@@ -1262,13 +1278,13 @@ survived it.)
 Upstream `runner/cyc`, built by our repo-root `CMakeLists.txt` (see §10): `build-cycle/nes_game`
 from our ROM + `src/game.toml`, windowed (`./build_and_run.sh`; headless flags imply headless).
 The guest machine runs **stock** — patches 006/007 are inert at stock settings,
-and of the two mods only the truncation half is presentation-only (§2, §22).
+and of the three mods only the truncation half is presentation-only (§2, §22, §25).
 Schedulable
 input (`<frame> NAMES` absolute state, same bit map).
 
-- **Mods**: `super-dodgeball.character-flicker` is opt-in (off by default). It never appears in
+- **Mods**: all three are opt-in (off by default). They never appear in
   `--frame-log`/`--screenshot` output (those capture the machine's native frame); only
-  `--present-out` and the window show it. The truncation fix (§2) is presentation only — same
+  `--present-out` and the window show them. The truncation fix (§2) is presentation only — same
   cycle count, `$02FD`/`$02FF` the only differing bytes. The culling fix (§2.1) is **not**: it
   makes the guest emit sprites it had dropped, so OAM differs (sprite slot 0 never does) and a
   few per-object timers settle at a constant offset, while the picture (CIRAM) is identical on
@@ -1527,3 +1543,196 @@ frame, purely horizontal** (44 of 52 high-motion pairs; the rest are scene
 cuts). No 1-px smooth scrolling exists in this game. A 7-px step at 60 Hz is
 ~420 px/s during pans — that is the "individual pixels very fast" feel, and
 no present timing can subdivide a step the guest never drew.
+
+---
+
+## 25. Widescreen and overscan: the margins are already in the nametable
+
+Goal: present 16:9 / 21:9 / 32:9, and offer the "remove overscan" option
+emulators ship. **No engine patch is needed** — unlike §23, where the feature
+existed but was refused on MMC1. The whole mechanism is already upstream at our
+pin (PR #58, `3ef948cd`, an ancestor of `2b4fcdb`):
+`common/nes_video_geometry.h` (the widths), `runner/cyc/cyc_video.*` (the
+presented-width state machine), `runner/cyc/cyc_render.*` (the compositor and
+its helpers). The work is one compositor in `src/sdb_host_extras.c` plus a
+manifest.
+
+### What the framework gives, and the one thing that had to change
+
+`CycCompositorFn` is handed a `width x 240` opaque-black canvas, the machine's
+own 256x240 picture, and `native_x0`; return nonzero if you painted it, **0** to
+have the engine pillarbox the native picture as it does today. Margins are drawn
+from `cyc_render_line_scroll_x/y(y)`, `cyc_render_nametable/chr/palette`,
+`cyc_render_tile()` and `cyc_render_sprites()`. At width 256 the compositor is
+not called at all.
+
+Widths for a 240-row picture, all from the shared geometry rather than numbers
+invented here: **426 / 560 / 854** for 16:9 / 21:9 / 32:9, plus `fit`. Note
+`--widescreen` also exists on the *function-level* runner and yields 428 there;
+on the cycle path it is 426 and the two must not be treated as interchangeable
+(`docs/CUSTOM_RENDERER.md:349`).
+
+**The collision that had to be resolved first:** the character-flicker mod's
+`present()` returned a non-NULL 256x240 buffer, and both the window
+(`cyc_sdl.c:306`) and `--present-out` (`cyc_host.c:886`) take `present()` over
+`cyc_render_present()`. A compositor would have been silently bypassed whenever
+flicker was on. `present()` now always asks `cyc_render_present()` first — it is
+the only place the compositor runs and the only place the width is decided — and
+returns the engine's buffer untouched when there is nothing else to do.
+
+### Not wideNES
+
+Reproduce every measurement in this section with `tools/widescreen/` — `nametable.py`
+prints the court's nametable and reports whether it changes frame to frame, and
+`blank_extent.py` produces the overscan table below from `--frame-log` captures.
+See `tools/widescreen/README.md`.
+
+wideNES (prilik, ANESE `wideNES` branch, `src/ui/SDL2/gui_modules/widenes.cc`)
+is the standard answer to "NES widescreen" and it is the **opposite** design. It
+does not reconstruct anything: it snoops `$2005`/`$2006`, warps each frame's
+**background-only** framebuffer by the scroll delta, and accumulates the result
+into an unbounded scene-keyed pixel lattice. Consequences, all confirmed in its
+source and documented by its own maintainer:
+
+- it can only ever show pixels the guest has **already drawn**;
+- it knows nothing about nametables or mirroring (`grep -c nametable` = 0), so a
+  looping world unfolds into an infinite straight tube instead of wrapping;
+- **it ignores sprites entirely** — the maintainer's 2024 retrospective names
+  "cannot handle off-screen sprites" as the reason it never shipped;
+- it has **no warm-up and no consistency check** — unknown territory renders
+  black and is shown immediately.
+
+None of that machinery is needed here, because **this game's world is entirely
+resident in CIRAM before the frame starts**. Measured over a match, the court's
+nametable is byte-identical from frame 450 to frame 900 and spans the full
+64-tile / 512-pixel space of both nametables:
+
+```
+C0 C0 C0 C0 | 4E 4D 4E 4D ... | 04 03 04 03 ... | 2C 2B 2C 2B ... | C0 C0 C0 C0
+backdrop     left sideline     crowd             right sideline     backdrop
+```
+
+So a margin pixel is *read*, not remembered: scroll → world column → tile →
+attribute → pattern byte → palette, exactly as the PPU would. No isolated
+guest calls, no world cache, no `[[mod_function_hook]]` sites, no seeds.
+
+**The four bugs the seam check caught** (each produced a plausible picture, none
+produced an error; found by comparing our reconstruction against the machine's
+own background capture):
+
+1. **Attribute table address.** This cart is horizontally mirroring, so `$2800`
+   aliases `$2000`: the textbook attribute address reads *tile bytes*. The
+   attributes are at page offset `0x3C0` (`$23C0`/`$27C0`). Proof from the dump:
+   the byte at `0x3C2` is `0x55`, and `0x55` is palette 1 in all four quadrants
+   — exactly the palette the machine painted and we did not.
+2. **Attribute granularity.** Not the standard 16x16 metatile: the index that
+   matches is `(tile >> 2)`, one byte per **4x4 tiles**, quadrant
+   `(tile >> 1) & 1`. Measured against the capture: `(tile>>2)` leaves 2613
+   pixels disagreeing of 61440; textbook `(tile>>1)&7` leaves 18420.
+3. **PPUMASK bit 1 polarity.** Bit 1 *set* means "show background in the
+   leftmost 8 columns", so the clip exists when the bit is **clear**. Backwards
+   here painted real court in the eight columns the PPU painted with backdrop.
+   wideNES's blog prose states the opposite of wideNES's own code here; the code
+   is right.
+4. **Compare against the background, not the picture.** A first pass compared
+   against `native`, which has sprites composited on top — every player standing
+   in the court counted as a reconstruction failure (~9000/frame). The engine
+   already exposes the right thing: `cyc_render_background()`, the capture
+   taken *before* the sprite priority mux.
+
+After all four: **1–2 differing pixels per frame out of 61440.** The seam check
+compares reconstruction against capture and returns 0 (engine pillarboxes) when
+more than 2% disagree, so a title screen, a menu or a transition falls back for
+free instead of growing garbage margins.
+
+### Verification
+
+- **Mod off = stock**: with the catalog present and every feature off, the
+  `--present-out` frame is byte-identical to a run with no `--mods-root` at all.
+- **Stock centre**: the presented native 256 columns are pixel-for-pixel the
+  unmodded picture at every aspect ratio (verified by array compare against a
+  stock run), because the compositor copies the machine's picture over its own
+  reconstruction before returning.
+- **Widths**: 426/240 = 1.775, 560/240 = 2.333, 854/240 = 3.558. The width for
+  a ratio must use the engine's own rounding (`2*floor(rows*aspect/2 + 0.5)`);
+  truncating turns 32:9's 853.3 into 852, i.e. 3.55:1 rather than 3.556:1.
+- **Arms from the manifest**: `state.toml` with the `widescreen` feature enabled
+  and `aspect = "32:9"` produces 854 columns, seam diff 1 px. Default-off: the
+  runtime writes `enabled = false` for both features when nothing is selected.
+- Frame 0 pillarboxes on every mode — the background capture is not available
+  until after the first frame, so there is nothing to verify against and the
+  compositor declines rather than claiming a seam it did not check.
+
+### Overscan: measured per game, and left side only
+
+Per-game is not a preference here. Over **2112 frames with ink** (both vectors,
+1100 frames each; 88 fully blank frames skipped):
+
+| band | frames with any ink | crop |
+|---|---|---|
+| columns 0–7 | **0 / 2112** | 8 |
+| columns 248–255 | 1372+ | 0 (real content) |
+| rows 0–15 | 2 / 2112 | — |
+| rows 232–239 | 2 / 2112 | — |
+
+The two frames with ink in the top/bottom bands are the **same frame in both
+vectors**: frame 420, a full-screen wipe whose top and bottom are deliberately
+filled. So the vertical crop is not lossless and is not offered. The left 8
+columns are blank in *every* frame, and they are blank because the game clears
+PPUMASK bit 1 — the NES's left overscan, hidden by the developer. Every emulator
+treats that bit as "the game is hiding artifacts here": wideNES crops 8 when it
+reads clear, and the 240p Test Suite's NES safe-area test calls rows 0–7 and
+232–239 the "danger zone".
+
+**Reveal, not crop.** Every emulator's overscan subtracts the border. Here that
+would splice the world: the left margin ends at world column `sx-1` and the
+picture would resume at `sx+8`, an 8-column skip through the court. So the
+`overscan` feature instead draws the real background in those columns and leaves
+them alone when copying the machine's picture over the centre. The whole canvas
+is then one continuous run of world columns with no black gutter. Measured on the
+output: the fully-black 8-column strip at the margin boundary (columns 85–92 at
+16:9) is present without the feature and **absent** with it.
+
+This costs the "centre is byte-identical to stock" claim for exactly those 8
+columns, which the machine renders as backdrop anyway. Everything else is
+unchanged. The feature only has an effect together with widescreen, because at
+width 256 the engine never calls the compositor.
+
+### Past the edge of the world: black
+
+The world is 512 pixels wide and the canvas at 32:9 is 854, so the margin runs
+off the end. Mirroring and wrapping were both implemented and both rejected on
+the output: the world's outer band holds the scoreboard and the Statue of Liberty
+skyline, so **mirroring renders the text backwards** and **wrapping shows the
+same skyline two or three times**. Both invent picture the game never had, and at
+32:9 the margin is 299 columns — most of the screen. The margin is filled with
+the backdrop, which for this game is black and is already the colour of the
+world's own outermost columns (`C0`), so the bar continues the court's real edge
+rather than stopping at it. At 21:9 and 32:9, on camera positions that put the
+world's edge inside the view, this leaves a black band at that end. That is the
+honest limit: the stadium is 512 pixels wide and a 854-column frame does not fit
+inside it.
+
+### One more trap, in the mod state file
+
+Hand-writing `state.toml` to test the package: **`[feature.values]` binds to the
+`[[feature]]` block declared immediately above it.** With two features in the
+package, a values table written after `overscan` but meant for `widescreen` is
+silently dropped — `overscan` has no `aspect` option, so nothing is written
+back and `widescreen` falls back to its manifest default (`fit`). Headless,
+`fit` resolves to the stock aspect, the width stays 256, and the engine does not
+call the compositor at 256 — so the feature appears to do nothing at all, with
+no error anywhere. The launcher never hits this because it writes the file; only
+a hand-built test file does.
+
+### Not sprites in the margins
+
+The flicker mod already captures every sprite the game emits, and the object
+display list at `$067C` is camera-invariant across a pan (measured: the records
+at `$0618` do not change while OAM X shifts by 7 px with the court), so
+off-screen players are in principle placeable from memory — which wideNES
+structurally cannot do. That is **not** implemented. OAM X is a byte and
+camera-relative, so the sprite list alone cannot place anything outside the
+viewport; it needs the display records' world-space X, which is not yet
+identified. Background only for now, and the seam check plus `cyc_render_sprites`
+are the machinery if it is picked up.

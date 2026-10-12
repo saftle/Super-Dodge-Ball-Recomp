@@ -22,7 +22,8 @@ NESRecomp recompiles NES 6502 → native C via a two-part system:
 - **Cycle backend** (`external/nesrecomp/runner/cyc/`): Cycle-accurate console model (6502, PPU, APU, DMAs, mappers in `hw_*.c`) + host (`cyc_host.c`: input schedules, screenshots, frame-logs, TCP). Built per game into `build-cycle/nes_game`.
 - **`src/game.toml`**: Recompiler config — display `name` (window title), a `cycle_seed_file`, plus the ten content-keyed `[[mod_function_hook]]` sites the character-flicker mod hooks. No discovery tuning; the stock ROM needs none.
 - **`src/cycle_seeds.txt`**: Recompiler discovery roots for the sprite emitters. A mod hook site only exists in recompiled code, and `$8040`/`$821E`/`$E32D`/`$966D`/`$A36C` ran on the interpreter — a hook there compiled, bound and never fired. These six lines fix that; total cycle count unchanged.
-- **`src/sdb_host_extras.c`**: Our two mods (`HOST_EXTRAS`), the only game-specific code. **(1) character-flicker**: captures every OAM sprite the game emits and presents them host-side, and overrides the game's own object culling (three gates). The truncation half is presentation only (identical cycle count; only `$02FD`/`$02FF` differ); the culling half is **not** — it makes the guest emit sprites it had dropped. **(2) PPU overclocking** (section 4): picks a value for `cyc_set_extra_scanlines` so the guest gets more CPU time per frame and runs faster; re-applies it from `power_on`, because `cyc_power_on()` zeroes the field after mods activate. See research.md §2, §2.1 and §23. (VSync started as a third mod here and moved to the launcher's Graphics section — patch 007, research §24.)
+- **`src/sdb_host_extras.c`**: Our three mods (`HOST_EXTRAS`), the only game-specific code. **(1) character-flicker**: captures every OAM sprite the game emits and presents them host-side, and overrides the game's own object culling (three gates). The truncation half is presentation only (identical cycle count; only `$02FD`/`$02FF` differ); the culling half is **not** — it makes the guest emit sprites it had dropped. **(2) PPU overclocking** (section 4): picks a value for `cyc_set_extra_scanlines` so the guest gets more CPU time per frame and runs faster; re-applies it from `power_on`, because `cyc_power_on()` zeroes the field after mods activate. **(3) widescreen** (section 4): a compositor that presents 426/560/854 columns, filling the margins from the nametable, CHR and the frame's own scroll, with a per-frame seam check against the machine's own background capture. No engine patch needed — the engine already ships the widths and the compositor API. See research.md §25. (VSync started as a mod here and moved to the launcher's Graphics section — patch 007, research §24.)
+- **`mods/packages/super-dodgeball.widescreen/`**: The widescreen package (manifest-only like the others), carrying two independent off-by-default features: `widescreen` (with an `aspect` **choice** option — stock / 16:9 / 21:9 / 32:9 / fit) and `overscan` (reveal the 8 blank left-hand columns the game hides with PPUMASK).
 - **`mods/packages/super-dodgeball.character-flicker/`**: The mod *package* — a `manifest.toml` only, copied beside the executable at build time. Data-only by design; `.nesmod` archives may not carry native code, so the package is a declaration and the implementation is `src/sdb_host_extras.c`. Off by default, toggleable in the launcher's Mods screen.
 - **`mods/packages/super-dodgeball.ppu-overclock/`**: The PPU-overclocking package (same data-only design). Integer `[[option]]` so the launcher exposes the scanline count. Off by default because it changes console timing. Requires `patches/006_ppu_overclock_mmc1`; without it the backend refuses the setting on our MMC1 cart.
 - **`patches/006_ppu_overclock_mmc1.patch`**: The first active submodule patch — widens `cyc_extra_scanlines_supported()` from MMC3-only to MMC1 too. Strictly additive (consulted only when `extra_scanlines != 0`, so stock timing is unchanged for every game) and on its way upstream.
@@ -54,7 +55,7 @@ nesrecomp already integrates recomp-ui for the cycle host (`runner/cyc/project.c
 - **File size**: 262,160 bytes (16-byte header + 262,144 data)
 
 ### Key References
-- **`docs/research.md`** — ROM specs, NESRecomp framework details, sprite flickering analysis, Zelda/SMB/MesenCE research, input-frontier dossier (§18 pre-fix, §19 resolution)
+- **`docs/research.md`** — ROM specs, NESRecomp framework details, sprite flickering analysis (§2, §2.1), PPU overclocking (§23), VSync (§24), widescreen and overscan (§25), Zelda/SMB/MesenCE research, input-frontier dossier (§18 pre-fix, §19 resolution)
 - **`docs/plan.md`** — Consolidated project plan and todo list (merged from plan.md + todo.md)
 - **`README.md`** — Project overview, MesenCE installation options, frame comparison pipeline, TAS differential harness
 - **RetroPortingToolKit Docs**: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/main/data/docs
@@ -90,7 +91,7 @@ Three options (setup.sh uses Option C by default):
 ## Running
 
 ```bash
-./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" [--frames N] [--input schedule] [--shot-every N --screenshot shot.png] [--mem-frame N --mem-out mem.txt] [--miss-log seeds.txt] [--align 0-3] [--mods-root DIR] [--present-out FILE --present-every N]
+./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" [--frames N] [--input schedule] [--shot-every N --screenshot shot.png] [--mem-frame N --mem-out mem.txt] [--miss-log seeds.txt] [--align 0-3] [--mods-root DIR] [--present-out FILE --present-every N --present-size WxH] [--ppu-overclock N] [--widescreen MODE] [--overscan]
 ```
 
 - **Interactive**: bare run — window opens (`[game] name` is the title), keyboard/gamepad input works
@@ -101,6 +102,8 @@ Three options (setup.sh uses Option C by default):
 - **Mods**: the window picks them up via the launcher. Headless needs `--mods-root build-cycle/mods` explicitly, or mods stay off and the run is stock.
 - **PPU overclocking**: `--ppu-overclock <0..262>` (blank scanlines before NMI). Needs `patches/006`; refuses with the backend's MMC3 message otherwise. Deliberately changes timing; 0 is stock. The mod's manifest feature does the same thing for the window.
 - **VSync**: the launcher's Graphics section (needs `patches/007` or the row is absent). Off by default; persisted as `[Display] VSync` in `build-cycle/config.ini`. Presentation only — guest timing untouched.
+- **Widescreen**: `--widescreen stock|16:9|21:9|32:9|fit` (or the Mods screen). Widths come from the engine's `common/nes_video_geometry.h` — 426/560/854 — never hardcode them. Needs no patch.
+- **Overscan**: `--overscan` or the Mods screen; only has an effect together with widescreen, because at width 256 the engine never calls the compositor.
 - **Presentation**: `--present-out` saves what the *window* would show — the only path that exercises the character-flicker mod. `--screenshot`/`--frame-log` capture the machine's native frame and ignore it.
 
 ## Critical Rules
@@ -172,7 +175,7 @@ Three options (setup.sh uses Option C by default):
 
 ### docs/ Directory
 
-- **`docs/research.md`** — ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map (§13), MesenCE oracle (§16), NMI survey (§17)
+- **`docs/research.md`** — ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map (§13), MesenCE oracle (§16), NMI survey (§17), PPU overclocking (§23), VSync (§24), widescreen and overscan (§25)
 - **`docs/plan.md`** — Living project plan and todo list
 
 ## NESRecomp Submodule Status
@@ -255,6 +258,41 @@ concurrent runs (e.g. a `--miss-log` run beside a mod run) can leave the feature
 false`, and the whole run silently goes native. Never overlap runs that share a mods dir.
 
 **The TAS gate is not currently trustworthy.** Super Dodge Ball is a random game, so a fixed input schedule does not reproduce the same run: RNG divergence between the cycle backend and Mesen puts the two sides on different paths, and a red `diff_tas.py` may be that rather than a real defect. Until pre-seeding exists (pin both sides to the same RNG state before frame 0), treat TAS diffs as advisory — investigate the first divergent frame, don't assume a regression. Blargg is unaffected and remains the real engine gate.
+
+### Verifying the widescreen mod
+
+`SDB_TRACE=1` prints `widescreen: N composed, M pillarboxed, seam diff D px`.
+**Pillarboxed rising while composed stays flat means the reconstruction is wrong** — that
+counter is the gate, and it is how the four bugs in research.md §25 were found. A healthy
+match frame is `composed` with a seam diff of 1-2 px out of 61440.
+
+```bash
+SDB_TRACE=1 ./build-cycle/nes_game ROM --frames 900 --input tas/vectors/sdb_throw.input \
+  --ram-init zeros --mods-root build-cycle/mods --widescreen 32:9 \
+  --present-out tmp/wide/on_%05d.png --present-every 1
+```
+
+Gates:
+
+1. **Mod off = stock** — with the catalog present and every feature off, the `--present-out`
+   frame is byte-identical to a run with no `--mods-root` at all. Point `--mods-root` at a
+   **copy** with an empty `state.toml`; that file is shared mutable state.
+   **When hand-writing `state.toml`, `[feature.values]` binds to the `[[feature]]` declared
+   immediately above it** — put it after the wrong feature and the option is silently
+   dropped, the feature falls back to its manifest default, and nothing warns. (`fit`
+   headless also resolves to stock 256, so a lost aspect looks like "the mod did nothing".)
+2. **Stock centre** — the presented native 256 columns must be pixel-identical to a stock
+   run at every aspect (array-compare; the compositor copies the machine's picture back over
+   its own). The one exception is the `overscan` feature's 8 revealed columns, which is the
+   point of that feature.
+3. **Widths** — 426/560/854 for 240 rows, using the engine's rounding. Truncating turns
+   32:9 into 852 and 3.55:1.
+4. **Frame 0 pillarboxes** in every mode — the background capture is not available until
+   after the first frame, so the compositor declines rather than claiming an unchecked seam.
+5. **No black gutter** — measure fully-black column runs in the output. The game's PPUMASK
+   left-column clip puts one at the margin boundary unless `overscan` is on.
+6. **Play it** — a scripted run never reaches team-select, the roster screens or the
+   innings changes, which are exactly the states the seam gate has to hold through.
 
 ### Engine-change procedure (submodule bumps)
 
@@ -407,9 +445,11 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 | `tas/vectors/sdb_idle.input` | Reproduction vector for the flicker fixes (idle into a match; B blinks at 865-905) |
 | `tas/vectors/sdb_throw.input` | Stress vector for the mod (throw from frame 446; exposes runaway bookkeeping + missing emitters) |
 | `tools/flicker/` | Analysis scripts behind the research.md §2/§2.1 claims (OAM/record dumps, ref-finder, memdiff) + toolkit README |
+| `tools/widescreen/` | Analysis behind research.md §25 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from) |
 | `tools/overclock/` | PPU-overclocking oracle harness behind research.md §23 (MesenCE sandbox + stock-vs-OC comparison). **Its self-check matters: if cycles/frame stays 29781 for a non-zero `Before NMI`, the setting never applied and the run is worthless** |
 | `mods/packages/super-dodgeball.character-flicker/` | Mod package — `manifest.toml` only (data-only by design; implementation is `src/sdb_host_extras.c`). Off by default, toggleable in the launcher's Mods screen; PolyForm NC, same as the project |
 | `mods/packages/super-dodgeball.ppu-overclock/` | Mod package for PPU overclocking (research.md §23). Manifest-only like the above; has an integer `[[option]]` so the launcher exposes the scanline count. **Needs `patches/006_ppu_overclock_mmc1`** or the backend refuses on mapper 1 |
+| `mods/packages/super-dodgeball.widescreen/` | Mod package for widescreen (research.md §25). Manifest-only; two features — `widescreen` (an `aspect` **choice**: stock/16:9/21:9/32:9/fit) and `overscan`. Needs **no patch**: the engine already ships the widths and the compositor API |
 | `external/nesrecomp/` | NESRecomp submodule (recompiler + runners) — pinned `origin/master`; **dirty tree is expected** when `patches/*.patch` is applied by `setup.sh` |
 | `external/mesence/` | MesenCE emulator source/binary |
 | `external/recomp-ui/` | recomp-ui submodule (launcher + in-game menu) — **pinned, never floated**; MIT, own license |

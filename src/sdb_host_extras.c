@@ -61,6 +61,7 @@
 #include "cyc_hooks.h"
 #include "cyc_mod.h"
 #include "cyc_render.h"
+#include "cyc_video.h"
 
 #include "mod_function_hooks.h"
 #include "mod_runtime.h"
@@ -135,10 +136,16 @@ static long s_done_frame = -100;    /* frame the published list was finished */
 static int s_cap_run;                /* consecutive frames with captures */
 static int s_on;                             /* feature active */
 
-/* Requested PPU-overclock lines, re-applied at power_on (see section 4). */
+/* Requested PPU-overclock lines, re-applied at power_on (see section 5). */
 static int s_oc_lines;
 
 static uint32_t s_picture[256 * 240];
+
+/* The presented picture when it is wider than 256 (widescreen) and/or shorter
+ * than 240 (the overscan crop). One buffer, repacked: a cropped picture cannot
+ * be handed back as a pointer into the engine's canvas, because its rows are
+ * canvas_width apart while the host copies it as a dense width*height block. */
+static uint32_t s_canvas[NES_VIDEO_MAX_WIDTH * 240];
 
 /* ------------------------------------------------------------------ *
  * 1. Capture
@@ -476,7 +483,7 @@ static int sdb_no_cull(uint16_t addr)
  * tile per call, so calling it once per scanline would stack eight overlapping
  * copies and overwrite each other's pixels -- which shows up as doubled,
  * wrongly-coloured sprites. */
-static void sdb_blit(const SdbSprite *s, uint32_t *out, int width, int height)
+static void sdb_blit(const SdbSprite *s, uint32_t *out, int width, int height, int x0)
 {
     int y = s->y + 1;                       /* OAM Y+1 is the first drawn line */
     if (s->y >= 0xEF || y >= 240) return;   /* off screen / the game's hidden slot */
@@ -498,7 +505,7 @@ static void sdb_blit(const SdbSprite *s, uint32_t *out, int width, int height)
         uint8_t lo = cyc_render_chr((uint16_t)(pattern + (row & 7)));
         uint8_t hi = cyc_render_chr((uint16_t)(pattern + (row & 7) + 8));
         for (int c = 0; c < 8; ++c) {
-            int px = s->x + c;
+            int px = x0 + s->x + c;
             if (px < 0 || px >= width) continue;
             /* the left-column clip is in native columns */
             if (s->x + c < 8 && !(cyc_render_line_mask(py) & 0x04)) continue;
@@ -511,14 +518,38 @@ static void sdb_blit(const SdbSprite *s, uint32_t *out, int width, int height)
     }
 }
 
-/* The picture the window shows. Returns NULL (host presents the native frame)
- * whenever the feature is off or there is nothing to draw from. */
+/* Section 4's compositor state, needed before it is defined. */
+/* The picture the window shows.
+ *
+ * The widescreen compositor, when it is installed, runs inside
+ * cyc_render_present() -- that is the only place it runs, and the only place
+ * the presented width is decided. So this callback must always ask for that
+ * picture first, even when the character-flicker mod has nothing to say: ask
+ * for nothing and the host presents the native frame, which would quietly
+ * switch a 854-column window back to 256.
+ *
+ * Three shapes come out of here:
+ *   - no flicker, no crop, stock width  : the engine's buffer, returned as is
+ *   - flicker only, stock width         : the stock 256x240 redraw
+ *   - wide and/or cropped               : a repacked copy we may draw sprites into
+ *
+ * Returns NULL (the host presents the native frame) whenever the flicker mod
+ * has nothing to draw and nothing about the picture needs repacking. */
 static const uint32_t *sdb_present(void *ctx, int *width, int *height)
 {
     (void)ctx;
-    if (!s_on) return NULL;
-    if (s_build_count == 0 && s_done_count == 0) return NULL;
-    if (!cyc_render_background(s_picture)) return NULL;
+    int cw, ch;
+    const uint32_t *canvas = cyc_render_present(&cw, &ch);
+    if (!canvas || cw <= 0 || ch <= 0) return NULL;
+
+    int redraw = s_on && (s_build_count || s_done_count) && cyc_render_background(s_picture);
+
+    if (!redraw && cw == 256) {
+        *width = cw;
+        *height = ch;
+        return canvas;
+    }
+
     /* A build takes two frames: the first capture frame leaves the list still
      * half-assembled, the second finishes it. Emit order differs between
      * builds, so a half-built list must never be blended with the previous one
@@ -542,16 +573,50 @@ static const uint32_t *sdb_present(void *ctx, int *width, int *height)
     const SdbSprite *list = stale ? s_done : s_build;
     int count = stale ? s_done_count : s_build_count;
 
+    if (cw == 256) {
+        if (!redraw) return NULL;
+        goto blit;
+    }
+
+    /* Wide: repack into s_canvas, which the character-flicker mod then draws
+     * its sprite list into. The engine's buffer is reused and generation-cached,
+     * so it is read, never written. */
+    for (int y = 0; y < ch; y++)
+        memcpy(s_canvas + (size_t)y * cw, canvas + (size_t)y * cw,
+               (size_t)cw * sizeof(uint32_t));
+    *width = cw;
+    *height = ch;
+    if (!redraw) return s_canvas;
+
+    /* Sprites are in native columns. On a wide canvas they belong at the same
+     * offset the native picture itself sits at, which the compositor centres;
+     * a cropped canvas is only ever shorter, never offset, so this covers both
+     * cases. cyc_render_native_origin is the compositor's own declaration of
+     * where native column 0 went, falling back to the centred position. */
+    {
+        int x0 = cyc_render_native_origin(cw);
+        if (x0 < 0 || x0 + 256 > cw) x0 = (cw - 256) / 2;
+        for (int i = count - 1; i >= 0; i--)
+            sdb_blit(&list[i], s_canvas, cw, *height, x0);
+        const uint8_t *oam = cyc_render_oam();
+        SdbSprite front = { oam[0], oam[1], oam[2], oam[3] };
+        sdb_blit(&front, s_canvas, cw, *height, x0);
+        return s_canvas;
+    }
+
+blit:
     /* OAM slot order is priority order, slot 0 frontmost, and the capture is in
      * emission (slot) order -- so paint back to front. Slot 0 is not part of
      * the capture (the cursor starts at slot 1); it is the game's frontmost
      * sprite and is still intact in OAM because the cursor never wraps onto it. */
     for (int i = count - 1; i >= 0; i--)
-        sdb_blit(&list[i], s_picture, 256, 240);
+        sdb_blit(&list[i], s_picture, 256, 240, 0);
 
-    const uint8_t *oam = cyc_render_oam();
-    SdbSprite front = { oam[0], oam[1], oam[2], oam[3] };
-    sdb_blit(&front, s_picture, 256, 240);
+    {
+        const uint8_t *oam = cyc_render_oam();
+        SdbSprite front = { oam[0], oam[1], oam[2], oam[3] };
+        sdb_blit(&front, s_picture, 256, 240, 0);
+    }
 
     *width = 256;
     *height = 240;
@@ -644,10 +709,338 @@ static void sdb_disable(void)
 static const CycHostOption SDB_OPTIONS[] = {
     { "--remove-character-flicker", false, "draw every OAM sprite host-side, so characters are never truncated" },
     { "--ppu-overclock", true, "extra blank scanlines before NMI (0-262); 0 = stock timing" },
+    { "--widescreen", true, "present 16:9 / 21:9 / 32:9 / fit instead of stock 4:3" },
+    { "--overscan", false, "drop the blank scanlines a CRT hid at the top and bottom" },
 };
 
 /* ------------------------------------------------------------------ *
- * 4. PPU overclocking (super-dodgeball.ppu-overclock)
+ * 4. Widescreen and overscan (super-dodgeball.widescreen)
+ * ------------------------------------------------------------------ */
+
+/* PRESENTATION ONLY. The guest is never touched: no cycle added or removed,
+ * no RAM written, no PPU register changed. The compositor runs after the frame
+ * has finished, from cyc_render_present(), and reads state the frame left.
+ *
+ * The extra columns are produced by READING the nametable rather than by
+ * warping the framebuffer the way wideNES does. wideNES remembers pixels it
+ * has already seen and slides them by the $2005 delta, so it can only ever
+ * show what the guest has already drawn, it has no idea where a nametable
+ * boundary is, and its own maintainer lists "cannot handle off-screen sprites"
+ * as the reason it never shipped (docs/research.md 25).
+ *
+ * That machinery is not needed here, because this game's world is entirely
+ * resident in CIRAM before the frame starts: measured over a match the court's
+ * nametable is byte-identical from frame 450 to frame 900 and spans the full
+ * 64-tile / 512-pixel space of both nametables --
+ *
+ *   C0 C0 C0 C0 | 4E 4D 4E 4D ... | 04 03 04 03 ... | 2C 2B 2C 2B ... | C0 C0 C0 C0
+ *   backdrop     left sideline     crowd             right sideline     backdrop
+ *
+ * so a margin column is resolved the way the PPU would have resolved it:
+ * scroll -> world column -> tile -> attribute -> palette. Nothing is inferred
+ * and nothing is remembered, so there is no warm-up and no scene bookkeeping.
+ *
+ * The world is 512 wide and the canvas at most 854, so at 21:9 and 32:9 the
+ * requested column falls outside it and is filled with the backdrop colour.
+ * The court already has blank backdrop at both of its own edges, so that reads
+ * as the dark arena around the court rather than a second copy of it -- the
+ * same choice SMB's widescreen makes with room_left / room_right.
+ */
+#define SDB_WS_WORLD_W   512     /* two nametables, which horizontal mirroring gives */
+
+/* Overscan: 8/8 is the number every emulator lands on (NESdev's 256x224
+ * "action safe"; Mesen, RetroArch and the libretro Mesen core all offer 8 as
+ * their first step). For this ROM it is also exactly lossless: measured over
+ * 551 non-blank match frames and 96 title/menu frames, rows 0-15 and 232-239
+ * carry 0% non-backdrop pixels while rows 224-230 carry ~90% (the court), so 8
+ * is the most that can go and 12 cannot. */
+/* The game clears PPUMASK bit 1, so the PPU paints the backdrop in the
+         * leftmost 8 columns. Measured over 2112 frames on both vectors those 8
+         * columns carry no ink in ANY frame -- they are the NES's left
+         * overscan, which the game hides and which a CRT would crop.
+         *
+         * "Overscan removal" here therefore REVEALS them rather than cutting
+         * them: the compositor draws the real background there instead of the
+         * backdrop. Cutting them would splice the world -- the margin shows
+         * world columns up to sx-1 and the picture would resume at sx+8, a
+         * visible 8-column skip in the court -- and revealing them makes the
+         * margin and the picture one continuous run of world columns with no
+         * black gutter between them.
+         *
+         * Left only, and measured, not assumed: the right-hand 8 columns carry
+         * the court on 1372 of 2112 frames, and the blank top and bottom bands
+         * are used by one wipe transition (frame 420), so neither may be cut. */
+#define SDB_WS_CLIP 8
+static int s_ws_reveal;
+static int s_ws_aspect = NES_VIDEO_STOCK;
+static int s_ws_fixed;           /* width we asked for by hand, 0 = by mode */
+static long s_ws_composed, s_ws_pillarboxed, s_ws_last_diff;
+static int s_ws_sx_lo = 9999, s_ws_sx_hi = -1;   /* camera scroll seen, SDB_TRACE=3 */
+
+/* Past the edge of the 512-pixel world the canvas is filled with the backdrop,
+ * which for this game is black -- the same colour the world's own outermost 32
+ * columns already are (the blank tile C0), so the margin continues the
+ * court's real edge instead of stopping at it.
+ *
+ * Wrapping or mirroring was tried and rejected: the world's outer band holds
+ * the scoreboard and the Statue of Liberty skyline, so mirroring renders the
+ * text backwards and wrapping shows the same skyline two or three times. Both
+ * invent picture the game never had and both look like a bug at 32:9, where
+ * the margin is 299 columns wide and therefore most of the screen. Black is
+ * the honest answer: past the stadium's end there is nothing to show. */
+static uint32_t sdb_ws_pixel(int wx, int y)
+{
+    if (wx < 0 || wx >= SDB_WS_WORLD_W) return cyc_render_color(0);
+    int nt_x = (wx >> 8) & 1;
+    int tile_x = (wx & 255) >> 3;
+    int sub_x = wx & 7;
+
+    int sy = cyc_render_line_scroll_y(y);      /* 0-479, two screens stacked */
+    int nt_y = (sy >= 240);
+    int tile_y = (sy - nt_y * 240) >> 3;
+    int sub_y = sy & 7;
+
+    unsigned base = (unsigned)(nt_x * 0x400 + nt_y * 0x400);
+    uint8_t tile = cyc_render_nametable((uint16_t)(0x2000u + base + tile_y * 32u + tile_x));
+    /* Attributes sit at the END of each 1 KiB nametable page, $23C0 / $27C0 --
+     * NOT at $2800. This cart is horizontally mirroring, which makes $2800
+     * alias $2000 and $2C00 alias $2400, so an attribute address built the
+     * usual way reads tile bytes. Measured: the byte at page offset 0x3C2 is
+     * 0x55, and 0x55 is palette 1 in all four quadrants -- exactly the palette
+     * the machine paints there and this code did not.
+     *
+     * The mirroring folds $2C00 onto the right physical page by itself, so
+     * nt_y can stay in the base here just as it does for the tile address. */
+    uint8_t attr = cyc_render_nametable((uint16_t)(0x2000u + base + 0x3C0u +
+                                                   (tile_y >> 2) * 8u + (tile_x >> 2)));
+
+    /* This game does NOT use the standard 16x16-metatile attribute layout: the
+     * index that matches its picture is (tile >> 2), one byte per 4x4 TILES, so
+     * each byte's four palettes cover 2x2 tiles each and the quadrant is
+     * (tile >> 1) & 1. Measured both ways against the machine's own background
+     * capture: (tile>>2) leaves 2613 pixels disagreeing out of 61440,
+     * the textbook (tile>>1)&7 leaves 18420. The bytes are at $23C0/$27C0 --
+     * page offset 0x3C0 -- because horizontal mirroring aliases $2800 onto
+     * $2000, which is this cart's mirroring.
+     *
+     * Bits: 0-1 top-left, 2-3 top-right, 4-5 bottom-left, 6-7 bottom-right. */
+    unsigned qy = (unsigned)((tile_y >> 1) & 1);
+    unsigned qx = (unsigned)((tile_x >> 1) & 1);
+    unsigned pal = (attr >> ((qy * 4u) + (qx * 2u))) & 3u;
+
+    uint16_t pattern = (uint16_t)(cyc_render_line_bg_table(y) + tile * 16 + sub_y);
+    uint8_t lo = cyc_render_chr(pattern);
+    uint8_t hi = cyc_render_chr((uint16_t)(pattern + 8));
+    unsigned bit = 7u - (unsigned)sub_x;       /* bit 7 is the leftmost pixel */
+    unsigned v = ((lo >> bit) & 1u) | (((hi >> bit) & 1u) << 1);
+    return cyc_render_color(v ? (int)(pal * 4 + v) : 0);
+}
+
+/* The canvas the engine hands the compositor, plus the picture the machine
+ * really produced. Reconstructing the whole canvas and then comparing the
+ * native 256 columns against the machine's own is the seam gate: if the two
+ * disagree, the scroll, nametable or palette state being read is not what the
+ * PPU used, and the margins would be drawn from the same wrong state. A frame
+ * that fails returns 0, which tells the engine to pillarbox the native picture
+ * exactly as it does today -- so title screens, menus and scene changes fall
+ * back for free instead of growing garbage.
+ *
+ * Only pixels the background owns are compared; sprite pixels legitimately
+ * differ, because this pass does not draw sprites. */
+/* Which palette RAM entry a drawn colour came from, for diagnostics. Two
+ * entries can hold the same colour, so the first match is reported; that is
+ * enough to tell a wrong quadrant from a wrong tile. */
+static int sdb_ws_pal_index(uint32_t argb)
+{
+    for (int e = 0; e < 32; e++)
+        if (cyc_render_color(e) == argb) return e;
+    return -1;
+}
+
+/* The seam check compares our reconstruction against the machine's BACKGROUND,
+ * not against its picture. The picture has sprites composited on top -- a
+ * character standing in the court would otherwise count as a reconstruction
+ * failure on every pixel it covers, which is what a first pass of this check
+ * did: ~9000 "failures" a frame, all of them players, none of them background.
+ * cyc_render_background() is the engine's exact capture of the background
+ * before the sprite priority mux (see cyc_render.h), which is the thing this
+ * pass is actually reproducing. */
+static uint32_t s_ws_native_bg[256 * 240];
+
+static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
+                            const uint32_t *native, void *user)
+{
+    (void)user;
+    if (width <= 256 || height != 240) return 0;
+    if (!(cyc_render_line_mask(239) & 0x08)) return 0;   /* background off */
+
+    const uint8_t *opaque = cyc_frame_bg_opaque();
+    for (int y = 0; y < height; y++) {
+        int sx = cyc_render_line_scroll_x(y);
+        /* PPUMASK bit 1 is "show background in the leftmost 8 pixels" -- SET means
+         * shown, so the clip exists when the bit is CLEAR. (wideNES's own write-up
+         * states the opposite of its code here; the code is right.) This game
+         * clears it, and getting the polarity backwards paints real court in
+         * the eight columns the PPU painted with the backdrop. The clip is in
+         * screen columns, so it lands on the native 256, not on the world. */
+        int clip = s_ws_reveal ? 0 : ((cyc_render_line_mask(y) & 0x02) ? 0 : SDB_WS_CLIP);
+        uint32_t *row = out + (size_t)y * width;
+        for (int x = 0; x < width; x++) {
+            int off = x - native_x0;
+            if (off >= 0 && off < clip) { row[x] = cyc_render_color(0); continue; }
+            /* cyc_render_line_scroll_x is 0-511, $2000 bit 0 already folded in,
+             * so a canvas column's world column is that line's scroll plus its
+             * own offset from native column 0. */
+            int wx = sx + off;
+            row[x] = sdb_ws_pixel(wx, y);
+        }
+    }
+
+    /* The revealed columns are meant to differ, so they are not compared. */
+    int first = s_ws_reveal ? SDB_WS_CLIP : 0;
+    long diff = 0;
+    if (cyc_render_background(s_ws_native_bg)) {
+        for (int y = 0; y < 240; y++) {
+            const uint32_t *row = out + (size_t)y * width + native_x0;
+            const uint32_t *bg = s_ws_native_bg + (size_t)y * 256;
+            for (int x = first; x < 256; x++) {
+                if (opaque && !opaque[(size_t)y * 256 + x]) continue;
+                if (row[x] != bg[x]) diff++;
+            }
+        }
+    } else {
+        /* No capture available: nothing to verify against, so do not claim a
+         * seam we did not check. */
+        return 0;
+    }
+    /* 2% of the frame's background pixels. Generous enough that a handful of
+     * genuinely ambiguous edge pixels do not force a fallback, tight enough
+     * that reading the wrong nametable cannot pass. */
+    if (diff * 100 > 2 * 256 * 240) {
+        s_ws_pillarboxed++;
+        s_ws_last_diff = diff;
+        return 0;
+    }
+
+    /* The machine's own 256 columns win, so the middle of a wide frame is
+     * pixel-for-pixel the stock picture at every aspect ratio -- with one
+     * deliberate exception: when the overscan feature is revealing the clipped
+     * columns, those are left as reconstructed, or the copy would put the black
+     * gutter straight back. */
+    int keep = s_ws_reveal ? SDB_WS_CLIP : 0;
+    for (int y = 0; y < height; y++)
+        memcpy(out + (size_t)y * width + native_x0 + keep, native + (size_t)y * 256 + keep,
+               (256 - keep) * sizeof(uint32_t));
+    s_ws_composed++;
+    s_ws_last_diff = diff;
+    return 1;
+}
+
+/* The width a ratio needs for a picture `rows` rows tall. Without a crop this
+     * is whatever the engine's aspect mode says (426 / 560 / 854 at 240 rows).
+     * With one, the picture is 224 rows tall and the same RATIO needs a different
+     * width -- 16:9 -> 398, 21:9 -> 522, 32:9 -> 796. Using the stock widths with
+     * a cropped height would silently deliver 34:9 instead of what was asked for. */
+static int sdb_ws_width_for(int mode, int rows)
+{
+    double aspect;
+    switch (mode) {
+    case NES_VIDEO_16_9: aspect = 16.0 / 9.0; break;
+    case NES_VIDEO_21_9: aspect = 21.0 / 9.0; break;
+    case NES_VIDEO_32_9: aspect = 32.0 / 9.0; break;
+    default: return 0;         /* stock and fit use the engine's own numbers */
+    }
+    /* The engine's own rounding (nes_video_geometry_width_for_aspect): round to
+     * the nearest even column. Truncating instead turns 32:9's 853.3 into 852,
+     * which is 3.55:1 rather than 3.556:1 -- a half-pixel of aspect ratio is
+     * nobody's idea of exact. */
+    int w = 2 * (int)floor(((double)rows * aspect) / 2.0 + 0.5);
+    if (w < 256) w = 256;
+    if (w > NES_VIDEO_MAX_WIDTH) w = NES_VIDEO_MAX_WIDTH;
+    return w & ~1;              /* even, so the stock 256 stay centred */
+}
+
+static void sdb_ws_apply(void)
+{
+    int wide = s_ws_aspect != NES_VIDEO_STOCK;
+    cyc_render_set_compositor(wide ? sdb_ws_composite : NULL, NULL);
+
+    if (!wide) {
+        s_ws_fixed = 0;
+        cyc_video_set_mode(NES_VIDEO_STOCK);
+        return;
+    }
+    s_ws_fixed = sdb_ws_width_for(s_ws_aspect, 240);
+    if (s_ws_fixed > 0) {
+        /* A fixed width rather than a named mode: the mode computes its width
+         * from 240 rows, and a cropped picture is shorter than that. Note
+         * request_width() clears the mode, so a mode can only be replaced by
+         * re-asserting it, never by "clearing" the width. */
+        cyc_video_set_mode(NES_VIDEO_STOCK);
+        cyc_video_request_width(s_ws_fixed);
+    } else {
+        cyc_video_set_mode(s_ws_aspect);
+    }
+}
+
+static void sdb_ws_set_aspect(int mode)
+{
+    s_ws_aspect = mode;
+    sdb_ws_apply();
+}
+
+static void sdb_ws_set_overscan(int on)
+{
+    s_ws_reveal = on ? SDB_WS_CLIP : 0;
+    sdb_ws_apply();
+}
+
+/* Reset callbacks run before every activation pass, so a disabled feature
+ * reliably restores the stock 256-column picture. */
+static void sdb_ws_disable(void)
+{
+    s_ws_aspect = NES_VIDEO_STOCK;
+    s_ws_reveal = 0;
+    s_ws_fixed = 0;
+    cyc_render_set_compositor(NULL, NULL);
+    cyc_video_set_mode(NES_VIDEO_STOCK);
+}
+
+/* SDB_TRACE=1: one line at exit, so a headless run says whether the margins
+ * were actually drawn or quietly pillarboxed away every frame. */
+static void sdb_ws_report(void)
+{
+    if (s_trace && s_ws_composed + s_ws_pillarboxed)
+        fprintf(stderr, "widescreen: %ld composed, %ld pillarboxed, seam diff %ld px\n",
+                s_ws_composed, s_ws_pillarboxed, s_ws_last_diff);
+}
+
+static int sdb_ws_aspect_from(const char *env, const char *option)
+{
+    char buf[32] = "";
+    int mode = NES_VIDEO_STOCK;
+    if (env && env[0] && nes_video_geometry_parse(env, &mode)) return mode;
+    if (nes_mod_option_value("super-dodgeball.widescreen", "widescreen",
+                             "aspect", buf, sizeof buf) &&
+        nes_video_geometry_parse(buf, &mode))
+        return mode;
+    (void)option;
+    return NES_VIDEO_STOCK;
+}
+
+static void sdb_ws_enable(void)
+{
+    sdb_ws_set_aspect(sdb_ws_aspect_from(getenv("SDB_WIDE"), "aspect"));
+}
+
+static void sdb_ov_enable(void)
+{
+    const char *e = getenv("SDB_OVERSCAN");     /* headless A/B */
+    sdb_ws_set_overscan(e && e[0] ? atoi(e) != 0 : 1);
+}
+
+/* ------------------------------------------------------------------ *
+ * 5. PPU overclocking (super-dodgeball.ppu-overclock)
  * ------------------------------------------------------------------ */
 
 /* The game feels slower than it should because its main loop is an NMI-synced
@@ -730,6 +1123,21 @@ static bool sdb_option(void *ctx, const char *name, const char *value)
         sdb_oc_apply((int)v);
         return true;
     }
+    if (!strcmp(name, "--widescreen")) {
+        int mode;
+        if (!value || !nes_video_geometry_parse(value, &mode)) {
+            fprintf(stderr, "--widescreen: stock, 16:9, 21:9, 32:9 or fit\n");
+            return false;
+        }
+        sdb_ws_set_aspect(mode);
+        return true;
+    }
+    if (!strcmp(name, "--overscan")) {
+        /* Declared as a bare flag, so the host passes no value at all (a NULL
+         * here means "flag given", not "flag not given"). */
+        sdb_ws_set_overscan(value == NULL || value[0] == '\0' || atoi(value) != 0);
+        return true;
+    }
     return false;
 }
 
@@ -743,6 +1151,12 @@ static const CycHostExtras SDB_EXTRAS = {
 };
 
 const CycHostExtras *cyc_host_extras(void) { return &SDB_EXTRAS; }
+
+/* One report per run, on the way out. SDB_TRACE=1 turns it on. */
+__attribute__((destructor)) static void sdb_report_at_exit(void)
+{
+    sdb_ws_report();
+}
 
 #if defined(_MSC_VER)
 #pragma section(".CRT$XCU", read)
@@ -768,8 +1182,11 @@ static void register_sdb_mods(void)
     };
     if (!nes_mod_register_activation_plugin("super-dodgeball.character-flicker", sdb_enable) ||
         !nes_mod_register_activation_plugin("super-dodgeball.ppu-overclock", sdb_oc_enable) ||
+        !nes_mod_register_activation_plugin("super-dodgeball.widescreen", sdb_ws_enable) ||
+        !nes_mod_register_activation_plugin("super-dodgeball.overscan", sdb_ov_enable) ||
         !nes_mod_register_reset_callback(sdb_disable) ||
-        !nes_mod_register_reset_callback(sdb_oc_disable))
+        !nes_mod_register_reset_callback(sdb_oc_disable) ||
+        !nes_mod_register_reset_callback(sdb_ws_disable))
         fprintf(stderr, "sdb: mod registration failed\n");
     for (unsigned i = 0; i < sizeof sites / sizeof sites[0]; i++)
         if (!nes_mod_register_function_entry_plugin(SDB_HOOK_IDS[i], sites[i].addr, sites[i].fn))

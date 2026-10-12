@@ -1,0 +1,85 @@
+# Preloaded mod package for Super Dodge Ball. Single-line values only: the
+# manifest parser is line-based (key = value, [[section]]), with # comments.
+#
+# Two INDEPENDENT features, both default-disabled:
+#   widescreen  present 16:9 / 21:9 / 32:9 instead of the stock 256x240,
+#               with the extra columns showing court the NES could not show.
+#   overscan    drop the 8 blank columns at the left that the game itself hides.
+# They combine, and with overscan on the width is recomputed from the cropped
+# height so the ratio asked for is the ratio delivered.
+#
+# This package is DATA ONLY -- a declaration of features whose implementation is
+# src/sdb_host_extras.c, compiled into nes_game and registered by the stable ids
+# below. A .nesmod archive cannot carry native code (see the framework's
+# docs/MOD_PACKAGES.md), so the licence here necessarily matches the licence of
+# the code that does the work; it is not separately licensed.
+format_version = 1
+id = "super-dodgeball.widescreen"
+version = "1.0.0"
+name = "Widescreen"
+author = "Super Dodge Ball Recomp"
+description = "Presents the game in 16:9, 21:9, 32:9 or the window's own shape, and can reveal the blank left-hand columns the game hides. The guest is untouched: the extra columns are read out of the nametable, CHR and the frame's own scroll, and the stock 256-column picture stays authoritative in the middle, so the centre of a wide frame is pixel-for-pixel the unmodded game. Past the court's own 512-pixel world the margin is the backdrop colour, because there is nothing there to show. Not upscaled: the same chunky pixels, on a wider canvas."
+license = "PolyForm-Noncommercial-1.0.0"
+resolver = "declarative"
+save_compatibility = "shared"
+
+# Lowercase CRC-32 of the cartridge payload after the iNES header.
+[[target]]
+game_id = "super-dodgeball"
+rom_crc32 = "689971f9"
+
+[[feature]]
+id = "widescreen"
+name = "Widescreen"
+description = "Present 16:9, 21:9, 32:9 or fit. Extra columns show the court the NES could not display. Presentation only; no upscaling."
+group = "Display"
+default_enabled = false
+
+# The aspect ratio of the presented canvas. The widths are the engine's own
+# (common/nes_video_geometry.h): 426 / 560 / 854 columns for a 240-row
+# picture. "fit" follows the window's shape instead.
+[[option]]
+feature = "widescreen"
+id = "aspect"
+label = "Aspect ratio"
+type = "choice"
+default = "fit"
+
+[[option.choice]]
+value = "stock"
+label = "Stock (256x240)"
+
+[[option.choice]]
+value = "16:9"
+label = "16:9 Widescreen"
+
+[[option.choice]]
+value = "21:9"
+label = "21:9 Ultrawide"
+
+[[option.choice]]
+value = "32:9"
+label = "32:9 Super Ultrawide"
+
+[[option.choice]]
+value = "fit"
+label = "Fit the window"
+
+# An ACTIVATION plugin registered with nes_mod_register_activation_plugin().
+# It reads the aspect above with nes_mod_option_value(), installs the
+# compositor and asks the backend for that width; the reset callback puts the
+# stock 256-column picture back.
+[[plugin]]
+feature = "widescreen"
+id = "super-dodgeball.widescreen"
+
+[[feature]]
+id = "overscan"
+name = "Remove overscan"
+description = "Reveal the 8 blank columns at the left of the picture, which the game hides with PPUMASK. Only takes effect together with widescreen, because it is the compositor that draws them. Those 8 columns carry no ink in any of 2112 measured frames, which is why exactly these: the right-hand columns carry the court, and the blank top and bottom bands are used by a transition frame."
+group = "Display"
+default_enabled = false
+
+[[plugin]]
+feature = "overscan"
+id = "super-dodgeball.overscan"
