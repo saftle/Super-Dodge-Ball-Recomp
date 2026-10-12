@@ -8,7 +8,7 @@ NESASM_BIN="${VENV_DIR}/bin/nesasm"
 MESENCE_DIR="${SCRIPT_DIR}/external/mesence"
 MESEN_BIN="${SCRIPT_DIR}/external/mesence/Mesen"
 FRAME_GEN_DIR="${SCRIPT_DIR}/tools/frame_gen"
-RECOMP_UI_DIR="${SCRIPT_DIR}/recomp-ui"
+RECOMP_UI_DIR="${SCRIPT_DIR}/external/recomp-ui"
 
 echo "=== Super Dodgeball Recomp Setup ==="
 echo ""

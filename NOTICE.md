@@ -36,7 +36,7 @@ never committed) likewise carries its own license; see that repository.
 - Copyright 2026 Matthew Stanley and contributors
 - <https://github.com/RetroPortingToolKit/recomp-ui>
 - Licensed under the MIT License
-- Pinned as a submodule at `recomp-ui/` (commit `41c88ff`); its own LICENSE and
+- Pinned as a submodule at `external/recomp-ui/` (commit `41c88ff`); its own LICENSE and
   third-party attribution (Dear ImGui, stb_*, tinyfiledialogs — each retaining
   its own license) travel with that checkout
 

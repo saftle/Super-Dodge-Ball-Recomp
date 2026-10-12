@@ -1,6 +1,6 @@
 # Super Dodgeball NES Recompilation — Project Plan
 
-> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** (default-on mod). Frontier: court verification past team-select, then widescreen.
+> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). Frontier: full-movie TAS vectors (level-switch screens), then widescreen.
 
 ## Where Things Stand
 
@@ -11,10 +11,10 @@
 
 ## Open Items
 
-1. Court BG past team-select — verify on cycle via full-run TAS vectors (game runs underneath on legacy evidence; confirm on cycle).
+1. Court BG past team-select — substantially verified on cycle: `tas/vectors/sdb_throw.input` plays matches end-to-end (throws land, digits show, menus render correctly, 8000-frame stress clean). What remains is the full-movie TAS path (TASVideos #4976 actually *wins* rounds — needed for level-switch screens), still open.
 2. Propose 002 S-latch guard upstream (draft below), then done with patches forever.
 3. Widescreen via `HOST_EXTRAS` custom compositor (SMB pattern: stock center authoritative, host re-draws margins).
-4. ~~Flicker fix~~ — **DONE.** `super-dodgeball.character-flicker`, default-on, in the launcher's Mods screen. Mechanism was **not** emulator sprite-limit removal: the game has a hard 64-sprite OAM budget and stops emitting at the `BEQ` bail on `$84B6`, so an emulator toggle cannot help. Fixed with five content-keyed `[[mod_function_hook]]` sites + host-side redraw; body-ink stdev 8.7 → 0.8, guest machine unchanged. Details and the two implementation traps in research.md §2.
+4. ~~Flicker fix~~ — **DONE, all causes.** `super-dodgeball.character-flicker`, opt-in from the launcher's Mods screen (off by default: the culling half shifts guest timing and the level-switch screen shows ghosts with it on — needs a full playthrough test). (a) Hard 64-sprite OAM budget with a `BEQ` bail on `$84B6` — stops emitting. (b) Display-list culling at `$067C` (`$43` bits 4-6 `$20`), three gates overridden. (c) Two sprite classes no bump hook could see: floating damage numbers (bank-3 pair emitter, `ADC #$08` step) and team-select position numbers (bank-4 block copier, no bump at all) — hooked per-emitter plus prefix carry-over and done-freshness for sitters. Ten content-keyed `[[mod_function_hook]]` sites + host-side redraw + six `cycle_seed_file` roots (hook sites need recompiled code; all three emitters were on the interpreter). Truncation: body-ink stdev 8.7 → 0.8 (truncation-only build). Culling: B's box-ink stdev 55.0 → 16.6 with 0 frames still culled (re-verified current binary). Numbers: 108/108 frames steady. Traps and the guest-cost caveat in research.md §2 and §2.1.
 5. Resolution honesty: wider canvas only — no upscaling path exists upstream (CHR PNG replacement at most). Don't promise HD.
 6. Submodule stays pristine (`git -C external/nesrecomp status` clean; reset 2026-10-02).
 7. Docs reconciled to cycle (README, AGENTS.md, plan, research §§21–22, harness READMEs); research §§18–19 stay as game-knowledge history.
@@ -142,7 +142,7 @@ The cycle backend runs the stock ROM flawlessly (team-select matching Mesen, 25/
 Principle from SMB (reference implementation): rendering never changes guest edges — game logic runs stock, the host re-draws. All three items build on `HOST_EXTRAS` + `[[mod_function_hook]]` (content-keyed, no game bytes in repo).
 
 1. **Widescreen** (supported mechanism, real work): custom compositor (256 → 426/560/854, pillarbox fallback for menus), stock center pass authoritative, margins re-drawn from observed world + captured sprites. Port the SMB pattern.
-2. **Flicker fix — SHIPPED** (`super-dodgeball.character-flicker`, default-on). Mechanism measured: the game has a hard 64-sprite OAM budget and stops emitting, so characters lose tiles (79% of match frames). Five content-keyed `[[mod_function_hook]]` sites on the cursor bumps keep emission going and capture every sprite; `src/sdb_host_extras.c` redraws the list over a background capture. Guest machine unchanged (same cycle count; only `$02FD`/`$02FF` differ). Two traps, both documented in research.md §2 and AGENTS.md: emit order differs between builds (never blend lists index-wise), and the blit must walk pixels itself (never `cyc_render_tile` per scanline).
+2. **Flicker fix — SHIPPED** (`super-dodgeball.character-flicker`, off by default, opt-in). Three measured mechanisms, none of them the emulator sprite limit: (a) hard 64-sprite OAM budget with a `BEQ` bail on `$84B6` (79% of match frames truncate); (b) display-list culling, three gates; (c) two emitter shapes no bump hook sees (damage-number pair step, block copier with no bump). Ten content-keyed `[[mod_function_hook]]` sites + host-side redraw + six seed roots. Truncation: body-ink stdev 8.7 → 0.8. Culling: 55.0 → 16.6, 0 frames culled. Numbers: 108/108 steady. Guest machine: truncation half untouched (same cycle count; `$02FD`/`$02FF` only); culling half shifts NMI phasing slightly by construction. Traps in research.md §2/§2.1 and AGENTS.md.
 3. **Resolution** (honest limit): wider canvas, same chunky pixels. No upscaling path upstream (CHR PNG replacement only). Don't promise HD.
 
 ## Removed Legacy Action Items (retired with the backend — kept as a struck record)

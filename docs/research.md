@@ -8,14 +8,261 @@ Cycle backend is the only play path; legacy runner retired (§§18–19 keep its
 Team-select verified byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM, 400-frame TAS); blargg
 cpu tier 25/25.
 
-**Character flicker: SOLVED** (§2). The cause was *not* emulator sprite-limit removal. The game
-builds OAM in place at `$0200` behind an 8-bit cursor `$0617`, characters are 8 sprites each, and
-the `BEQ` bail at `$84B6` stops emission at 64 slots — so the missing tiles are never computed.
-Truncated on 79% of match frames. Fixed by five content-keyed `[[mod_function_hook]]` sites +
-host-side redraw (`src/sdb_host_extras.c`), shipped as the default-on
-`super-dodgeball.character-flicker` mod. Body-ink stdev 8.7 → 0.8; guest machine unchanged.
+**Character flicker: SOLVED, twice** (§2, §2.1). Neither cause was emulator sprite-limit
+removal; the game throttles its own sprites twice over.
+
+1. OAM is built in place at `$0200` behind a cursor `$0617`, characters are 8 sprites each, and
+   the `BEQ` bail at `$84B6` stops emission at 64 slots, so the missing tiles are never
+   computed. Truncated on 79% of match frames. Fixed by host-side redraw over a captured
+   sprite list.
+2. A whole character vanished 4 frames in 9 while OAM sat at 46-54 of 64. The cause is the
+   game's own **object culling**: `$E32D` refuses to put an object on the display list at
+   `$067C` when its state byte `$43` has bits 4-6 equal to `$20`, and rotates which object it
+   refuses. Three gates on that path (`$E34A`, `$828A`, `$8200`), all overridden. Box-ink
+   stdev 55.0 → 16.6 with zero frames still culled.
+
+Shipped as the opt-in `super-dodgeball.character-flicker` mod (off by default pending a full-playthrough test; 10 hook sites,
+`src/cycle_seeds.txt` so the hooked code is recompiled — hook sites do not exist on the
+interpreter). Fix 1 is presentation only; **fix 2 is not** — it makes the guest emit more
+sprites, so its cycle count and NMI phasing shift slightly (§2.1). Two more sprite classes
+turned up after that and are hooked the same way: the floating damage numbers and the
+team-select position numbers (§2.1).
 
 Frame comparison (MesenCE reference) and the blargg suite are the standing gates.
+
+---
+
+## 2.1. Second Flicker: the game's own object culling (SOLVED)
+
+A second, independent flicker: one character vanished entirely for **4 frames out of every 9**
+and came back for 5, forever. Unlike the truncation above, OAM sat at **46-54 of its 64 slots**
+the whole time, so this was never a budget. It looked deliberate, and the first attempt --
+holding a sighting and redrawing it -- produced *doubling*, which suggested game logic.
+
+It was not game logic. It is the game **culling its own object list**, in three places, and all
+three are now overridden.
+
+### What the list is
+
+Objects do not go straight to OAM. `$E32D` (fixed bank) builds a display list each frame:
+
+- the object's **state byte `$43`** decides whether it is added at all,
+- its 7-byte **display record** is `$0618 + 7*index` (pointer table at `$E3A2`, mirrored at
+  `$80B8`), record byte 0 is a copy of `$43`,
+- the list itself is 16-bit ids at **`$067C`**, count **`$067A`**, byte cursor **`$067B`**,
+- **`$8040`** (switchable bank) bubble-sorts that list by the id's high byte (`$067D` vs
+  `$067F`, swapping four bytes at a time) and then calls **`$821E`** per entry, which reads the
+  record, sets up the emitter state and jumps into the sprite-list walk at `$8348`.
+
+So `$4E` (record byte 0) is the same `$43` the builder gated on, and the whole path is keyed
+off that one byte.
+
+### The three gates
+
+**1. `$E34A` -- the builder refuses to add the object.**
+
+```
+$E34A: LDA $43 / AND #$70 / CMP #$20 / BEQ $E378
+$E352..$E377   append: id into $067C/$067D, INC $067A, $067B += 2
+$E378:         either way, write the record from $43/$41/$42
+```
+
+Bits 4-6 of `$43` equal to `$20` means the object never enters the list, so `$821E` never sees
+it. **No hook at the emitter can reach it** -- that is what made the first attempt look like a
+dead end, and why the continuation note's "hooks at emission sites are too late" was right for
+the wrong reason.
+
+Measured over a 905-frame match: the flag is set on **229 frames, never on two objects at
+once**, and the object it names rotates (object 4 early, object 3 from frame ~748). Each
+object's own counter decrements one step every 9 frames and bit 5 is simply its low bit. A
+cull that always sacrifices someone, never the same someone twice running, is not design.
+
+**2. `$828A` -- the emitter skips a record whose flag bit 5 is set.**
+
+```
+$827A: BIT $4E   bit 6 -> extra path      $8281: AND #$10  bit 4 -> $82DD
+$828A: AND #$20 / BNE $8293  (RTS: emit nothing)     $8290: JMP $8348  (emit normally)
+```
+
+Same byte, so an object put back on the list is still filtered here. This gate alone is
+unreachable: with gate 1 closed the object never arrives.
+
+**3. `$8200` -- the crowded-stack cull.** `$8156-$8172` runs once per frame; when `$81A2`
+counts four or more list entries within `$20` pixels it calls `$8200`, which shifts the list
+down over one entry (the rotating table at `$8173` picks which) and decrements `$067A`. Much
+rarer -- 42 calls in 910 frames -- and it was the unconfirmed lead section 2 left behind.
+
+**The SNES port disabled gate 3 outright**: `RTS ; disable sprite flickering`. That comment was
+the whole answer, sitting in the one routine nobody had looked at.
+
+### Why nothing about the object changes while it is hidden
+
+Same record, same position, same tiles as the frames either side. The game is hiding something
+it drew a frame earlier, not skipping a transitional state -- which is also why temporal
+holdover doubled instead of filling in.
+
+### The fix
+
+Five more content-keyed `[[mod_function_hook]]` sites for §2.1's emitters (`src/game.toml`) plus six
+`cycle_seed_file` roots (`src/cycle_seeds.txt`):
+
+| site | bank | what the callback does |
+|---|---|---|
+| `$E378` | 7 | replicate the append `$E352-$E377` skipped: id, high byte per `$E35F-$E36C`, `INC $067A`, `$067B += 2` |
+| `$8231` | 5 | clear bit 5 of `$4E`, the zero-page copy the emitter is about to branch on |
+| `$8200` | 5 | return 1, which emulates that routine's RTS and leaves the list alone |
+| `$96B9` | 3 | capture the floating damage-number pair (below) |
+| `$A394` | 4 | capture one block-copied sprite per iteration, slot from X (below) |
+
+All three culling gates are needed. Re-adding the entry without `$8231` still filters at emit time; `$8231`
+alone never sees the object.
+
+**The seeds are the whole reason this was possible.** A hook site only exists in recompiled
+code (`hook_site_here()`: `if (!s_hook_cfg || INTERP(e)) return false`). `$8040`, `$821E` and
+`$E32D` are reached only through a dispatch path static discovery does not walk, so they ran on
+the cycle interpreter -- 37% of all cycles in a match. A hook declared at `$8231` compiled,
+bound, and never fired: the instruction was emitted as an orphan entry with nothing reaching
+it. `4k:14:8040`, `4k:14:821E` and `4k:1E:E32D` (measured with `--miss-log`) fix that;
+native share went 62.4% -> 65.1% and the total cycle count did not move.
+
+**Gotcha, cost one build:** `$E35F-$E36C` is `LDA $49 / BPL +5 / LDA #$00 / STA $067D,X` then
+`BEQ +5 / LDA #$FF / STA $067D,X`. So `$49` zero leaves `$48` alone and any other positive
+value forces `$FF`. Read it the other way round and the restored entry gets sort key `$FF`,
+lands behind everything, and the character above it draws in front -- a layering artefact that
+looks like a z-order bug and is really a transcription error in the sort key.
+
+### A third, separate artefact: the runaway capture list (SOLVED)
+
+Long after the two flickers were fixed, playing on produced a much uglier symptom: **hit
+anyone with the ball and the screen filled with copies of the court in a trail**, like an old
+mouse cursor. It is not the game's, and not the culling fix's doing directly — it is the mod's
+own list bookkeeping failing in a state the earlier tests never reached.
+
+The mod assembles each frame's sprites into `build` and detects a new list by "the cursor went
+back to slot 1" (`$0617 == $04`). That is the common case, but it is **not the only one**. In some
+game states a list begins at a higher slot, because the emitters that would fill slots 1-2 have
+nothing to draw. Measured, after throwing all game:
+
+```
+frame 940  last capture cur=$F4   list length 61
+frame 941  first capture cur=$0C  ... $F0        <-- $04 never appeared
+frame 942  ... $F4 $F8 $FC $FC   <-- the cursor pin holds it there
+```
+
+With no boundary, `build` never restarted: it grew by ~57 sprites every five frames, hit
+`SDB_MAX_SPRITES` (512) and overflowed ~57 more **per frame, forever**, while
+`sdb_present()` happily painted every one of them. That is the smear.
+
+**Two fixes, both needed.**
+
+1. **Treat a cursor that has gone backwards as a new list**, alongside `$04`. Nothing inside one
+   list moves it backwards: it only steps +4, and once the pin engages the tail reads `$FC,
+   $FC, $FC...`. The game's save/restore around `$DBDB` re-reads the same value, which is not a
+   decrease. So the test cannot fire mid-list.
+2. **A backstop.** Past `SDB_LIST_LIMIT` (256, against a measured maximum of 77) the mod
+   publishes what it has and starts again, and says so on stderr. This exists so a future
+   detection miss degrades into one odd frame instead of a permanent smear — and it is never
+   silent, because a silently wrong picture is the failure mode this mod exists to remove.
+
+`SDB_TRACE=1` prints one line per frame (`frame peak-list overflow published-list saw-$04
+backstop-trips`). That is what localised this in a headless run without watching 1600 frames,
+and it is the thing to reach for first next time. `SDB_TRACE_CAPTURES=<from>-<to>` dumps every
+capture in a range, which is what showed the `$F4 -> $0C` jump.
+
+Reproduction: `tas/vectors/sdb_idle.input` up to frame 445, then hold **B** (throw — A passes,
+A+B jumps) on a 12-on/12-off cycle, into the match. The runaway begins around frame 941.
+That schedule is now the tracked vector `tas/vectors/sdb_throw.input`.
+
+### Two more sprite classes the capture never saw (SOLVED)
+
+**Damage numbers.** When a player is hit, a digit pair floats above him showing the lost
+energy (tiles `$F0`-`$F9`, OAM slots 1-2). Their emitter (`$966D`, bank 3) writes both
+sprites in one go, so its cursor bump steps by 8, not 4 (`LDA $0617 / ADC #$08 /
+STA $0617` -- the only emitter with that shape, and it has no wrap bail). It was never
+hooked, so the numbers were never captured and the mod never drew them: the one thing on
+screen that says a hit landed was missing. Hooked at `$96B9` with a two-sprite capture;
+a cursor that would wrap is pulled back to `$F4`, whose `ADC #$08` lands on `$FC`, so
+only slot 63 is ever overwritten -- the same deal as the single-sprite pin.
+
+Measured (`tas/vectors/sdb_throw.input`, frames 895-1400): guest OAM holds the digits
+108 frames on both sides (stock 922-1029, mod 939-1046 -- same length, shifted by ordinary
+guest divergence), and the mod presents them all 108 with zero gaps. Duration is
+untouchable by construction: the mod copies OAM bytes, and emission and clearing stay
+100% guest-side.
+
+**Menu position numbers.** The team-select court diagrams' position digits (tiles
+`$05`-`$08`, `$22`) come from a third emitter shape: the block copier at `$A36C`
+(bank 4), which streams up to 8 sprites from a static table (`$A3DC`) stepping an X
+register loaded from the cursor -- no per-sprite bump at all, just one `STX $0617`
+when the loop is done. No bump hook can ever see them. Hooked per copied sprite at
+`$A394` (the first instruction after all 4 bytes are written, and only on the copy
+path -- iterations the `$A3A1` gate skips jump over it), reading the slot from the CPU
+registers and sharing the boundary/prefix/backstop handling. Nothing is pinned: the
+loop's own final store commits the cursor, so wrapping behaves exactly as stock.
+
+### Prefix carry-over and done-freshness (the rest of the missing-sprite story)
+
+Hooking the emitters was not enough for sprites that *sit* in OAM. The damage digits
+persist in slots 1-2 long after their emitter last ran, and a list that restarts at
+`$0C` never re-reads them -- so after the one emission frame, later lists silently
+dropped them again. Hence two follow-ups, both in the shared restart path:
+
+1. **Prefix carry-over.** On a restart at cursor `$0C` or above, the slots below it keep
+   whatever OAM holds, and the native picture draws them -- so the restarted list opens
+   with those slots copied verbatim, in slot order. That is not blending two builds: it
+   is reading the machine's own OAM page for slots this list does not cover, which is
+   exactly what the PPU draws there.
+2. **Done-freshness.** The first-capture frame used to present the published list
+   unconditionally -- but after an emission gap that list predates what sits in OAM now
+   (measured: digits shown 1 frame, then gone while OAM still held them). Now it falls
+   back only to a list published on the immediately previous frame; anything older loses
+   to the new build, partial or not, because the new build with its prefix is what the
+   machine's OAM page actually holds. Normal two-frame builds behave exactly as before.
+
+### Verified (cycle backend, `--present-out`, same schedule both ways)
+
+Reproduction vector `tas/vectors/sdb_idle.input`, `--ram-init zeros`, frames 700-909
+(re-verified on the current binary: prefix, freshness, numbers and block-copy hooks all
+landed after the first measurement, and the numbers are unchanged):
+
+| | B's box ink, frames 700-909 |
+|---|---|
+| stock | 543-741, **stdev 55.0** (B culled on 106 of 210 frames) |
+| mod | 677-741, **stdev 16.6**, **0 frames** at stock's culled value |
+
+- **0 frames** where the culled character is still missing; **0 frames** below the ink of any
+  frame stock drew him on.
+- Inside B's box the mod matches stock exactly where stock drew him (frame 866: 0 differing
+  pixels in the box). Whole-frame sameness is NOT claimed: the culling fix shifts guest
+  timing by a couple of cycles, so blink-phase elements (menu cursor, roster scroll) sit a
+  frame apart between runs -- same game flow, different phase. Regional ink plus eyeballing
+  is the gate, not whole-frame equality.
+- Damage numbers (`tas/vectors/sdb_throw.input`, frames 895-1400): guest OAM holds them 108
+  frames both sides, mod presents all 108 steadily, zero gaps. Duration matches by
+  construction (the mod copies OAM bytes; emission and clearing are guest-side).
+- Menu position numbers: bottom halves of menu frames 100-400 pixel-identical except
+  blink-phase cursor frames; the court-diagram region at frame 150 is 0 differing pixels.
+- Cycle count unchanged: 27,097,877 stock vs 27,097,876 mod over 910 frames; mod-off
+  (empty catalog) output byte-identical to stock on all 1100 frames.
+
+### What it costs the guest (not nothing, and not "presentation only")
+
+The first fix was presentation only: same cycle count, and only `$02FD`/`$02FF` differ. **This
+one is not**, and the claim had to change. Measured mod-on vs mod-off over 910 frames:
+
+- **OAM** differs on 484 frames -- that is the point, and it is the only intended change.
+- **Sprite slot 0 never differs on any of 910 frames**, so sprite-0 hit is unaffected.
+- **CPU RAM**: the display-list machinery (`$067A`, `$067C`-`$0693`), the OAM page, transient
+  zero-page/stack scratch, and a set of per-object timers that settle at a constant offset
+  (usually +5 ticks). Object positions and the ball do not differ.
+- **CIRAM -- the picture -- is identical on 899 of 910 frames**; the other 11 differ by 1-2
+  bytes at `$2070`, a frame-boundary phase effect.
+
+The cause is unavoidable: making the game emit an object it had culled *is* extra guest work,
+so the guest runs a couple of cycles ahead and NMI phasing moves. Nothing in gameplay reads
+`$2002` (all ten reads are in the fixed bank's vblank code) and nothing reads `$067A`/`$067C`
+outside the sprite machinery, so the game cannot observe the difference -- but "cannot observe"
+is not "byte-identical", and the docs should say so.
 
 ---
 
@@ -84,7 +331,7 @@ hardware independently drops ~8 sprites/frame. Real, but far less frequent than 
    `cyc_render_set_compositor`, which is dormant at width ≤ 256.
 
 Native PPU evaluation, sprite-0 hit and IRQ are untouched; only presentation changes. Ship as a
-`.nesmod` package + trusted plugin, `default_enabled = true`, surfaced in recomp-ui's Mods screen.
+`.nesmod` package + trusted plugin, `default_enabled = false` for now (level-switch ghosts open), surfaced in recomp-ui's Mods screen.
 Requires our own `CMakeLists.txt` (declaring `CXX`) calling `nesrecomp_add_cycle_game(... MODS
 GAME_ID ... HOST_EXTRAS ...)`; the shared `project/CMakeLists.txt` is inside the submodule.
 
@@ -123,13 +370,13 @@ character stands. It is present in the other five frames, so it is a build-slici
 game logic. Presenting the last complete list on the first capture frame only keeps it drawn. That
 region's ink stdev went 8.7 -> 0.8, and the originally-truncated character's 8.7 -> 0.0.
 
-**Not fixed, and out of scope:** `$8200` (bank 5) removes an entry from the object list at
-`$067C` (count `$067A`) and the SNES port replaces it with `RTS ; disable sprite flickering`. It
-looked like the cause of a character toggling on/off, but `$067A` cycles 0->12 cleanly with no leak
-and the toggle turned out to be our own build-slicing, so that lead is unconfirmed. That port also
-leaves `$84B6` byte-identical and caps its own OAM translation at 64 sprites (`CPY #$100`), i.e. it
-still has the truncation - its "flicker" commits were a list-compaction routine and an inverted
-OAM priority bit.
+**Related, now resolved in §2.1:** `$8200` (bank 5) removes an entry from the object list at
+`$067C` (count `$067A`), and the SNES port replaces it with `RTS ; disable sprite flickering`.
+That comment turned out to be the second flicker's whole mechanism - the game culling its own
+object list, three gates of it, all now overridden by the mod. The port still leaves `$84B6`
+byte-identical and caps its own OAM translation at 64 sprites (`CPY #$100`), i.e. it keeps the
+truncation fix; its "flicker" commits were the list-compaction routine and an inverted OAM
+priority bit.
 
 ### SNES Port
 
@@ -605,9 +852,9 @@ not primary.
 - **Game project**: repo-root `CMakeLists.txt` (adds `CXX`/`MODS`/`GAME_ID`/`HOST_EXTRAS`); builds `build-cycle/nes_game`
 - **Generated C code**: `build-cycle/cycle-nes_game/<rev>/generated/game_cyc*.c`, gitignored, one revision dir per ROM/config revision
 - **Builds**: `build-cycle/` only (the legacy `build/` and `build-diag/` are gone with the legacy runner)
-- **Config**: `src/game.toml` carries only the display name plus five `[[mod_function_hook]]` sites; no `extra_func`, no `force_interp`, no discovery tuning needed for the stock ROM
-- **Mods**: `super-dodgeball.character-flicker` default-on; package preloaded into `build-cycle/mods/` at build time; window picks it up via the launcher, headless needs `--mods-root build-cycle/mods`
-- **Native share**: ~60–77% of cycles run recompiled code on an unseeded run, the rest via the interpreter — bit-exact either way, informational only, never a gate
+- **Config**: `src/game.toml` carries the display name plus ten `[[mod_function_hook]]` sites and a `cycle_seed_file`; no `extra_func`, no `force_interp`, no discovery tuning needed for the stock ROM
+- **Mods**: `super-dodgeball.character-flicker` default-on; package preloaded into `build-cycle/mods/` at build time; window picks it up via the launcher, headless needs `--mods-root build-cycle/mods`. Reproduction vector for both fixes: `tas/vectors/sdb_idle.input`
+- **Native share**: ~60–77% of cycles run recompiled code, the rest via the interpreter — bit-exact either way, informational only, never a gate. `src/cycle_seeds.txt` roots the sprite emitter natively so the mod's hooks can exist there at all; total cycle count unchanged by it
 - **Verification**: 400-frame TAS byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25
 - **Venv**: `nesasm` 0.0.8 only (pip broken); system `python3` has Pillow + numpy
 - **MesenCE binary**: `external/mesence/Mesen` (pre-built, fetched by `setup.sh`)
@@ -1014,10 +1261,13 @@ from our ROM + `src/game.toml`, windowed (`./build_and_run.sh`; headless flags i
 The guest machine runs **stock** — no patches, and the one mod is presentation-only (§2). Schedulable
 input (`<frame> NAMES` absolute state, same bit map).
 
-- **Mods**: `super-dodgeball.character-flicker` is default-on and changes presentation only. It
-  never appears in `--frame-log`/`--screenshot` output (those capture the machine's native frame);
-  only `--present-out` and the window show it. Guest state is unchanged by it: same cycle count,
-  only `$02FD`/`$02FF` differ. See §2 for the mechanism and the verification procedure.
+- **Mods**: `super-dodgeball.character-flicker` is opt-in (off by default). It never appears in
+  `--frame-log`/`--screenshot` output (those capture the machine's native frame); only
+  `--present-out` and the window show it. The truncation fix (§2) is presentation only — same
+  cycle count, `$02FD`/`$02FF` the only differing bytes. The culling fix (§2.1) is **not**: it
+  makes the guest emit sprites it had dropped, so OAM differs (sprite slot 0 never does) and a
+  few per-object timers settle at a constant offset, while the picture (CIRAM) is identical on
+  899 of 910 frames.
 
 - Game, 400 TAS frames: reaches team-select, matching Mesen byte-exact
   (RAM/OAM/palette/CIRAM from boot, mirrors masked) — the §21 f≈44

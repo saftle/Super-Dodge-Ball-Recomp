@@ -1,0 +1,53 @@
+# Cycle seeds — recompiler discovery roots, one per ROM instruction the
+# cycle backend would otherwise run on its interpreter.
+#
+# Line format is `4k:<4K-bank>:<addr> [count]` (parse_seed, recompiler/src/
+# cyc_codegen.c). The count is informational. Lines are merged from a
+# `--miss-log` run; see docs/research.md section 2.1.
+#
+# Super Dodge Ball's per-object sprite emitter. $8040 sorts the display list
+# at $067C (count $067A) and calls $821E per entry; $821E reads the object's
+# 7-byte display record at $0618+7*index and branches on its flag byte ($4E):
+#
+#     $828A: LDA $4E / AND #$20 / BNE $8293   -> draw nothing
+#     $8290: JMP $8348                         -> draw normally
+#
+# Nothing walks statically to $8040 (it is reached through a dispatch path
+# discovery does not follow), so it and $821E ran on the cycle interpreter --
+# 37% of all cycles in a match. A mod hook site only exists in recompiled code
+# (hook_site_here(), cyc_codegen.c: `if (!s_hook_cfg || INTERP(e)) return
+# false`), so the character-flicker mod's hook on the emitter's flag load
+# ($8231) could never fire until this was compiled natively. That is the whole
+# reason for the file.
+#
+# Compiling an address that never executes is harmless (the recompiler decodes
+# the same constant ROM bytes the interpreter would), so seeds do not need to
+# be proven instruction starts -- but these three are measured entry points.
+#
+# Measured with:
+#   nes_game ROM --frames 910 --input tas/vectors/sdb_idle.input --miss-log seeds.txt
+4k:14:8040 728
+4k:14:821E 832
+
+# The display-list builder, $E32D in the fixed bank. The gameplay code calls
+# it once per object per frame (923 times in that run) and it decides whether
+# the object is appended to $067C at all:
+#
+#     $E34A: LDA $43 / AND #$70 / CMP #$20 / BEQ $E378
+#
+# i.e. an object whose state byte $43 has bits 4-6 equal to $20 is left out of
+# the list entirely, so $821E never sees it. $E378 is where that path lands,
+# which is where the mod re-adds the entry. Same reason as above: a hook site
+# needs recompiled code.
+4k:1E:E32D 923
+
+# The floating damage-number emitter, $966D in bank 3, hooked at its cursor
+# bump $96B9. Same story: reached only through un-walked dispatch, so it ran
+# interpreted and the hook could not exist there.
+4k:0D:966D 1
+4k:0D:96B9 1
+
+# The block-copy emitter, $A36C in bank 4, hooked per copied sprite at $A394.
+# Same story again: interpreted (355 hits in the measurement run), so the hook
+# needs the seed to exist.
+4k:12:A360 355

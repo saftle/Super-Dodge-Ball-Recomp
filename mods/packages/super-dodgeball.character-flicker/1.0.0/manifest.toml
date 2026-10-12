@@ -1,9 +1,11 @@
 # Preloaded mod package for Super Dodge Ball. Single-line values only: the
 # manifest parser is line-based (key = value, [[section]]), with # comments.
 #
-# The feature is default_enabled: the game's OAM builder has a hard 64-sprite
-# budget and stops emitting, so characters lose tiles on 79% of match frames.
-# See docs/research.md section 2.
+# The feature is default-disabled for now: it fixes real flicker, but the
+# culling half changes guest timing and the level-switch screen shows sprite
+# ghosts with it on (open issue, research.md section 2.1) -- so it stays
+# opt-in until a full playthrough is tested. Turn it on in the launcher's
+# Mods screen, or headless with --remove-character-flicker.
 #
 # This package is DATA ONLY -- a declaration of a feature whose implementation
 # is src/sdb_host_extras.c, compiled into nes_game and registered by the stable
@@ -15,7 +17,7 @@ id = "super-dodgeball.character-flicker"
 version = "1.0.0"
 name = "Remove Character Flicker"
 author = "Super Dodge Ball Recomp"
-description = "Characters flicker and lose their lower body: the game's sprite list stops at OAM's 64 slots, so the rest of a character is never emitted - an emulator's remove-sprite-limit cannot help, since those sprites never reach the PPU. This draws every sprite the game emits, and lifts the NES 8-per-scanline limit as well. Presentation only: the guest machine runs stock, so sprite-0 hit, the overflow flag, mapper IRQ and timing are unchanged."
+description = "Characters flicker three different ways, and none is the NES 8-sprites-per-scanline limit an emulator's remove-sprite-limit targets - this game throttles its own sprites, so those sprites never reach the PPU. (1) The OAM builder stops emitting once OAM's 64 slots fill, so a character loses its lower body. (2) The game builds a display list each frame and deliberately leaves one object off it, rotating which, so a whole character blinks out for 4 frames in 9. (3) The floating damage numbers and team-select position digits come from emitters with no cursor bump to hook, so they were never drawn. This draws every sprite the game emits (lifting the 8-per-scanline rule as a side effect) and overrides the culling. Game logic is unaffected - nothing reads sprite OAM back and sprite 0 never changes - but the culling fix makes the guest emit more sprites, so its cycle count and NMI phasing shift slightly."
 license = "PolyForm-Noncommercial-1.0.0"
 resolver = "declarative"
 save_compatibility = "shared"
@@ -30,7 +32,7 @@ id = "remove-character-flicker"
 name = "Remove character flicker"
 description = "Draw all OAM sprites host-side; no truncated or dropped sprites."
 group = "Display"
-default_enabled = true
+default_enabled = false
 
 # A [[plugin]] id names an ACTIVATION plugin registered with
 # nes_mod_register_activation_plugin(). The five [[mod_function_hook]] sites in

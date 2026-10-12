@@ -1,0 +1,46 @@
+# Super Dodge Ball (USA) — "idle into match" input schedule.
+#
+# Drives the stock game from the title screen through team-select and into a
+# match, then leaves the controller alone. With --ram-init zeros this run is
+# deterministic frame for frame, which is what makes it the reproduction
+# vector for the sprite-flicker work (docs/research.md section 2.1):
+#
+#   frames 865-868  object 3 (Enemy B) is emitted
+#   frames 869-872  the game's per-object flag suppresses it
+#   frames 873-877  emitted again
+#   ...             a 9-frame cycle, 4 frames off / 5 on, forever
+#
+# Format: one "<frame> <BUTTONS>" line per state change, absolute state
+# ("-" is release). `#` starts a comment.
+0 -
+11 START
+14 -
+21 START+RIGHT
+22 -
+24 B
+27 -
+30 A
+32 -
+44 A
+45 -
+224 DOWN
+242 -
+243 RIGHT
+246 -
+247 RIGHT
+251 -
+253 RIGHT
+260 A+B
+275 -
+305 B
+328 -
+395 RIGHT
+400 -
+410 A
+430 -
+440 A
+460 -
+470 -
+471 LEFT
+472 LEFT
+473 -

@@ -10,6 +10,12 @@
 [game]
 output_prefix = "Super_Dodge_Ball_(USA)"
 name = "Super Dodge Ball (USA)"
+# Discovery roots for the cycle recompiler. The stock ROM needs none for
+# correctness -- the interpreter is bit-exact -- but a mod hook site only
+# exists in recompiled code, and the sprite emitter the character-flicker mod
+# hooks is reached only through a path static discovery does not walk. See
+# src/cycle_seeds.txt and docs/research.md section 2.1.
+cycle_seed_file = "cycle_seeds.txt"
 
 # OAM sprite-emit sites, content-keyed so no ROM bytes live in the repo.
 #
@@ -21,10 +27,11 @@ name = "Super Dodge Ball (USA)"
 # dropped tiles are never computed, which is why no emulator sprite-limit
 # toggle helps. Measured: 79% of match frames truncate (docs/research.md 2).
 #
-# These five sites are the cursor bumps. The mod's hook runs before each one,
-# captures the sprite just written into a host-side list, and pins the cursor
-# so the bail never fires. Sites carry no `id`: they bind to plugins by
-# address (a shared id would fail cyc_hooks_validate).
+# The first five sites are the cursor bumps. The mod's hook runs before each
+# one, captures the sprite just written into a host-side list, and pins the
+# cursor so the bail never fires. Then three culling sites, the damage-number
+# bump, and the block-copy site (see below). Sites carry no `id`: they bind to
+# plugins by address (a shared id would fail cyc_hooks_validate).
 #
 # length + crc32 = CRC-32 of those bytes at the address, per nes_crc32()
 # (common/nes_cart.h) -- the standard CRC-32, same as zlib.crc32.
@@ -53,3 +60,72 @@ crc32 = 0x1DAFFEC3
 addr = 0xA330
 length = 10
 crc32 = 0x26C1DE0B
+
+# The second flicker, which is the game's own object culling rather than the
+# OAM budget. It has three gates, all measured (docs/research.md section 2.1).
+#
+# 1. $E378 (fixed bank) -- where a culled object's path lands in $E32D, the
+#    display-list builder. $E32D appends an object to $067C unless
+#
+#        $E34A: LDA $43 / AND #$70 / CMP #$20 / BEQ $E378
+#
+#    i.e. unless the object's state byte $43 has bits 4-6 equal to $20, in
+#    which case it never enters the list and the emitter never sees it. The
+#    mod re-adds the entry from this site.
+#
+# 2. $8231 -- one instruction after $821E loads an object's display record into
+#    $4E. Downstream,
+#
+#        $827A: BIT $4E            bit 6 -> extra path
+#        $8281: AND #$10           bit 4 -> $82DD
+#        $828A: AND #$20 / BNE $8293 (RTS)   bit 5 -> emit NOTHING
+#        $8290: JMP $8348                  clear -> emit normally
+#
+#    and the record's byte 0 is the same state byte the first gate read, so an
+#    object put back on the list still gets filtered here. The mod clears it.
+#
+# 3. $8200 -- the game's other cull, called from $816F when four or more list
+#    entries are stacked within $20 pixels: it shifts the list down over one
+#    entry (the rotating table at $8173 picks which) and decrements $067A.
+#    Returning nonzero from this site emulates that routine's RTS, which is
+#    exactly what the SNES port did with it (`RTS ; disable sprite flickering`).
+#
+# All three are needed: re-adding the entry without (2) still filters at emit
+# time, and (2) alone never sees the object at all.
+
+[[mod_function_hook]]
+addr = 0xE378
+length = 10
+crc32 = 0x58545D84
+
+[[mod_function_hook]]
+addr = 0x8200
+length = 10
+crc32 = 0x4CC63522
+
+[[mod_function_hook]]
+addr = 0x8231
+length = 10
+crc32 = 0xF7BD393C
+
+# The floating damage-number emitter ($966D, bank 3), hooked at its cursor bump.
+# When a player is hit a digit pair floats above him, written at $0200+cursor in
+# one go -- so the bump steps by 8, not 4, and this is the only emitter with that
+# shape. It was never hooked, so the numbers were never captured and the mod never
+# drew them.
+
+[[mod_function_hook]]
+addr = 0x96B9
+length = 10
+crc32 = 0x2455BC0C
+
+# The block-copy emitter ($A36C, bank 4), hooked per copied sprite at $A394.
+# It streams up to 8 sprites from a static table with an X register and no
+# per-sprite cursor bump, so no bump hook can see them: the team-select
+# position numbers were missing with the mod on. The hook reads the slot from
+# the CPU registers and shares the boundary/prefix/backstop handling.
+
+[[mod_function_hook]]
+addr = 0xA394
+length = 10
+crc32 = 0x21EC8CC4
