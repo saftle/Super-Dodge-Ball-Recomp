@@ -22,8 +22,19 @@ NESRecomp recompiles NES 6502 → native C via a two-part system:
 - **Cycle backend** (`external/nesrecomp/runner/cyc/`): Cycle-accurate console model (6502, PPU, APU, DMAs, mappers in `hw_*.c`) + host (`cyc_host.c`: input schedules, screenshots, frame-logs, TCP). Built per game via the project integration into `build-cycle/nes_game`.
 - **`src/game.toml`**: Recompiler config — display `name` (window title) plus discovery/seed keys when they exist. The stock ROM needs no function entries.
 - **`build-cycle/`**: Generated per-instruction C (gitignored, one revision dir per ROM/config) + `nes_game` runner. No game-specific hooks — raw ROM on accurate timing.
+- **`recomp-ui/`**: Shared recomp-ui launcher (pre-boot settings dashboard) + in-game menu, compiled into the windowed `nes_game`.
 
 Build: `./build_and_run.sh` (windowed) or pass host flags (`--frames`, `--input`, `--shot-every`) for headless scripted runs. Game config changes re-trigger codegen at configure time (each revision gets its own generated dir).
+
+### The launcher (recomp-ui)
+
+nesrecomp already integrates recomp-ui for the cycle host (`runner/cyc/project.cmake` auto-detects a checkout; the glue is `cyc_ui_launcher.c`/`cyc_ui_menu.c`/`cyc_ui_imgui.cpp`). **The work here is pointing it at our checkout, not writing a launcher.** Nothing game-specific: console identity, bindings, and the picture all come from nesrecomp's adapter.
+
+- Both `build_and_run.sh` and `setup.sh` pass `-DNESRECOMP_RECOMP_UI="$PWD/recomp-ui"`. This is required, not redundant: the framework's auto-detect looks in `${CMAKE_SOURCE_DIR}/recomp-ui`, and under our standalone configure `CMAKE_SOURCE_DIR` is the *nesrecomp* project dir, not ours.
+- `-DNESRECOMP_RECOMP_UI=OFF` builds the window without launcher or menu. `NESRECOMP_NO_LAUNCHER=1` skips the launcher at runtime (for debugging).
+- Windowed only. A headless run (`--frames` and friends) sets headless before `cyc_sdl_prelaunch()`, so the launcher is never reached — verified: recomp-ui ON and OFF builds emit byte-identical `--frame-log` output over the 400-frame TAS.
+- Settings, bindings and the launcher state live in `build-cycle/config.ini` beside the executable. The Menu shortcut (Escape by default) opens the in-game menu.
+- **Pin the submodule.** The launcher's C ABI is append-only and heavily churned; headers and sources must come from one revision. Bump deliberately and rebuild whole. See `NOTICE.md` for provenance.
 
 ### ROM Specifications
 - **ROM**: `roms/Super Dodge Ball (USA).nes` — iNES 2.0 format
@@ -106,6 +117,8 @@ Three options (setup.sh uses Option C by default):
 
 - `external/nesrecomp` is a git submodule — changes there need a separate `git commit`
 - `external/mesence` is a git submodule — the MesenCE emulator source, requires .NET 10 SDK + SDL2 dev
+- `recomp-ui` is a git submodule — never edit it in place, never commit in it. Build it from the pinned revision; do not mix headers across revisions (append-only ABI)
+- Adding recomp-ui needs no SDL of its own (nesrecomp provides it) but does pull in OpenGL + Threads at configure time
 - Generated C code (`generated/`) is gitignored — do not edit directly
 - `make clean && USE_GCC=true make -j$(nproc)` builds the entire MesenCE with UI
 - Use venv Python (`venv/bin/python3`) for nesasm work, system `python3` for Pillow/numpy scripts — never mix them up
@@ -167,12 +180,16 @@ After any `src/game.toml` change (display name, discovery, seeds):
 
 **Known baseline**: cycle 400 TAS frames → team-select, state byte-exact vs Mesen (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25.
 
+**The TAS gate is not currently trustworthy.** Super Dodge Ball is a random game, so a fixed input schedule does not reproduce the same run: RNG divergence between the cycle backend and Mesen puts the two sides on different paths, and a red `diff_tas.py` may be that rather than a real defect. Until pre-seeding exists (pin both sides to the same RNG state before frame 0), treat TAS diffs as advisory — investigate the first divergent frame, don't assume a regression. Blargg is unaffected and remains the real engine gate.
+
 ### Engine-change procedure (submodule bumps)
 
 Game checks can't isolate engine regressions, so engine changes get both gates:
 
 1. **Game gate**: TAS 400 + diff MATCH per above (must stay green).
 2. **Engine gate**: `python3 tools/blargg/run_blargg.py --tier cpu` — 25/25 (20 PASS + 5 screen-confirmed) required; any flip blocks. See `tools/blargg/README.md`.
+
+**Never run blargg without being asked.** It takes many minutes and it is *upstream's* gate, not this project's: blargg tests nesrecomp's CPU/PPU model against blargg's test ROMs and says nothing about Super Dodge Ball. Running it "to be safe", or as an automatic step of a submodule bump, is wasted time here — the owner runs it when they want to know the new engine still passes. Same for TAS: see the advisory note above. Ask before running either.
 
 ### Round-trip decompilation (ROM → Assembly → ROM)
 
@@ -297,6 +314,7 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 | `src/game.toml` | Recompiler config: display `name`, discovery/seed keys (stock ROM needs no function entries) |
 | `external/nesrecomp/` | NESRecomp submodule (recompiler + runners) — **pristine origin/master, tree must stay clean** |
 | `external/mesence/` | MesenCE emulator source/binary |
+| `recomp-ui/` | recomp-ui submodule (launcher + in-game menu) — **pinned, never floated**; MIT, own license |
 | `patches/` | RETIRED legacy patches, all in `archived/` (see `patches/README.md`) — no new patches, ever |
 | `tools/dis65.py` | Dependency-free 6502 disassembler for entry verification (ROM + addr + count + file offset) |
 | `tools/frame_gen/memwatch.lua` | MesenCE oracle probe: who-writes (with PC) for RAM addrs + optional NMI flag log (`WATCH`, `MAXF`, `START0/1`, `NMI_LOG`) |

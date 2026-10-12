@@ -6,3 +6,6 @@
 	path = external/mesence
 	url = https://github.com/nesdev-org/MesenCE
 	branch = master
+[submodule "recomp-ui"]
+	path = recomp-ui
+	url = https://github.com/RetroPortingToolKit/recomp-ui.git

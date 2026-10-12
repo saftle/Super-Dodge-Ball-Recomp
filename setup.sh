@@ -8,6 +8,7 @@ NESASM_BIN="${VENV_DIR}/bin/nesasm"
 MESENCE_DIR="${SCRIPT_DIR}/external/mesence"
 MESEN_BIN="${SCRIPT_DIR}/external/mesence/Mesen"
 FRAME_GEN_DIR="${SCRIPT_DIR}/tools/frame_gen"
+RECOMP_UI_DIR="${SCRIPT_DIR}/recomp-ui"
 
 echo "=== Super Dodgeball Recomp Setup ==="
 echo ""
@@ -41,25 +42,34 @@ else
 fi
 
 # ---- NESRecomp submodule (pristine upstream; cycle backend needs no patches) ----
+# Check out the revision this repo records, never origin/master. Floating the
+# pin here silently upgraded the engine 26 commits without anyone asking, and
+# left the working tree disagreeing with the recorded commit. Bump it
+# deliberately (and gate the bump) instead.
 if [ -d "${SCRIPT_DIR}/external/nesrecomp" ]; then
     echo ""
-    echo "Updating NESRecomp submodule..."
-    cd "${SCRIPT_DIR}/external/nesrecomp"
-    git fetch origin 2>&1
-    git checkout origin/master 2>&1
-    cd "${SCRIPT_DIR}"
+    echo "Updating NESRecomp submodule to the recorded revision..."
+    git -C "${SCRIPT_DIR}/external/nesrecomp" fetch origin 2>&1 | tail -1
+    git -C "${SCRIPT_DIR}" submodule update --init --recursive -- "${SCRIPT_DIR}/external/nesrecomp" 2>&1 | tail -1
 else
     echo ""
     echo "Initializing NESRecomp submodule..."
-    git submodule update --init --recursive -- "${SCRIPT_DIR}/external/nesrecomp" 2>&1
-    cd "${SCRIPT_DIR}/external/nesrecomp"
-    git fetch origin 2>&1
-    git checkout origin/master 2>&1
-    cd "${SCRIPT_DIR}"
+    git -C "${SCRIPT_DIR}" submodule update --init --recursive -- "${SCRIPT_DIR}/external/nesrecomp" 2>&1 | tail -1
 fi
+echo "nesrecomp: $(git -C "${SCRIPT_DIR}/external/nesrecomp" rev-parse --short HEAD 2>/dev/null || echo 'MISSING')"
 
 # (Legacy runner patches retired with the cycle switch; the submodule stays
 # pristine. The 002 S-latch guard is proposed upstream instead — see docs/plan.md.)
+
+# ---- recomp-ui submodule (launcher + in-game menu for the window) ----
+# Pinned like nesrecomp, not floated: the launcher's C ABI grows append-only and
+# its headers must match the sources compiled in, so never mix revisions.
+if [ ! -f "${RECOMP_UI_DIR}/recomp_ui.cmake" ]; then
+    echo ""
+    echo "Initializing recomp-ui submodule..."
+    git -C "${SCRIPT_DIR}" submodule update --init -- "${RECOMP_UI_DIR}" 2>&1
+fi
+echo "recomp-ui: $(git -C "${RECOMP_UI_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'MISSING — the build continues without the launcher')"
 
 # ---- MesenCE (build or use pre-built binary) ----
 mkdir -p "${MESENCE_DIR}"
@@ -119,6 +129,7 @@ cmake -S "${SCRIPT_DIR}/external/nesrecomp/runner/cyc/project" -B "${SCRIPT_DIR}
   -DNESRECOMP_ROM="${SCRIPT_DIR}/roms/Super Dodge Ball (USA).nes" \
   -DNESRECOMP_GAME_CONFIG="${SCRIPT_DIR}/src/game.toml" \
   -DNESRECOMP_HEADLESS=OFF \
+  -DNESRECOMP_RECOMP_UI="${RECOMP_UI_DIR}" \
   -DSDL2_DIR=/usr/lib/x86_64-linux-gnu/cmake/SDL2 2>&1
 cmake --build "${SCRIPT_DIR}/build-cycle" -j$(nproc) 2>&1
 

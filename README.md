@@ -16,7 +16,7 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 # Full setup (venv, submodules, MesenCE, cycle backend, blargg test ROMs)
 ./setup.sh
 
-# Or build and run in one go (window opens, play it)
+# Or build and run in one go (window opens on the launcher — press Play)
 ./build_and_run.sh
 
 # Headless scripted run (input schedule + last-frame screenshot)
@@ -26,6 +26,28 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 ./build-cycle/nes_game "rom.nes" --frames 400 --input tas/cyc400.input \
   --shot-every 10 --screenshot shots/shot.png --mem-frame 399 --mem-out mem.txt
 ```
+
+## The launcher
+
+The window opens on **[recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui)'s** pre-boot
+launcher: a settings dashboard where you set display, audio and per-player bindings before the
+game starts. Press **Play** to boot the ROM, or **Escape** to skip straight in.
+
+Once the game is running, **Escape** opens the in-game menu — display and audio, save states,
+and quit. (The same key does both, because the launcher only exists before boot.)
+
+Settings and bindings persist to `build-cycle/config.ini` beside the executable. Keybinds are
+SDL key names; defaults are P1 = `Z`/`X`/`\`/`Return` + arrows, gamepad = `a`/`x`/`back`/`start`
++ d-pad. Delete `config.ini` to restore defaults.
+
+The launcher is built from the pinned `recomp-ui/` submodule — nothing game-specific lives in
+this repo. To build the window without it (launcher and in-game menu both off):
+
+```bash
+NESRECOMP_RECOMP_UI=OFF ./build_and_run.sh
+```
+
+See `NOTICE.md` for attribution.
 
 ## Getting MesenCE (for frame comparison)
 

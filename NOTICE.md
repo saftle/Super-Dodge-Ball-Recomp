@@ -18,6 +18,18 @@ carries its own license and third-party attribution. `external/mesence`
 (MesenCE oracle, submodule pointer only — binary/data fetched at setup time,
 never committed) likewise carries its own license; see that repository.
 
+**recomp-ui**, the launcher and in-game menu for the windowed build
+
+- Copyright 2026 Matthew Stanley and contributors
+- <https://github.com/RetroPortingToolKit/recomp-ui>
+- Licensed under the MIT License
+- Pinned as a submodule at `recomp-ui/` (commit `41c88ff`); its own LICENSE and
+  third-party attribution (Dear ImGui, stb_*, tinyfiledialogs — each retaining
+  its own license) travel with that checkout
+
+Built from source into `nes_game`. There is no prebuilt recomp-ui binary and
+none is redistributed here.
+
 **SDL2** is a system dependency resolved at configure time
 (`-DSDL2_DIR` pointing at the system SDL2 CMake config for the cycle build)
 and is not shipped here. SDL2 itself is zlib-licensed,
