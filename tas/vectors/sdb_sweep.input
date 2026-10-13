@@ -1,0 +1,158 @@
+# Super Dodge Ball (USA) — "pan" input schedule: idle into a match, then
+# alternate LEFT / RIGHT so the camera sweeps back and forth.
+#
+# WHY THIS EXISTS. Every other vector leaves the camera still, and a still
+# camera hides the class of bug that matters most for the widescreen margins.
+#
+# The game rebuilds its sprite list over two frames and then leaves OAM alone
+# for three to six more (measured: the cursor-bump hooks fire on 66 of 200
+# match frames). So a margin sprite's screen column is only re-derived when that
+# list is rebuilt. If the camera moves in between, the held sprite is at a
+# column computed for the OLD camera while the background slides under it. On a
+# still camera the two never separate, which is why sdb_idle looks correct and
+# a pan does not.
+#
+# This vector is the reproduction for that, and for the continuity property:
+# a player walking into the margin should keep walking outward in even steps,
+# and come back the way it went. Compare the margin column frame to frame with
+#
+#     SDB_TRACE_CAPTURES=<from>-<to> ... --input tas/vectors/sdb_pan.input
+#
+# which prints the list the compositor drew, one line per frame.
+#
+# The pan itself starts at frame 500, well inside the match that idle enters at
+# ~445, and each direction is held 24 frames: the game's scroll steps 6-7 px per
+# frame (docs/research.md 24), so 24 frames is ~150 px, more than half the
+# 256-column viewport. That is enough to carry an object clean across the screen
+# edge and back, which is the only way the margin is exercised at all.
+#
+# Format: one "<frame> <BUTTONS>" line per state change, absolute state
+# ("-" is release). `#` starts a comment.
+0 -
+11 START
+14 -
+21 START+RIGHT
+22 -
+24 B
+27 -
+30 A
+32 -
+44 A
+45 -
+224 DOWN
+242 -
+243 RIGHT
+246 -
+247 RIGHT
+251 -
+253 RIGHT
+260 A+B
+275 -
+305 B
+328 -
+395 RIGHT
+400 -
+410 A
+430 -
+440 A
+460 -
+470 -
+471 LEFT
+472 LEFT
+473 -
+
+# --- the match is live; sweep the camera the full width, both ways ---
+#
+# sdb_pan alternates direction every 24 frames, which is ~150 px of travel:
+# enough to carry a player across the screen edge and back, but never enough
+# to carry one from one edge of the 512-pixel world to the other. The artifacts
+# this vector exists to catch are boundary artifacts -- a sprite clipped a
+# column short, one part landing a pixel from the next, a stale part held in the
+# overscan band -- and they only show once a character has walked the whole
+# distance rather than stepped across the boundary once.
+#
+# So: 72-frame holds, alternating. That is ~450 px of travel per direction at
+# the 6-7 px per frame the game scrolls (docs/research.md 24), which is the
+# width of the world. Directions alternate so every object crosses both edges
+# on the way in and on the way out, which is the only way a one-sided artifact
+# cannot hide.
+#
+# Format: one "<frame> <BUTTONS>" line per state change, absolute state
+# ("-" is release). `#` starts a comment.
+
+500 LEFT
+572 -
+572 RIGHT
+644 -
+644 LEFT
+716 -
+716 RIGHT
+788 -
+788 LEFT
+860 -
+860 RIGHT
+932 -
+932 LEFT
+1004 -
+1004 RIGHT
+1076 -
+1076 LEFT
+1148 -
+1148 RIGHT
+1220 -
+1220 LEFT
+1292 -
+1292 RIGHT
+1364 -
+1364 LEFT
+1436 -
+1436 RIGHT
+1508 -
+1508 LEFT
+1580 -
+1580 RIGHT
+1652 -
+1652 LEFT
+1724 -
+1724 RIGHT
+1796 -
+1796 LEFT
+1868 -
+1868 RIGHT
+1940 -
+1940 LEFT
+2012 -
+2012 RIGHT
+2084 -
+2084 LEFT
+2156 -
+2156 RIGHT
+2228 -
+2228 LEFT
+2300 -
+2300 RIGHT
+2372 -
+2372 LEFT
+2444 -
+2444 RIGHT
+2516 -
+2516 LEFT
+2588 -
+2588 RIGHT
+2660 -
+2660 LEFT
+2732 -
+2732 RIGHT
+2804 -
+2804 LEFT
+2876 -
+2876 RIGHT
+2948 -
+2948 LEFT
+3020 -
+3020 RIGHT
+3092 -
+3092 LEFT
+3164 -
+3164 RIGHT
+3236 -

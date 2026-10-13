@@ -32,6 +32,7 @@ movie pages rather than re-hosting.
 |---|---|
 | `bk2_to_tas.py` | `.bk2` (inner zip) → canonical `tas.json` |
 | `fm2_to_tas.py` | `.fm2` (FCEUX text/binary logs, RLDUTSBA) → canonical `tas.json` |
+| `input_to_tas.py` | the project's own `tas/vectors/*.input` → canonical `tas.json` |
 | `mesen_tas.lua` | MesenCE player + full capture (input in `inputPolled`) |
 | `run_tas.py` | Runs both sides into `tas/runs/<name>/`, writes `run.json` |
 | `diff_tas.py` | First-divergence report (liveness → state → images) |
@@ -59,6 +60,66 @@ python3 tools/tas/diff_tas.py tas/runs/r400
 # --no-build reuses the existing cycle binary (default reconfigures +
 # rebuilds build-cycle/ when the ROM or src/game.toml are newer than it)
 ```
+
+### Replaying our own vectors
+
+`input_to_tas.py` exists because the oracle could only replay speedrun movies,
+which is backwards: the `tas/vectors/*.input` files are the runs we most want an
+oracle for. It expands a state-change vector into the flat per-frame mask array
+`mesen_tas.lua` wants, holding each state to the next line and padding the tail.
+
+```bash
+python3 tools/tas/input_to_tas.py tas/vectors/sdb_bar.input \
+    --out tas/vectors/sdb_bar.tas.json --frames 700
+python3 tools/tas/run_tas.py --tas tas/vectors/sdb_bar.tas.json \
+    --frames 700 --out tas/runs/bar700
+```
+
+Verified against `tas/vectors/sdb_bar.input` on **0 differing frames of effective
+input out of 1200**. The two schedules do not read identically —
+`run_tas.py`'s `emit_schedule` drops no-op steps such as a repeated `472 LEFT`
+immediately after `471 LEFT` — which is why the check compares the expanded
+per-frame input rather than the text.
+
+This is what research.md §27 needs, to attribute the pan judder to either the game
+or this engine; `mesen_tas.lua` already logs scroll and OAM per frame in
+`mesen_state.jsonl`.
+
+### Recorded playthroughs, and the three-way vocabulary
+
+There are three input formats in this repo and they are easy to confuse:
+
+| thing | written by | replayed with | used for |
+|---|---|---|---|
+| `.input` vector | `--record-input`, or hand-written | `nes_game --input FILE` | headless runs, and `--virtual-pad` in a **window** |
+| `.tas.json` | `bk2_to_tas.py` / `fm2_to_tas.py` / `input_to_tas.py` | `run_tas.py` (both hosts) | the MesenCE oracle differential |
+| `--virtual-pad` file | SDL controller names, one per change | windowed `nes_game --virtual-pad FILE` | replaying a recorded vector **in a window** |
+
+**Why the third one exists.** A recorded vector replays faithfully *headless* and
+*unfaithfully* in a window, or rather the other way round: the window and the
+headless host do not run the same guest state (research §26 — frames 0-3 match,
+frame 4 diverges), so anything about the presented picture must be reproduced in
+a window. `--virtual-pad` drives the window's real input path from a schedule, and
+two windowed runs of one schedule are byte-identical, so a played session is
+reproducible that way.
+
+To convert, map the NES names to SDL's controller names (the ones
+`SDL_GameControllerGetButtonFromString` accepts — `a`, `b`, `x`, `back`, `start`,
+`dpup`, `dpdown`, `dpleft`, `dpright`; note it is `dpright`, **not** `right`):
+
+```bash
+sed -e 's/\bA\b/a/g' -e 's/\bB\b/x/g' -e 's/\bSELECT\b/back/g' \
+    -e 's/\bSTART\b/start/g' -e 's/\bUP\b/dpup/g' -e 's/\bDOWN\b/dpdown/g' \
+    -e 's/\bLEFT\b/dpleft/g' -e 's/\bRIGHT\b/dpright/g' \
+    tas/vectors/sdb_bar.input > tmp/bar.vpad
+```
+
+**`Player1Source` must be 2 for this.** Player 1 is the keyboard and player 2 the
+controller, so a `--virtual-pad` replay with `Player1Source = 1` sends every
+press to a controller nobody is holding and the guest sits at the title screen —
+which looks exactly like "the feature does nothing". Check the `sdbc` camera
+trace: a real match shows `cam=128`-ish by frame 600 and a stuck run shows
+`cam=0`.
 
 ### Watching instead of diffing
 

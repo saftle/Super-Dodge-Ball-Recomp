@@ -1,12 +1,17 @@
 # Preloaded mod package for Super Dodge Ball. Single-line values only: the
 # manifest parser is line-based (key = value, [[section]]), with # comments.
 #
-# Two INDEPENDENT features, both default-disabled:
-#   widescreen  present 16:9 / 21:9 / 32:9 instead of the stock 256x240,
-#               with the extra columns showing court the NES could not show.
-#   overscan    drop the 8 blank columns at the left that the game itself hides.
-# They combine, and with overscan on the width is recomputed from the cropped
-# height so the ratio asked for is the ratio delivered.
+# Two features, both default-disabled:
+#   widescreen  present 16:9 / 21:9 / 32:9 instead of the stock 256x240, with
+#               the extra columns showing the court AND the players the NES
+#               could not display. Not a toggle: a widescreen margin with no
+#               sprites in it is not widescreen, it is the same frame with black
+#               columns glued on. Use `stock` for background-only margins.
+#   overscan    reveal the 8 columns the PPU hides at the left. Those columns
+#               hold sprites too -- the game writes them to OAM and the hardware
+#               declines to paint them -- so with widescreen on they are drawn
+#               like the rest of the margin.
+# They combine.
 #
 # This package is DATA ONLY -- a declaration of features whose implementation is
 # src/sdb_host_extras.c, compiled into nes_game and registered by the stable ids

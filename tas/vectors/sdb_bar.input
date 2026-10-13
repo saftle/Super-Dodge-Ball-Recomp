@@ -1,0 +1,94 @@
+# Super Dodge Ball (USA) — "pan" input schedule: idle into a match, then
+# alternate LEFT / RIGHT so the camera sweeps back and forth.
+#
+# WHY THIS EXISTS. Every other vector leaves the camera still, and a still
+# camera hides the class of bug that matters most for the widescreen margins.
+#
+# The game rebuilds its sprite list over two frames and then leaves OAM alone
+# for three to six more (measured: the cursor-bump hooks fire on 66 of 200
+# match frames). So a margin sprite's screen column is only re-derived when that
+# list is rebuilt. If the camera moves in between, the held sprite is at a
+# column computed for the OLD camera while the background slides under it. On a
+# still camera the two never separate, which is why sdb_idle looks correct and
+# a pan does not.
+#
+# This vector is the reproduction for that, and for the continuity property:
+# a player walking into the margin should keep walking outward in even steps,
+# and come back the way it went. Compare the margin column frame to frame with
+#
+#     SDB_TRACE_CAPTURES=<from>-<to> ... --input tas/vectors/sdb_pan.input
+#
+# which prints the list the compositor drew, one line per frame.
+#
+# The pan itself starts at frame 500, well inside the match that idle enters at
+# ~445, and each direction is held 24 frames: the game's scroll steps 6-7 px per
+# frame (docs/research.md 24), so 24 frames is ~150 px, more than half the
+# 256-column viewport. That is enough to carry an object clean across the screen
+# edge and back, which is the only way the margin is exercised at all.
+#
+# Format: one "<frame> <BUTTONS>" line per state change, absolute state
+# ("-" is release). `#` starts a comment.
+0 -
+11 START
+14 -
+21 START+RIGHT
+22 -
+24 B
+27 -
+30 A
+32 -
+44 A
+45 -
+224 DOWN
+242 -
+243 RIGHT
+246 -
+247 RIGHT
+251 -
+253 RIGHT
+260 A+B
+275 -
+305 B
+328 -
+395 RIGHT
+400 -
+410 A
+430 -
+440 A
+460 -
+470 -
+471 LEFT
+472 LEFT
+473 -
+# --- the repro, with time to pan between turns ---
+#
+# TIMING, all measured on this ROM rather than guessed:
+#
+#   412  the court appears (camera 128 shows up; the display records start
+#        populating at 421)
+#   594  the input window opens. Direction presses before this are silently
+#        dropped -- pulsing LEFT from frame 380 leaves the camera at 128 until
+#        594 and it then steps 128, 121, 115, 108, 102, 95, 89 ...
+#   617  a single left tap starts a run to the left.
+#
+# THE GAPS ARE THE POINT. Left then straight to right does not reproduce the
+# artifact: the camera has barely moved by the time the second tap lands, so the
+# court never pans the full distance and the margin never gets swept. Each turn
+# is therefore given 150 frames -- at the ~1 px per frame the game scrolls, that
+# is most of the court's 512-pixel world -- so the background and every margin
+# sprite travel all the way before the next turn.
+#
+# The four downs come last so the artifact is isolated on an open stretch of
+# court rather than behind a player.
+617 LEFT
+624 -
+767 RIGHT
+774 -
+917 DOWN
+925 -
+953 DOWN
+961 -
+989 DOWN
+997 -
+1025 DOWN
+1033 -

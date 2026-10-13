@@ -118,15 +118,179 @@
 
 typedef struct { uint8_t y, tile, attr, x; } SdbSprite;
 
+/* ------------------------------------------------------------------ *
+ * 1b. Margin sprites: the 16-bit positions the game computes and throws away
+ * ------------------------------------------------------------------ */
+
+/* $8483 is one instruction after the emitter's accumulator loop
+ *
+ *     $8470: LDA $04,X / CLC / ADC $0A,X / STA $04,X      (twice: X and Y)
+ *
+ * has folded the object's camera-relative X ($0A/$0B) and Y ($0C/$0D) into the
+ * per-part position ($04/$05, $06/$07), and before the game's own cull:
+ *
+ *     $8488: LDA $04 / CMP #$04 / BCC $849A     X < 4         -> hide
+ *     $848E: LDA $06 / CMP #$04 / BCC $849A     Y < 4         -> hide
+ *     $8494: LDA $05 / ORA $07 / BEQ $84A1      high byte set  -> hide
+ *     $849A: LDA #$F8 / STA $0200,X             hide (Y = $F8)
+ *     $84A1: LDA $04 / SEC / SBC #$04 / STA $0203,X   OAM X = X16 - 4
+ *     $84A9: LDA $06 / CLC / ADC #$04 / EOR #$FF / SEC / SBC #$10
+ *           STA $0200,X                                 OAM Y = $EB - Y16
+ *
+ * Both measured against OAM on the current binary: a sprite at X16 = 208
+ * lands at OAM X = $CC and one at Y16 = 82 at OAM Y = $99, which is what the
+ * two lines above compute.
+ *
+ * This is why the widescreen margins can hold sprites at all. The game places
+ * every sprite in a 16-bit SCREEN coordinate and then hides anything outside
+ * [4, 255] by writing Y = $F8 into the OAM slot it would have used -- so the
+ * tile, its flips and its palette are all computed, and only the final byte
+ * truncation loses it. OAM X cannot express a column outside the viewport; the
+ * accumulator can. Capturing here therefore reads the game's OWN placement
+ * rather than inferring one, which is the same authority rule the rest of this
+ * mod follows.
+ *
+ * $0617 is untouched at this site (the culled path branches to $84C1, past the
+ * cursor bump at $84B6), so this never perturbs the cursor pin above, and it
+ * fires for sprites the game emitted -- visible or not -- without changing
+ * which of them reach OAM. */
+typedef struct {
+    int16_t dx;         /* part column RELATIVE to its object's record anchor */
+    int16_t y;          /* screen row of the sprite's FIRST line, from $06/$07 */
+    uint8_t tile;
+    uint8_t attr;
+} SdbMargin;
+
+/* The two emitter sites, which cull identically but store their tile and
+ * attribute differently. See SdbMargin. */
+#define SDB_MARGIN_STRIP 0x8483u   /* the per-object strip walk, from $8348 */
+#define SDB_MARGIN_SOLO  0x8302u   /* the single-sprite emitters, from $82B9/$82DD/$8294 */
+
+/* The game's Y accumulator to a screen row: first line = $EC - Y16. See
+ * sdb_margin_capture. */
+#define SDB_MARGIN_Y0 236
+
+/* The camera the emitter subtracts ($821E: SEC / SBC $C3 / SBC $C4). */
+#define SDB_CAM_LO 0x00C3u
+#define SDB_CAM_HI 0x00C4u
+
+/* The eight columns the PPU's PPUMASK bit 1 hides, declared here rather than
+ * with the rest of the widescreen state because sdb_margin_capture needs it:
+ * it is the width of the hardware's own left clip, which loses sprites just as
+ * surely as the game's cull and is half of what this feature recovers. */
+#define SDB_WS_CLIP 8
+static int s_ws_reveal;         /* overscan: the clip is being revealed */
+
+/* The frame counter and capture-trace range live here (rather than with the
+ * flicker state below) because the object-index callback above needs them. */
+static long s_frame;                     /* frame counter, for the trace */
+static long s_cap_from = -1, s_cap_to;   /* SDB_TRACE_CAPTURES=<from>-<to> */
+static int s_ws_aspect = NES_VIDEO_STOCK;  /* moved up: sdb_frame_begin's trace reads it */
+
+/* Trace counters. With per-object slots there is no single list to measure, so
+ * these are per-frame tallies and the SDB_TRACE=1 line reports the totals. */
+static long s_margin_drawn;         /* sprites actually painted */
+static long s_margin_lost;          /* captures dropped on the per-object limit */
+static long s_margin_off_edge;      /* sprites the game culled */
+static long s_margin_frames;        /* frames the trace counted */
+static int  s_margin_on;            /* feature active */
+static int  s_margin_captured;      /* a capture fired this frame */
+static int  s_margin_run;           /* consecutive frames with captures */
+static int  s_margin_count;         /* sprites painted this frame (trace only) */
+static int  s_margin_peak;          /* most sprites painted in one frame */
+
+/* Keyed by OBJECT, not by list. The object index comes from the display record
+ * pointer $821E leaves in $61/$66 (see sdb_margin_object), so a capture always
+ * knows which object it belongs to and nothing has to be reassembled.
+ *
+ * One slot per record ($0618 + 7*index, thirteen of them) holding that object's
+ * off-screen sprite parts. A character is eight sprites, so eight slots per
+ * object is the exact bound; the single-sprite emitters put one there.
+ *
+ * WHAT A SLOT HOLDS is the part's column RELATIVE to its object's record anchor,
+ * not an absolute one, and that is the whole reason this feature does not blink.
+ * `$821E` computes `$0A/$0B` as (record X - camera) and `$8470` adds it to the
+ * running position, so `part_column = record_X + part_offset` in world terms --
+ * the camera cancels. Storing the absolute screen column instead means it goes
+ * stale the moment the camera moves, and the earlier TTL on "when was this last
+ * emitted" was a patch over the resulting gap rather than a fix: the game's
+ * display list (`$067C`) does not even CONTAIN most off-screen objects. Measured
+ * over frames 600-700 of the pan vector, `$8231` fires for records 0,1,3,5,6,7,
+ * 9,10,11 on 14-16 of every 100 frames but for record 2 only 4 times and record
+ * 8 ONCE -- and 2 and 8 are precisely the two objects sitting in the margins. So
+ * any lifetime measured in emissions blinks those two out and only those two.
+ *
+ * Presentation therefore re-reads the RECORD, which the game refreshes every
+ * frame for every object whether or not it is on the display list (verified:
+ * records 0,1,4,10 all walk across the run while 2, 8 and 9 stand still, and
+ * they are all being written), and recomputes the part's world column from it.
+ * Liveness is the record itself: byte 0 non-zero means the slot is in use, and
+ * the current column being outside the viewport means the machine is not drawing
+ * it. Nothing expires, so nothing blinks, and there is no TTL to tune.
+ *
+ * `id0`/`id1` are the record's first two bytes as they were at capture. Records
+ * are recycled as a match goes on, and a reused slot still holds the OLD
+ * object's tiles; if the identity no longer matches, the slot is stale and is
+ * not drawn until the game emits the object again and refreshes it. */
+#define SDB_MARGIN_OBJECTS 13
+#define SDB_MARGIN_PARTS 24
+
+typedef struct {
+    SdbMargin parts[SDB_MARGIN_PARTS];
+    int n;
+    long seen;         /* frame the parts were last written (trace/debug) */
+    uint8_t id0, id1;  /* record bytes 0-1 at capture: the object identity */
+    long build;        /* the sprite list these parts belong to */
+} SdbMarginObj;
+
+static SdbMarginObj s_margin_obj[SDB_MARGIN_OBJECTS + 1];  /* +1 = discard bin */
+static int s_margin_cur_obj = -1;   /* the object $821E is emitting right now */
+static uint16_t s_margin_rec;       /* its $0618-relative display record */
+static long s_margin_build;         /* bumped when $0617 restarts a list */
+static uint8_t s_margin_prev_cursor;
+
+/* $8231, one instruction after $821E stores this object's display record into
+ * $4E. $61/$66 still holds the record pointer, so `(ptr - $0618) / 7` is the
+ * object index and the captures that follow belong to that object.
+ *
+ * This is a SECOND plugin on the site the flicker mod already uses, and it
+ * touches nothing: no RAM is written, so enabling it with the margin sprites on
+ * and the flicker mod off is still byte-for-byte stock. The flicker mod's own
+ * callback at the same address clears the hide bit, which IS a guest change, so
+ * it cannot be reused here. */
+static int sdb_margin_object(uint16_t addr)
+{
+    (void)addr;
+    uint16_t rec = (uint16_t)(cyc_mod_peek(0x61) | (cyc_mod_peek(0x62) << 8));
+    int idx = (rec >= SDB_REC_BASE && (rec - SDB_REC_BASE) % SDB_REC_STRIDE == 0)
+              ? (rec - SDB_REC_BASE) / SDB_REC_STRIDE : -1;
+    /* Not one of the thirteen records: file the captures that follow in the bin
+     * past the end, so a stray pointer cannot be charged to a real object. */
+    s_margin_cur_obj = (idx >= 0 && idx < SDB_MARGIN_OBJECTS) ? idx : SDB_MARGIN_OBJECTS;
+    /* The record itself, kept because the captures run later and $61/$66 will
+     * have moved on: its X is the anchor every part's offset is measured from,
+     * and it is also what presentation re-reads. */
+    s_margin_rec = rec;
+    /* New sprite list? $0617 only ever moves forwards while a list is being
+     * emitted -- including past sprites the game culled, because other objects
+     * in the same list do bump it -- and it starts again near zero for the next
+     * one. Measured over frames 618-645 of the pan vector it walks 04, 24, 40,
+     * 60, 80, 84, 94, C8, E8, 00 and then restarts at 04, never backwards in
+     * between. A backwards step is therefore a build boundary, and it is the
+     * only boundary this feature can see. */
+    uint8_t cur = cyc_mod_peek(SDB_CURSOR);
+    if (cur < s_margin_prev_cursor) s_margin_build++;
+    s_margin_prev_cursor = cur;
+    return 0;
+}
+
 static SdbSprite s_build[SDB_MAX_SPRITES];   /* list being assembled */
 static int s_build_count;
 static int s_build_peak;              /* largest s_build_count seen this frame */
 static SdbSprite s_done[SDB_MAX_SPRITES];    /* last list that finished */
 static int s_done_count;
 static int s_overflow;
-static long s_frame;                   /* frame counter, for the trace */
 static int s_trace;                    /* SDB_TRACE=1: per-frame trace */
-static long s_cap_from = -1, s_cap_to; /* SDB_TRACE_CAPTURES=<from>-<to> */
 static uint8_t s_prev_cursor;          /* previous capture's cursor value */
 static int s_list_lost;                /* lists that hit the backstop */
 static int s_saw_reset;              /* a capture saw the cursor at slot 1 */
@@ -341,6 +505,173 @@ static int sdb_copy(uint16_t addr)
     return 0;   /* never take over the routine: the original loop runs */
 }
 
+/* One sprite the game computed and then culled for being off-screen, kept with
+ * the 16-bit column it would have had. Runs at $8483 or $8302 (see SdbMargin).
+ *
+ * Returns 0 always: the site's own instruction and the cull that follows it both
+ * run, and $0617 is not touched (the culled path branches past the cursor bump
+ * at $84B6), so the guest's OAM is exactly what it would have been without us.
+ * That is what keeps this feature presentation-only. */
+static int sdb_margin_capture(uint16_t addr)
+{
+    uint8_t cur = cyc_mod_peek(SDB_CURSOR);
+
+    /* For the strip walk, the tile and attribute the emitter already wrote into
+     * the slot it was about to use: $8419-$8427 stores them at $0200+cursor+1 and
+     * +2 before the position test runs. $0200+cursor (the Y byte) is stale at
+     * this point -- the game has not written it yet, which is exactly why the
+     * cull writes $F8 there -- so Y is taken from the accumulator instead. */
+    uint16_t at = (uint16_t)(SDB_OAM_BASE + cur);
+    int16_t x = (int16_t)(cyc_mod_peek(0x04) | (cyc_mod_peek(0x05) << 8));
+    int16_t y = (int16_t)(cyc_mod_peek(0x06) | (cyc_mod_peek(0x07) << 8));
+
+    /* Which of the two emitters this is. They place a sprite the same way (the
+     * same 16-bit accumulators, the same [4,255] cull) but take the tile and
+     * attribute from different places: the strip walk at $8348 has already
+     * written them into the OAM slot it is about to use ($8419-$8427), while
+     * the single-sprite emitters landing at $8302 still hold them in zero page
+     * and only store them after the cull passes ($8326/$832B). Reading
+     * $0200+cur unconditionally would get the strip walk's bytes and the wrong
+     * bytes for the other three. */
+    int strip = addr == SDB_MARGIN_STRIP;
+
+    /* Two different things lose a sprite, and only one of them is the game's.
+     *
+     * The GAME's cull is `X in [4,255] AND Y in [4,255]` ($8488/$848E/$8494):
+     * anything outside it never reaches OAM.
+     *
+     * The PPU's own left clip is the other one, and it is easy to miss because
+     * the game does not cull those sprites -- it writes them to OAM and the
+     * hardware declines to draw them. PPUMASK bit 1 is clear for this game, so
+     * SCREEN columns 0-7 are never painted, and OAM X is the sprite's column
+     * (`$84A1: SEC / SBC #$04`), which puts that band at accumulator X = 4..11.
+     * With overscan revealing those eight columns from the nametable, a sprite
+     * standing in them is lost exactly as surely as one the game culled, and
+     * nothing draws it: the machine skips it and the old filter skipped it too.
+     * That is a player sliced in half at the screen edge while the camera pans,
+     * and getting the sense of this test backwards -- dropping the band instead
+     * of keeping it -- reproduces it precisely.
+     *
+     * A sprite culled VERTICALLY is never captured, because there is no vertical
+     * margin to put it in -- the camera scrolls horizontally only, so an
+     * off-screen row is off-screen for good. */
+    int lost = x < 4 || x > 255 || (s_ws_reveal && x < 4 + SDB_WS_CLIP);
+    if (!lost) return 0;
+    if (y < 4 || y > 255) return 0;
+
+    /* NO LIST-BOUNDARY DETECTION. It is not available, and three attempts are
+     * recorded here because each fails in a way that produces a plausible
+     * picture.
+     *
+     * The natural signal is $0617, and it does not work. The game resets the
+     * cursor to slot 1 to start a list, but it does that at the top of the walk
+     * and then emits the VISIBLE sprites first; by the time a culled sprite is
+     * reached the cursor is already part-way up the list. So a site that only
+     * ever sees culled sprites never observes the reset. Measured with the cursor
+     * tracked on every visit: it rises monotonically for the entire run and never
+     * once goes backwards, and the list grows 147 -> 331 -> ... with no reset at
+     * all. Tracking it only on captures that pass the filter instead compares a
+     * current cursor against a stale one and fires on nothing in particular.
+     *
+     * Timing is no better. The emission is interleaved with the rest of the
+     * frame's work, so captures arrive in bursts of a few sprites separated by
+     * one or two empty frames, all belonging to ONE list -- measured 12, 20, 35,
+     * then 16, 29, then 24, 40 across a single pan. Treating a gap as a boundary
+     * splits each list into fragments (12, 16, 24) and objects drop out of the
+     * margins as the camera sweeps, which is the "player appears, vanishes,
+     * reappears" symptom.
+     *
+     * What IS available is identity. $8231 -- one instruction after $821E loads
+     * this object's 7-byte display record into $4E -- still has the record pointer
+     * in $61/$66, and that is the object index. So the margin list is keyed by
+     * OBJECT rather than reassembled from a stream: each capture appends to the
+     * current object's slot, and presentation draws every slot. No boundaries to
+     * detect, no builds to bridge, and an object cannot vanish because the list it
+     * belonged to was cut in the wrong place. See sdb_margin_object(). */
+
+    /* File it under the object $821E is emitting. A character is eight sprites
+     * so the slot is exactly sized; anything past that is a runaway and is
+     * dropped with a warning rather than overrunning. */
+    if (s_margin_cur_obj < 0 || s_margin_cur_obj >= SDB_MARGIN_OBJECTS)
+        return 0;                    /* no identity: discard, never guess */
+    SdbMarginObj *o = &s_margin_obj[s_margin_cur_obj];
+    /* A new sprite LIST: the object's part set is rebuilt from scratch.
+     *
+     * Not a new VISIT. `$8231` fires once per object per visit, but one visit
+     * does not necessarily emit the whole object -- on the pan vector, object 9
+     * is visited at frame 624 and emits four parts, again at 626 and emits seven,
+     * again at 632 and emits two, and the whole character is eight. Resetting on
+     * the visit therefore published a FRAGMENT: frames 631-632 carried the head
+     * with no body, which is the "head but no body" at the screen edge, and it is
+     * the machine's own body in OAM one camera step away that the fragment then
+     * failed to meet. Accumulating across the visits of one list, and starting
+     * again when $0617 restarts, is what makes the character whole. */
+    if (o->build != s_margin_build) {
+        o->n = 0;
+        o->build = s_margin_build;
+    }
+    if (o->n >= SDB_MARGIN_PARTS) {
+        s_margin_lost++;
+        if (s_margin_lost < 8)
+            fprintf(stderr, "sdb: frame %ld: object %d hit the %d-part limit; "
+                            "dropped the extra sprites\n", s_frame,
+                    s_margin_cur_obj, SDB_MARGIN_PARTS);
+        return 0;
+    }
+    /* The part's column RELATIVE to its object's record anchor. `$821E` computes
+     * `$0A/$0B` as (record X - camera) and `$8470` adds it into the running
+     * position, so the camera cancels and the world column is just
+     * `record_X + part_offset`. Storing the offset rather than the column is
+     * what lets presentation re-place the sprite from the record later: the
+     * game rewrites every record every frame, but it only emits objects that
+     * are on its display list, and off-screen objects mostly are not. */
+    int rec_x = (int)(cyc_mod_peek((uint16_t)(s_margin_rec + 3))
+                    | (cyc_mod_peek((uint16_t)(s_margin_rec + 4)) << 8));
+    int cam   = (int)(cyc_mod_peek(SDB_CAM_LO) | (cyc_mod_peek(SDB_CAM_HI) << 8));
+    int16_t dx = (int16_t)(x - (rec_x - cam));
+    /* The part's top row, $EC - Y16. See the long note below. */
+    int16_t row = (int16_t)(SDB_MARGIN_Y0 - y);
+    /* Find-or-append on (offset, row), the part's identity within its object.
+     *
+     * Appending blindly leaves the previous emission's tiles sitting in the slot
+     * until the next list restarts, which is up to six frames of an older
+     * animation frame pinned in the overscan band while the machine draws the
+     * new one beside it -- the band "catching" a sprite and keeping it. Both
+     * halves of a part are a property of the object, not of the frame, so a
+     * repeat emission of the same part replaces it rather than doubling it, and
+     * a part that has genuinely gone is dropped with the list. */
+    SdbMargin *m = NULL;
+    for (int i = 0; i < o->n; i++) {
+        if (o->parts[i].dx == dx && o->parts[i].y == row) { m = &o->parts[i]; break; }
+    }
+    if (!m) m = &o->parts[o->n++];
+    o->seen = s_frame;
+    m->dx = dx;
+    /* Record identity, so a recycled slot is not drawn wearing the previous
+     * occupant's tiles. See SdbMarginObj. */
+    o->id0 = cyc_mod_peek(s_margin_rec);
+    o->id1 = cyc_mod_peek((uint16_t)(s_margin_rec + 1));
+    /* The accumulator holds Y16; the game turns it into an OAM Y of
+     *
+     *     $84A9: LDA $06 / CLC / ADC #$04 / EOR #$FF / SEC / SBC #$10
+     *           STA $0200,X
+     *
+     * which is $EB - Y16, and the PPU's first drawn line is one below that, so
+     * the sprite's top line is $EC - Y16. Doing the conversion HERE, with the
+     * game's own arithmetic, is why this cannot drift from the picture: the
+     * first version passed the raw accumulator through as the row and drew every
+     * margin sprite about 36 lines too high, which showed up as players in the
+     * upper corners and nowhere near the pitch. Verified against OAM: Y16 = 82
+     * gives OAM Y = $99, so the first line is $9A = 154 = 236 - 82. */
+    m->y = row;
+    m->tile = strip ? cyc_mod_peek((uint16_t)(at + 1)) : cyc_mod_peek(0x02);
+    m->attr = strip ? cyc_mod_peek((uint16_t)(at + 2)) : cyc_mod_peek(0x03);
+
+    s_margin_captured = 1;
+    s_margin_off_edge++;
+    return 0;
+}
+
 /* The second flicker: the game's own object culling, and a completely separate
  * mechanism from the budget truncation above.
  *
@@ -518,6 +849,92 @@ static void sdb_blit(const SdbSprite *s, uint32_t *out, int width, int height, i
     }
 }
 
+/* One margin sprite. The same blit as sdb_blit, with the column coming from the
+ * game's own 16-bit accumulator instead of an OAM byte (`px0` is that column
+ * already mapped onto the canvas), and two differences that are not arbitrary:
+ *
+ *   - the left-column clip is NOT applied. PPUMASK bit 1 clips the PPU's
+ *     leftmost 8 SCREEN columns, which are native columns 0-7; a margin sprite
+ *     is by definition not in them, and applying it would need a screen/native
+ *     mapping this call does not have. The machine never drew these sprites at
+ *     all, so there is nothing to be consistent with.
+ *   - behind-background priority (attr bit 5) is honoured against the canvas's
+ *     own background pixels. sdb_blit has no coverage buffer because SDB never
+ *     sets bit 5, and it still does not; but a margin sprite has no OAM slot,
+ *     so if the game ever sets the bit the sprite must not paint over court it
+ *     is meant to be behind. cyc_render_background's capture is what the check
+ *     needs, and the compositor already has it. */
+static void sdb_margin_blit(const SdbMargin *m, int px0, uint32_t *out, int width, int height,
+                            const uint32_t *bg, int clip_lo, int clip_hi)
+{
+    int rows = cyc_render_line_sprite16(m->y < 240 ? m->y : 239) ? 16 : 8;
+    unsigned attr = m->attr;
+    uint16_t table = cyc_render_line_sprite_table(m->y < 240 ? m->y : 239);
+    for (int r = 0; r < rows; ++r) {
+        int py = m->y + r;
+        if (py < 0 || py >= height || py >= 240) continue;
+        int row = (attr & 0x80) ? rows - 1 - r : r;
+        uint16_t pattern = rows == 16
+            ? (uint16_t)(((m->tile & 1) ? 0x1000 : 0) + (m->tile & 0xFE) * 16 + (row >= 8 ? 16 : 0))
+            : (uint16_t)(table + m->tile * 16);
+        uint8_t lo = cyc_render_chr((uint16_t)(pattern + (row & 7)));
+        uint8_t hi = cyc_render_chr((uint16_t)(pattern + (row & 7) + 8));
+        for (int c = clip_lo; c < 8 - clip_hi; ++c) {
+            int px = px0 + c;
+            if (px < 0 || px >= width) continue;
+            int bit = (attr & 0x40) ? c : 7 - c;
+            int v = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
+            if (!v) continue;
+            size_t at = (size_t)py * (size_t)width + (size_t)px;
+            /* Behind-background priority. Only the native 256 have a captured
+             * background pixel to test against; a margin column is one this
+             * compositor reconstructed, which is background by construction. */
+            if ((attr & 0x20) && bg) {
+                int nx = px - (width - 256) / 2;
+                if (nx >= 0 && nx < 256 && bg[(size_t)py * 256 + nx] != cyc_render_color(0))
+                    continue;
+            }
+            out[at] = cyc_render_color(16 + (int)(attr & 3) * 4 + v);
+        }
+    }
+}
+
+/* Did the game actually emit this part?
+ *
+ * The overscan band exists to show what the PPU's own left clip hid -- and the
+ * PPU only hides a sprite the game WROTE. So the one thing the margin may
+ * complete in columns 0-7 is a sprite that is sitting in OAM, and the margin is
+ * supplying the pixels the hardware suppressed. A part with no OAM entry behind
+ * it is not a hidden sprite; it is one the game threw away, and drawing it puts
+ * a ghost in the band with nothing on the other side of the seam.
+ *
+ * Measured on a played match (windowed capture, SDB_TRACE_CAPTURES): object 10's
+ * parts land at columns 6/4/3/3 and OAM holds them at slots 17-20, tiles
+ * $B0/$10/$20/$30, the same rows -- so it is completed and drawn. Object 11's
+ * parts land at column 5, rows 137 and 145, and OAM holds NO entry for them at
+ * any column: tiles $C4/$C6 appear nowhere. It was clipped at col 8 anyway and
+ * what survived was a two-column black-and-grey sliver standing alone against
+ * bare court, appearing and vanishing with the object's emission rather than
+ * with the camera (scr == cam == 184 throughout, so it is not the basis).
+ *
+ * Matching is on (column, row) rather than tile alone, because every player in
+ * this game shares tiles -- and tile alone would also match the wrong object.
+ * The column is compared with a sprite's width of slack because a part and its
+ * OAM entry are the same part only when the two placements agree; when they do
+ * not, the machine owns a different sprite and this one is still a ghost. */
+static int sdb_oam_has(int sx, int row)
+{
+    const uint8_t *oam = cyc_render_oam();
+    for (int j = 0; j < 64; j++) {
+        uint8_t y = oam[j * 4];
+        if (y >= 0xEF) continue;                 /* the game's hidden slot */
+        if (oam[j * 4 + 3] < sx || oam[j * 4 + 3] > sx + 7) continue;
+        if (y + 1 < row || y + 1 >= row + 8) continue;
+        return 1;
+    }
+    return 0;
+}
+
 /* Section 4's compositor state, needed before it is defined. */
 /* The picture the window shows.
  *
@@ -641,15 +1058,30 @@ blit:
 static void sdb_frame_begin(void *ctx)
 {
     (void)ctx;
-    if (s_trace)
+    if (s_trace) {
         fprintf(stderr, "sdb %ld %d %d %d %d %d\n", s_frame, s_build_peak, s_overflow,
                     s_done_count, s_saw_reset, s_list_lost);
+        /* The two candidates for "where is this frame's column zero", printed
+         * from the frame-begin hook so it does not depend on the margin sprites
+         * being on. `cam` is `$C3/$C4`, the camera the game places sprites with;
+         * `scr` is `cyc_render_line_scroll_x`, what the PPU latched. They should
+         * agree, and the gap between them is the machine's own sprite/bg
+         * misalignment for this frame -- which is the visual judder when it is
+         * not zero. See the draw site's note on which one the margin uses. */
+        if (s_ws_aspect != NES_VIDEO_STOCK || s_trace)
+            fprintf(stderr, "sdbc %ld scr=%d cam=%d\n", s_frame,
+                    cyc_render_line_scroll_x(160),
+                    (int)(cyc_mod_peek(SDB_CAM_LO) | (cyc_mod_peek(SDB_CAM_HI) << 8)));
+    }
     s_frame++;
     s_cap_run = s_captured ? s_cap_run + 1 : 0;
     s_captured = 0;
     s_overflow = 0;
     s_build_peak = 0;
     s_saw_reset = 0;
+    s_margin_run = s_margin_captured ? s_margin_run + 1 : 0;
+    s_margin_captured = 0;
+    s_margin_frames++;
 }
 
 static void sdb_power_on(void *ctx)
@@ -691,6 +1123,9 @@ static const char *const SDB_HOOK_IDS[] = {
     "super-dodgeball.list.f7-e378",
     "super-dodgeball.num.b3-96b9",
     "super-dodgeball.copy.b4-a394",
+    "super-dodgeball.margin.b5-8483",
+    "super-dodgeball.margin.b5-8302",
+    "super-dodgeball.margin.b5-8231",
 };
 
 static void sdb_enable(void)
@@ -706,11 +1141,145 @@ static void sdb_disable(void)
     s_on = 0;
 }
 
+/* ------------------------------------------------------------------ *
+ * 6. Input recording (--record-input): play it, and the run replays
+ * ------------------------------------------------------------------ */
+
+/* Every repro vector in tas/vectors/ was written by hand, and every one of
+ * them was wrong until it was measured -- the game silently drops input aimed
+ * before frame 594, and a margin artifact needs the camera to pan all the way
+ * before it shows anything. Neither is expressible as a schedule someone
+ * guessed. So this records one instead.
+ *
+ * The host hands over the final controller bytes through
+ * CycHostExtras::input -- "after host mapping and before latching", i.e.
+ * exactly what the guest read this frame. Both loops call it in the same
+ * place, immediately before cyc_session_frame_begin():
+ *
+ *     windowed   cyc_sdl.c:1470   cyc_session_input(buttons)
+ *                cyc_sdl.c:1471   cyc_session_frame_begin()
+ *                cyc_sdl.c:1472   cyc_run_frame()
+ *     headless   cyc_host.c:1602  input_tick(frame) -> cyc_session_input(buttons)
+ *                cyc_host.c:1612  cyc_session_frame_begin()
+ *                cyc_host.c:1613  cyc_run_frame()
+ *
+ * so `s_frame` here is the index of the frame about to run -- which is exactly
+ * what input_tick() matches steps against (`step.frame <= frame`). That is why
+ * this is not a new format: it writes precisely the `--input` schedule the host
+ * already parses, one "<frame> <BUTTONS>" line per state change, absolute
+ * state, "-" for release.
+ *
+ * The window samples the controller once per guest frame, and skips the sample
+ * and cyc_run_frame() together when the menu is open or the window unfocused,
+ * so the file cannot drift against the frame counter. What it cannot do is fix
+ * the RNG: this game is random, so a replay is the same run only under
+ * `--ram-init zeros`. The header says so, because a vector that silently does
+ * not reproduce is worse than no vector at all. */
+static FILE *s_rec;
+static uint8_t s_rec_held[2];
+static int s_rec_steps;
+static char s_rec_path[512];
+
+/* The host's own button names and bits (cyc_host.c parse_buttons), in the order
+ * it lists them, so a recorded line reads like a hand-written one and re-parses
+ * to the same mask. */
+static const char *const SDB_REC_NAMES[8] = {
+    "A", "B", "SELECT", "START", "UP", "DOWN", "LEFT", "RIGHT"
+};
+
+static void sdb_rec_write(uint8_t b, int port)
+{
+    char names[64];
+    size_t k = 0;
+    names[0] = '\0';
+    for (int i = 0; i < 8; i++) {
+        if (!(b & (uint8_t)(0x80u >> i))) continue;
+        if (k) names[k++] = '+';
+        k += (size_t)snprintf(names + k, sizeof names - k, "%s", SDB_REC_NAMES[i]);
+    }
+    /* Port 1 needs no prefix -- that is the format the committed vectors use.
+     * Port 2 uses the host's own "N:" prefix. */
+    fprintf(s_rec, "%ld %s%s\n", s_frame, port ? "2:" : "", k ? names : "-");
+    fflush(s_rec);
+    s_rec_steps++;
+}
+
+static void sdb_input(void *ctx, uint8_t buttons[2])
+{
+    (void)ctx;
+    if (!s_rec) return;
+    for (int p = 0; p < 2; p++) {
+        if (buttons[p] == s_rec_held[p]) continue;   /* only state changes */
+        s_rec_held[p] = buttons[p];
+        sdb_rec_write(buttons[p], p);
+    }
+}
+
+/* Closed from the destructor, which is the only place that runs on a window
+ * close as well as on --exit-after. The frame count is only known here, and a
+ * replay needs it for --frames: getting it wrong silently replays too little
+ * or too much of the run, which is the sort of thing that reads as "the
+ * artifact did not reproduce". */
+static void sdb_rec_close(void)
+{
+    if (!s_rec) return;
+    fprintf(s_rec, "# %ld frames, %d input steps\n", s_frame, s_rec_steps);
+    fclose(s_rec);
+    s_rec = NULL;
+    fprintf(stderr, "sdb: recorded %ld frames, %d input steps -> %s\n",
+            s_frame, s_rec_steps, s_rec_path);
+}
+
+static bool sdb_rec_start(const char *path)
+{
+    snprintf(s_rec_path, sizeof s_rec_path, "%s", path);
+    s_rec = fopen(path, "w");
+    if (!s_rec) {
+        fprintf(stderr, "--record-input: cannot write %s\n", path);
+        return false;
+    }
+    s_rec_held[0] = s_rec_held[1] = 0;
+    s_rec_steps = 0;
+    fprintf(s_rec,
+        "# Super Dodge Ball (USA) - recorded playthrough.\n"
+        "#\n"
+        "# Written by `nes_game --record-input` from a windowed session. One\n"
+        "# \"<frame> <BUTTONS>\" line per state change, absolute state, \"-\" is\n"
+        "# release -- the same schedule format `--input` replays, where frame 0\n"
+        "# is the first post-power frame. It records exactly the bytes the guest\n"
+        "# read each frame, so the replay takes the same path.\n"
+        "#\n"
+        "# REPLAY IT (the last line of this file has the frame count for\n"
+        "# --frames; --ram-init zeros is REQUIRED, not a default):\n"
+        "#\n"
+        "#     ./build-cycle/nes_game \"roms/Super Dodge Ball (USA).nes\" \\\n"
+        "#         --frames <N> --input %s --ram-init zeros\n"
+        "#\n"
+        "# The game is random, so a replay without --ram-init zeros diverges and\n"
+        "# this vector will not reproduce.\n"
+        "#\n"
+        "# MEASURED 2026-10-13: a headless replay of such a vector is NOT faithful\n"
+        "# to the windowed recording it came from. Two windowed runs of one\n"
+        "# schedule are byte-identical to each other, but a headless replay of the\n"
+        "# recorded vector diverges from both at frame 4 and ends up on different\n"
+        "# game state (2666 vs 2121 off-edge captures, 32200 vs 15504 margin\n"
+        "# sprites drawn). It is not the input -- the recorded frames are the frames\n"
+        "# the schedule fired on, and the divergence starts four frames before the\n"
+        "# first press -- so the window and the headless host are simply not running\n"
+        "# the same machine yet. That is an open engine question.\n"
+        "#\n"
+        "# Until it is settled, analyse the recording where it was made: its SDB_TRACE\n"
+        "# log is the ground truth for what was on screen.\n", path);
+    return true;
+}
+
 static const CycHostOption SDB_OPTIONS[] = {
     { "--remove-character-flicker", false, "draw every OAM sprite host-side, so characters are never truncated" },
     { "--ppu-overclock", true, "extra blank scanlines before NMI (0-262); 0 = stock timing" },
     { "--widescreen", true, "present 16:9 / 21:9 / 32:9 / fit instead of stock 4:3" },
     { "--overscan", false, "drop the blank scanlines a CRT hid at the top and bottom" },
+    { "--margin-sprites", true, "background-only widescreen margins: do NOT draw the players the game culled off-screen (default is to draw them)" },
+    { "--record-input", true, "record the live controller to an --input vector as you play, for replaying headless afterwards" },
 };
 
 /* ------------------------------------------------------------------ *
@@ -769,11 +1338,15 @@ static const CycHostOption SDB_OPTIONS[] = {
          *
          * Left only, and measured, not assumed: the right-hand 8 columns carry
          * the court on 1372 of 2112 frames, and the blank top and bottom bands
-         * are used by one wipe transition (frame 420), so neither may be cut. */
-#define SDB_WS_CLIP 8
-static int s_ws_reveal;
-static int s_ws_aspect = NES_VIDEO_STOCK;
+         * are used by one wipe transition (frame 420), so neither may be cut.
+         *
+         * SDB_WS_CLIP and s_ws_reveal are declared next to the margin-capture
+         * state near the top of this file, because sdb_margin_capture needs to
+         * know whether the clip is being revealed: it decides whether the PPU's
+         * hidden leftmost 8 columns are columns this feature may paint. */
 static int s_ws_fixed;           /* width we asked for by hand, 0 = by mode */
+static int s_ws_margin;          /* draw sprites the game culled off-screen */
+static int s_ws_margin_only;    /* headless A/B: suppress the above */
 static long s_ws_composed, s_ws_pillarboxed, s_ws_last_diff;
 static int s_ws_sx_lo = 9999, s_ws_sx_hi = -1;   /* camera scroll seen, SDB_TRACE=3 */
 
@@ -931,6 +1504,232 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
     for (int y = 0; y < height; y++)
         memcpy(out + (size_t)y * width + native_x0 + keep, native + (size_t)y * 256 + keep,
                (256 - keep) * sizeof(uint32_t));
+
+    /* Sprites the game placed outside its own viewport. Drawn AFTER the copy so
+     * they cannot touch the native 256, which stay byte-identical to stock by
+     * construction rather than by clipping -- a sprite whose column is inside
+     * the viewport is one the game did NOT cull, so it is not in this list
+     * anyway, and the two sets cannot overlap.
+     *
+     * Every live object slot is drawn, and "live" is answered from the DISPLAY
+     * RECORD rather than from when the object was last emitted. That matters
+     * because the two are not the same thing in this game: `$067C` does not
+     * contain most off-screen objects, so records 2 and 8 were emitted 4 times
+     * and once respectively over 100 frames of the pan vector -- and they are
+     * exactly the two standing in the margins. Anything whose lifetime is
+     * measured in emissions blinks those two out.
+     *
+     * So the record decides, on three counts: byte 0 non-zero means the slot is
+     * in use at all; bytes 0-1 still matching the capture means the slot has not
+     * been recycled onto a different object; and the current column, placed from
+     * the record the game rewrites every frame, must be off-screen. Nothing
+     * expires, so nothing blinks. The off-screen test is also what keeps a player
+     * who walked into the viewport from being drawn twice -- the machine owns
+     * those columns and this skips them exactly.
+     *
+     * Slots are drawn in index order, which is the display list's depth order
+     * only loosely -- but these are objects the machine culled outright, so
+     * nothing the player can see is covered up by getting their order slightly
+     * wrong.
+     *
+     * SDB_TRACE_CAPTURES=<from>-<to> dumps what was drawn, one line per frame,
+     * with the object index, so a position can be watched across builds. */
+    if (s_ws_margin) {
+        int n = 0;
+        if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+            fprintf(stderr, "sdbw f=%ld x0=%d:", s_frame, native_x0);
+        /* The first canvas column the machine's own picture owns. */
+        int left_limit = native_x0 + keep;
+        for (int o = 0; o < SDB_MARGIN_OBJECTS; o++) {
+            SdbMarginObj *ob = &s_margin_obj[o];
+            if (!ob->n) continue;
+            uint16_t rec = (uint16_t)(SDB_REC_BASE + SDB_REC_STRIDE * o);
+            /* Unused slot, or a slot the match has handed to a different object:
+             * either way these tiles are not this object's any more. */
+            if (!cyc_mod_peek(rec) ||
+                cyc_mod_peek(rec) != ob->id0 || cyc_mod_peek((uint16_t)(rec + 1)) != ob->id1)
+                continue;
+            /* The anchor, read live. */
+            int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
+                            | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
+            for (int i = 0; i < ob->n; i++) {
+                const SdbMargin *m = &ob->parts[i];
+                /* Current screen column: the record's world column plus this
+                 * part's offset, minus the game's own camera.
+                 *
+                 * The camera is `$C3/$C4`, NOT `cyc_render_line_scroll_x`. That is
+                 * not a preference, it is what makes a character whole. The game
+                 * places a sprite with `$823E/$8246: SEC / SBC $C3 / SBC $C4`,
+                 * so OAM X -- and therefore the column the PPU draws -- is
+                 * measured against `$C3/$C4` and nothing else. The scroll the PPU
+                 * latched for the frame trails it: measured on the pan vector it
+                 * is consistently one camera step (6-7 px) behind, because the
+                 * game advances its camera for the frame it is about to render.
+                 * So a margin sprite placed with the scroll lands exactly one
+                 * step left of the machine's own copy of the same part. Verified
+                 * by matching tile and row against OAM on the pan vector: frame
+                 * 633, tiles $11/$21/$31/$01 at rows 151/159/167/143, machine
+                 * OAM X = 1/1/1/3, ours -5/-5/-5/-3 -- six, every part.
+                 *
+                 * Six pixels is half a character, and it only shows up where a
+                 * character straddles the viewport edge, because that is the only
+                 * place the machine's copy and ours are both on screen: you get
+                 * two half-characters overlapping with a seam, and the halves do
+                 * not meet. Placing with `$C3/$C4` puts ours exactly on top of
+                 * the machine's, so the margin completes the character instead of
+                 * forking it.
+                 *
+                 * The cost, stated plainly: the margin BACKGROUND is reconstructed
+                 * from the presented frame's scroll, so while the camera is moving
+                 * a margin sprite sits up to one camera step ahead of the court
+                 * under it. When the camera is still -- most of a match, and all of
+                 * the time the player is looking at a stationary scene -- the two
+                 * are identical and there is nothing to see. The alternative is not
+                 * a tidier trade, it is the tearing above.
+                 *
+                 * Column 0 of the screen sits at native_x0 on the canvas, so a
+                 * negative column lands in the left margin and one past 255 in
+                 * the right. The offset is measured from the game's own
+                 * accumulator, which already carries its OAM bias of 4, so the
+                 * same subtraction the guest does puts it back.
+                 *
+                 * ONE BASIS, and it is the scroll.
+                 *
+                 * `cyc_render_line_scroll_x` is what the PPU actually latched for
+                 * the frame being presented, and it is what the margin background
+                 * under this sprite was resolved with. The machine's own sprites
+                 * are glued to that background -- measured on the sweep by
+                 * world-aligning the stock picture frame by frame: consecutive
+                 * frames match to a mean absolute difference of 0.00, and a
+                 * tracked sprite's OAM X plus the scroll holds constant across a
+                 * 72-pixel pan. So the scroll is right for a part standing alone
+                 * in the margin AND for one completing a sprite the PPU clipped,
+                 * because the machine's copy of that sprite is on the same basis.
+                 *
+                 * `$C3/$C4` looks like the alternative -- it is what
+                 * `$823E/$8246: SEC / SBC $C3 / SBC $C4` made OAM X from -- and it
+                 * measures as one 6-7 px camera step away from the presented
+                 * scroll on one frame in three, because at composite time it
+                 * already holds the camera for the frame after the one being
+                 * presented. Using it puts standalone margin sprites a step ahead
+                 * of the court under them.
+                 *
+                 * Splitting the parts across the two bases -- one for the parts
+                 * standing alone, the other for the ones completing a clipped
+                 * sprite -- is worse than either. A character is sixteen columns
+                 * of two eight-wide sprites; split its two halves across the two
+                 * bases and the eight pixels between them collapse to one, so it
+                 * is drawn at a sixteenth of its width. Measured on the sweep at
+                 * frame 1060, object 10's rows 184, 168 and 176 came out one
+                 * pixel apart instead of eight, and were correct again at 1063
+                 * when the two bases happened to agree. That is the "shifted a
+                 * pixel" and "slightly the wrong size" artifact, and it is the
+                 * basis split, not a stale part. */
+                int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
+                int sx = rec_x + m->dx - cyc_render_line_scroll_x(prow) - 4;
+                /* Completing a sprite the PPU clipped is the one case the margin
+                 * owns rather than the machine. */
+                int completes = s_ws_reveal && sx >= 0 && sx < SDB_WS_CLIP;
+                /* Completing a sprite the PPU clipped is the one case the margin
+                 * owns rather than the machine -- but only for a sprite the game
+                 * actually emitted. See sdb_oam_has. */
+                if (completes && !sdb_oam_has(sx, m->y)) {
+                    if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+                        fprintf(stderr, " [o%d:%d,%d,t%02X GHOST]", o, sx, m->y, m->tile);
+                    continue;
+                }
+                /* Did the MACHINE draw this part? This must be the exact
+                 * complement of the test sdb_margin_capture used, because a part
+                 * captured but not drawn is a player with a piece missing. The
+                 * game's cull is on the accumulator, so on screen columns it is
+                 * [0, 251]; the PPU's own left clip takes screen columns 0-7,
+                 * which the game does not cull at all, and `completes` is exactly
+                 * that case. */
+                int machine_drew = !completes && (sx >= 0 && sx <= 251);
+                if (machine_drew) continue;
+                int px0 = sx + native_x0;
+                if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+                    fprintf(stderr, " [o%d:%d,%d,t%02X]", o, sx, m->y, m->tile);
+                n++;
+                /* Only ever draw the part that lies in the MARGIN. The machine's
+                 * picture owns a run of canvas columns and everything else is
+                 * ours to paint; the run is NOT always the native 256. With
+                 * overscan on, the copy-back above starts at native column 8 and
+                 * leaves the eight revealed columns holding the reconstructed
+                 * background, so the machine's run is [native_x0+8, native_x0+
+                 * 256) and the band belongs to the margin. Painting it is the
+                 * whole point of revealing it -- leaving it empty is what put a
+                 * hard vertical seam through any player standing in it.
+                 *
+                 * The blit draws columns [clip_lo, 8-clip_hi), so the two
+                 * straddles clip opposite ends: a left-edge straddle keeps
+                 * c < left_limit-px0, a right-edge straddle keeps
+                 * c >= native_x0+256-px0. (An earlier version rejected the
+                 * straddle whole instead of clipping it, which is why the
+                 * white-shirt player vanished while standing at column -4; and
+                 * the first clip written here had lo/hi backwards, which drew
+                 * the native half and dropped the margin half. Both produced a
+                 * plausible picture with the player missing.) */
+                int clip_lo, clip_hi;
+                if (px0 + 8 <= left_limit) {
+                    clip_lo = 0; clip_hi = 0;                    /* fully left: all */
+                } else if (px0 >= native_x0 + 256) {
+                    clip_lo = 0; clip_hi = 0;                    /* fully right: all */
+                } else if (px0 < left_limit) {
+                    clip_lo = 0; clip_hi = px0 + 8 - left_limit;  /* left straddle */
+                } else {
+                    clip_lo = native_x0 + 256 - px0; clip_hi = 0; /* right straddle */
+                }
+                if (clip_lo + clip_hi < 8) {
+                    sdb_margin_blit(m, px0, out, width, height, s_ws_native_bg,
+                                    clip_lo, clip_hi);
+                    s_margin_drawn++;
+                }
+            }
+        }
+        s_margin_count = n;
+        /* What the game put in the hidden band, straight from OAM.
+         *
+         * This is the one question a --frame-log cannot answer here: --frame-log
+         * implies headless (cyc_host.c:1100), and headless does not run the same
+         * guest state as the window (measured: frames 0-3 match, frame 4
+         * diverges), so an OAM dump from a headless run describes a different
+         * game. The window is the only place this state exists, so the window has
+         * to report it.
+         *
+         * It decides whether a margin sprite standing in columns 0-7 is
+         * completing something the machine drew from column 8, or standing alone
+         * with columns 8-12 that nobody will ever paint. PPUMASK bit 1 is clear
+         * for this game so the PPU never paints those eight columns at all. */
+        if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to) {
+            const uint8_t *oam = cyc_render_oam();
+            fprintf(stderr, " oam-band:");
+            for (int j = 0; j < 64; j++) {
+                if (oam[j * 4] >= 0xEF || oam[j * 4 + 3] >= SDB_WS_CLIP) continue;
+                fprintf(stderr, " [%d:y%d,$%02X,$%02X,x%d]", j, oam[j * 4], oam[j * 4 + 1],
+                        oam[j * 4 + 2], oam[j * 4 + 3]);
+            }
+            fprintf(stderr, "\n");
+        }
+        if (n > s_margin_peak) s_margin_peak = n;
+        /* The per-frame margin line lives HERE, not in the frame-begin hook:
+         * `n` is what this presented frame actually painted, and frame-begin for
+         * the next frame is the only other place that could print it -- one
+         * frame late, against a `s_frame` counter that has already moved on.
+         *
+         * The `n=%d` CLOSER comes FIRST, and it has to. The `sdbw` line above
+         * opens with no newline and its entries are printed one at a time, so
+         * printing the summary first glues `sdbm 1146 48 8955` onto the end of
+         * the last `[oN:...]` entry -- and `margin_track.py`'s line regex then
+         * matches nothing at all, so the audit silently reports "no sdbw lines
+         * in that log" on exactly the runs where you turned the trace on to run
+         * it. */
+        if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+            fprintf(stderr, " n=%d\n", n);
+        if (s_trace)
+            fprintf(stderr, "sdbm %ld %d %ld\n", s_frame, n, s_margin_off_edge);
+    }
+
     s_ws_composed++;
     s_ws_last_diff = diff;
     return 1;
@@ -1002,6 +1801,16 @@ static void sdb_ws_disable(void)
     s_ws_aspect = NES_VIDEO_STOCK;
     s_ws_reveal = 0;
     s_ws_fixed = 0;
+    s_ws_margin = 0;
+    s_margin_run = 0;
+    s_margin_peak = 0;
+    s_margin_lost = 0;
+    memset(s_margin_obj, 0, sizeof s_margin_obj);
+    s_margin_cur_obj = -1;
+    s_margin_rec = 0;
+    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8483", 0);
+    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8302", 0);
+    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8231", 0);
     cyc_render_set_compositor(NULL, NULL);
     cyc_video_set_mode(NES_VIDEO_STOCK);
 }
@@ -1013,6 +1822,11 @@ static void sdb_ws_report(void)
     if (s_trace && s_ws_composed + s_ws_pillarboxed)
         fprintf(stderr, "widescreen: %ld composed, %ld pillarboxed, seam diff %ld px\n",
                 s_ws_composed, s_ws_pillarboxed, s_ws_last_diff);
+    if (s_trace && s_margin_on)
+        fprintf(stderr, "margin sprites: %ld captured (%ld off-edge), %ld drawn, "
+                        "peak %d, backstop %ld\n",
+                s_margin_frames, s_margin_off_edge, s_margin_drawn,
+                s_margin_peak, s_margin_lost);
 }
 
 static int sdb_ws_aspect_from(const char *env, const char *option)
@@ -1028,15 +1842,58 @@ static int sdb_ws_aspect_from(const char *env, const char *option)
     return NES_VIDEO_STOCK;
 }
 
+static void sdb_ms_enable(void);
+static void sdb_ms_disable(void);
+
+/* Widescreen implies margin sprites: it is what the margins are FOR, and a
+ * background-only margin is not a wider game, it is the same frame with black
+ * columns glued on. Measured, 40% of the objects on the pitch are outside the
+ * viewport at any moment, so "background only" leaves most of the field of play
+ * invisible while still paying for the columns.
+ *
+ * Not a separate feature on purpose. It was one, and it shipped broken in the
+ * only way that matters: `margin-sprites` defaulted off, the window ran it
+ * off, and the picture looked exactly like the feature did not exist -- with
+ * every other gate green, because the gates measured what the flag asked for
+ * rather than what the player could see. There is nothing here worth choosing
+ * against: the guest is byte-identical with the capture on or off (RAM, CIRAM,
+ * OAM, palette, picture and cycle count), so it trades no fidelity away.
+ *
+ * `s_ws_margin_only` exists solely for the headless A/B (`--margin-sprites 0`),
+ * which is how the difference is measured at all. */
 static void sdb_ws_enable(void)
 {
     sdb_ws_set_aspect(sdb_ws_aspect_from(getenv("SDB_WIDE"), "aspect"));
+    if (!s_ws_margin_only) sdb_ms_enable();
 }
 
 static void sdb_ov_enable(void)
 {
     const char *e = getenv("SDB_OVERSCAN");     /* headless A/B */
     sdb_ws_set_overscan(e && e[0] ? atoi(e) != 0 : 1);
+}
+
+/* Margin sprites: enable the two capture sites. Called by widescreen, because
+ * the margins and the sprites in them are one decision. Presentation only --
+ * each callback returns 0, the site's own instruction and the game's own cull
+ * both run, and $0617 is not touched, so OAM and the guest's own picture are
+ * bit-identical with this on or off. */
+static void sdb_ms_enable(void)
+{
+    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8483", 1);
+    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8302", 1);
+    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8231", 1);
+    s_ws_margin = 1;
+    s_margin_on = 1;
+}
+
+static void sdb_ms_disable(void)
+{
+    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8483", 0);
+    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8302", 0);
+    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8231", 0);
+    s_ws_margin = 0;
+    s_margin_on = 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1130,6 +1987,8 @@ static bool sdb_option(void *ctx, const char *name, const char *value)
             return false;
         }
         sdb_ws_set_aspect(mode);
+        /* Same as the feature: widescreen brings the margin sprites with it. */
+        if (!s_ws_margin_only) sdb_ms_enable();
         return true;
     }
     if (!strcmp(name, "--overscan")) {
@@ -1138,6 +1997,29 @@ static bool sdb_option(void *ctx, const char *name, const char *value)
         sdb_ws_set_overscan(value == NULL || value[0] == '\0' || atoi(value) != 0);
         return true;
     }
+    if (!strcmp(name, "--margin-sprites")) {
+        /* NOT a feature: widescreen already draws the margin sprites. This is
+         * the headless A/B switch, and it defaults to drawing them, so
+         * `--margin-sprites 0` is the only way to get background-only margins
+         * without editing a manifest. */
+        const char *e = getenv("SDB_MARGIN_SPRITES");
+        int on = e && e[0] ? atoi(e) != 0 : (value == NULL || value[0] == '\0' || atoi(value) != 0);
+        s_ws_margin_only = !on;
+        if (on) sdb_ms_enable();
+        else s_ws_margin = s_margin_on = 0;
+        return true;
+    }
+    if (!strcmp(name, "--record-input")) {
+        /* Opens before the first frame: options run at cyc_session_start(), and
+         * power_on() after them, so nothing is lost and the header is on disk
+         * even if the window is closed immediately. */
+        if (!value || !value[0]) {
+            fprintf(stderr, "--record-input: needs a file to write\n");
+            return false;
+        }
+        if (s_rec) sdb_rec_close();          /* a second one replaces the first */
+        return sdb_rec_start(value);
+    }
     return false;
 }
 
@@ -1145,6 +2027,7 @@ static const CycHostExtras SDB_EXTRAS = {
     .present = sdb_present,
     .power_on = sdb_power_on,
     .frame_begin = sdb_frame_begin,
+    .input = sdb_input,
     .options = SDB_OPTIONS,
     .option_count = sizeof SDB_OPTIONS / sizeof SDB_OPTIONS[0],
     .option = sdb_option,
@@ -1156,6 +2039,7 @@ const CycHostExtras *cyc_host_extras(void) { return &SDB_EXTRAS; }
 __attribute__((destructor)) static void sdb_report_at_exit(void)
 {
     sdb_ws_report();
+    sdb_rec_close();
 }
 
 #if defined(_MSC_VER)
@@ -1179,6 +2063,9 @@ static void register_sdb_mods(void)
         { 0xE378, sdb_add_hidden },
         { 0x96B9, sdb_capture2 },
         { 0xA394, sdb_copy },
+        { 0x8483, sdb_margin_capture },
+        { 0x8302, sdb_margin_capture },
+        { 0x8231, sdb_margin_object },
     };
     if (!nes_mod_register_activation_plugin("super-dodgeball.character-flicker", sdb_enable) ||
         !nes_mod_register_activation_plugin("super-dodgeball.ppu-overclock", sdb_oc_enable) ||

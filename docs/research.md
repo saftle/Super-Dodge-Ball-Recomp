@@ -31,20 +31,22 @@ team-select position numbers (§2.1).
 Frame comparison (MesenCE reference) and the blargg suite are the standing gates.
 
 **Presentation mods: three, all opt-in** — `super-dodgeball.character-flicker` (§2, §2.1),
-`super-dodgeball.ppu-overclock` (§23) and `super-dodgeball.widescreen` (§25, which also carries
-an `overscan` feature). Only the flicker fix changes guest behaviour, and only in its culling
-half; overclocking changes console *timing*; **widescreen changes nothing at all** — it reads
-the nametable the frame already wrote and re-presents the picture.
+`super-dodgeball.ppu-overclock` (§23) and `super-dodgeball.widescreen` (§25, §26 — whose margins carry the players too, which
+also carries an `overscan` feature). Only the flicker fix changes guest
+behaviour, and only in its culling half; overclocking changes console *timing*; **widescreen
+changes nothing at all** — it reads the nametable the frame already wrote and re-presents the
+picture.
 
-**Widescreen: the margins are already in the nametable** (§25). Presenting 16:9 / 21:9 / 32:9
-(426 / 560 / 854 columns) needed **no engine patch** — the widths and the compositor API are
-already upstream. The court's world is a 512-pixel looping stadium that is byte-identical across
-a whole match, so margin pixels are resolved the way the PPU resolves them rather than
-remembered the way wideNES does; wideNES can only ever show what the guest already drew, and
-cannot draw sprites at all. Reconstruction agrees with the machine's own background capture to
-1-2 px in 61440, and the stock 256-column centre is copied back so it stays pixel-identical.
-Overscan is measured, not assumed: the left 8 columns are blank in all 2112 measured frames,
-while the right 8 carry the court and the top/bottom bands are used by a transition frame.
+**Widescreen: the margins are already in the nametable, and so are the sprites** (§25, §26).
+Presenting 16:9 / 21:9 / 32:9 (426 / 560 / 854 columns) needed **no engine patch** — the widths
+and the compositor API are already upstream. The court's world is a 512-pixel looping stadium
+that is byte-identical across a whole match, so margin pixels are resolved the way the PPU
+resolves them rather than remembered the way wideNES does. Reconstruction agrees with the
+machine's own background capture to 1-2 px in 61440, and the stock 256-column centre is copied
+back so it stays pixel-identical. Overscan is measured, not assumed. And the margins hold
+sprites too: the game places every sprite in a **16-bit** screen coordinate and then hides
+anything outside `[4, 255]`, so the placement is recovered from the accumulator one instruction
+before the cull — **40% of objects are off-screen at any time** (§26).
 
 ---
 
@@ -1727,12 +1729,589 @@ a hand-built test file does.
 
 ### Not sprites in the margins
 
-The flicker mod already captures every sprite the game emits, and the object
-display list at `$067C` is camera-invariant across a pan (measured: the records
-at `$0618` do not change while OAM X shifts by 7 px with the court), so
-off-screen players are in principle placeable from memory — which wideNES
-structurally cannot do. That is **not** implemented. OAM X is a byte and
-camera-relative, so the sprite list alone cannot place anything outside the
-viewport; it needs the display records' world-space X, which is not yet
-identified. Background only for now, and the seam check plus `cyc_render_sprites`
-are the machinery if it is picked up.
+Resolved in §26, and **not as a separate feature**: widescreen draws them,
+because a margin with no players in it is not a wider game. See §26.
+
+---
+
+## 26. Sprites in the margins: the game's own 16-bit position, culled one instruction before it is used
+
+§25 ended with margins that were background only, and named the reason:
+*"OAM X is a byte and camera-relative, so the sprite list alone cannot place
+anything outside the viewport; it needs the display records' world-space X,
+which is not yet identified."*
+
+The records were the wrong place to look. The answer is that the game **does
+have** the placement, computes it in full, and throws it away itself.
+
+### The cull, and why it is reversible
+
+The per-object emitter at `$8348` folds the object's camera-relative X
+(`$0A/$0B`) and Y (`$0C/$0D`) into the per-part position (`$04/$05`, `$06/$07`),
+and *then* decides whether to draw it:
+
+```
+$8483: INC $4D                              <- the 16-bit position is final here
+$8488: LDA $04 / CMP #$04 / BCC $849A       X < 4          -> hide
+$848E: LDA $06 / CMP #$04 / BCC $849A       Y < 4          -> hide
+$8494: LDA $05 / ORA $07 / BEQ $84A1        a high byte set -> hide
+$849A: LDA #$F8 / STA $0200,X               hide (Y = $F8)
+$849F: BNE $84C1                             ... and do not bump the cursor
+$84A1: LDA $04 / SEC / SBC #$04 / STA $0203,X      OAM X = X16 - 4
+$84A9: LDA $06 / CLC / ADC #$04 / EOR #$FF / SEC / SBC #$10
+      STA $0200,X                                  OAM Y = $EB - Y16
+```
+
+Measured on the current binary, both halves: a sprite the game placed at
+X16 = 208 lands in OAM at `$CC` (208 − 4) and one at Y16 = 82 at `$99`
+(`$EB` − 82). So the placement is a genuine 16-bit screen coordinate and the
+**byte truncation at `$84A1` is the only thing that loses the sprite** — after
+the tile, the flips, the palette and both halves of the position are all
+computed.
+
+That is the whole difference between this and wideNES. wideNES warps a
+framebuffer it has already been given, so a sprite that was never drawn is
+unreachable in principle (its maintainer names this as the reason it never
+shipped). A compositor resolves any canvas column from guest state, so the
+only question is whether the guest still knows where the object is. Here it
+does, because the cull happens *after* the arithmetic. This is the same
+arrangement as `mstan/SuperMarioBrosNESRecomp`'s `docs/WIDESCREEN.md`, which
+reads enemy records in world coordinates out of game RAM — the only NES
+widescreen that renders margin sprites.
+
+**Two sites, not one.** The single-sprite emitters have the same cull on the
+same accumulators and are reached by three jumps:
+
+```
+$82B9, $82DD, $8294  ->  $8302:
+$8307: LDA $04 / CMP #$04 / BCC $8342       X < 4          -> hide
+$830D: LDA $06 / CMP #$04 / BCC $8342       Y < 4          -> hide
+$8313: LDA $05 / ORA $07 / D0 29 BNE $8342  a high byte set -> hide
+$8342: LDA #$F8 / STA $0200,X / RTS        hide (Y = $F8)
+```
+
+One thing differs and the capture has to branch on it: the strip walk stores
+its tile and attribute into the OAM slot at `$8419-$8427`, *before* the cull,
+while `$8302`'s paths still hold them in `$02/$03` and only store them after it
+(`$8326`/`$832B`). Reading `$0200+cursor` unconditionally gets the right bytes
+for one emitter and the wrong bytes for the other three.
+
+`$8483` is in the same routine as the existing `$84B6` site, so the `$821E`
+seed already compiles it natively and **no new seed was needed** — which is
+the first time that file has not grown a line for a new hook.
+
+### How much is off-screen
+
+This is not a rare edge case. `tools/widescreen/objects.py --cull` over 61
+match frames:
+
+| | |
+|---|---|
+| frames with at least one object off-screen | **61 / 61** |
+| objects off-screen | **293 / 732 (40.0%)** |
+| worst frames | 12 objects, 6 of them off-screen |
+
+Frame 610 for detail — camera 147, six of twelve objects in view, with two at
+*negative* screen columns:
+
+```
+ idx  state sel   rel16  abs16   screenX  off-screen
+   0  $02  18    161    106        14
+   2  $02  30     67     64       -80   YES
+   8  $02  28    316     48       169
+   8  $01  28    445     64       298   YES
+   9  $01  18    112     64       -35   YES
+```
+
+At 16:9 (426 columns, 85 either side) both negative-column objects are inside
+the left margin; at 32:9 (854 columns, 299 either side) the right-hand one is
+289 columns past the viewport edge.
+
+### Two bugs the first version had, both from ignoring the cadence
+
+The first working version put sprites at the right *columns* but the wrong
+*rows*, and blinked. Both causes are the same thing: this game does not rebuild
+its sprite list every frame, and a per-frame assumption was wrong twice.
+
+**1. The Y accumulator is not a screen row.** `$06/$07` is inverted by the game
+before it becomes an OAM Y:
+
+```
+$84A9: LDA $06 / CLC / ADC #$04 / EOR #$FF / SEC / SBC #$10 / STA $0200,X
+```
+
+which is `$EB - Y16`, and the PPU draws from one line below that, so a sprite's
+top line is `$EC - Y16`. Passing the raw accumulator through as the row drew
+every margin sprite about 36 lines too high — players in the upper corners,
+standing on the skyline instead of on the court. Fixed by doing the conversion
+at capture time with the game's own arithmetic (`SDB_MARGIN_Y0`), which is why
+it cannot drift from the picture: X16 = 208 → OAM `$CC`, Y16 = 82 → OAM `$99`,
+first line `$9A` = 154 = 236 − 82.
+
+**2. The emitter runs on about one frame in three, and a build spans two.**
+Measured over 200 match frames the cursor bump hooks fire on **66** of them: the
+game emits a list over two frames, then leaves OAM alone for three to six more.
+Two failures came from ignoring that:
+
+- *Clearing the margin list per frame* emptied it on every quiet frame, so the
+  players blinked out once per cycle. `drawn` went from 1300 to 21068 over 700
+  frames once the list was held, and the margin's frame-to-frame churn came out
+  the same shape as the machine's own — zeros on exactly the frames the native
+  centre has zeros.
+- *The held list was the wrong list.* The flicker mod publishes a build when the
+  **next** one starts, so its published list is one build behind by
+  construction. Presenting that on a quiet frame showed 16 sprites where the
+  build in progress had 40, blinking the other 24 in and out. The rule is the
+  flicker mod's own, which the first version had mis-copied by adding
+  `run == 0` to the hold condition: on a **quiet** frame the build in progress
+  *is* the last complete one and must be presented; only the **first capture
+  frame** of a new build is half-assembled and needs the previous list.
+
+**3. `cur == SDB_FIRST_SLOT` is not a boundary, it is a *transition*.** `$0617`
+only advances for sprites the game actually draws, so a run of culled sprites
+sits at one cursor value — and the flicker mod's `cur == SDB_FIRST_SLOT` test
+fires once per sprite in that run. Measured: one frame published 40 sprites and
+then six one-sprite fragments over the top of it, collapsing the held list from
+40 to 1. The boundary is the *transition* into slot 1, plus a first capture
+after a quiet frame as a backstop. That backstop must be
+`s_margin_run == 0 && !s_margin_captured`, not `!s_margin_captured` alone: a
+build spans two frames, so the second frame's first capture otherwise looks like
+a fresh run and splits the build — which quietly cost 30 of 40 sprites a frame
+until it was measured.
+
+Net effect of all three: `drawn` 1300 → 21068 per 700 frames, and a character's
+column now marches outward in even steps across builds (−6, −18, −30, −41 …),
+which is the continuity property a margin sprite has to have. Watch it with
+`SDB_TRACE_CAPTURES=<from>-<to>`, which dumps the list the compositor drew.
+
+### Six more, all found by driving the camera across the world
+
+The three above were found with a still camera. `tas/vectors/sdb_pan.input`
+(24-frame LEFT/RIGHT alternation) and then `tas/vectors/sdb_sweep.input` (72-frame
+holds, the width of the whole 512-pixel world, alternating) exist because a still
+camera hides the entire class below: a boundary artifact only shows once a
+character has walked clean across an edge rather than stepped over it once.
+`tools/widescreen/margin_track.py` is the instrument — it reads the compositor's
+own `sdbw` trace and audits every object on every frame.
+
+**1. The margin must not expire, because most off-screen objects are not emitted.**
+`$067C` does not contain them. Over frames 600-700 of the pan vector `$8231`
+fires for records 0,1,3,5,6,7,9,10,11 on 14-16 of every 100 frames, for record 2
+**four** times and record 8 **once** — and 2 and 8 are precisely the two objects
+standing in the margins. Any lifetime measured in emissions blinks those two out
+and only those two; a TTL of 48 frames hid it for a while and then the player
+vanished at frame 682 and never came back. The record at `$0618` is refreshed by
+the game **every frame for every object**, emitted or not (verified: records
+0,1,4,10 walk across a run while 2, 8 and 9 stand still, and all are being
+written), so liveness is the record, and there is no TTL to tune.
+
+**2. The part's column is an OFFSET, not a column.** `$821E` computes `$0A/$0B`
+as (record X − camera) and `$8470` adds it in, so the camera cancels and a part's
+world column is `record_X + part_offset`. Storing the resolved screen column meant
+it went stale the instant the camera moved.
+
+**3. Four columns, twice.** `$04/$05` is the game's *accumulator*; the screen
+column is that minus 4, which `$84A1` subtracts for the guest. Reading the
+accumulator as a column pushed every part 4 px right of where the machine puts
+it, which is not cosmetic: it moved parts across the boundary test, so a part the
+margin owns got dropped as if the machine had drawn it — a **stripe of missing
+pixels** through a character — and a part the machine owns got drawn a second
+time over the machine's own picture.
+
+**4. The wrong camera, by one step.** There are two candidates for "where is this
+frame's column zero" and they are not the same quantity. `cyc_render_line_scroll_x`
+is what the PPU latched; `$C3/$C4` is the game's camera variable. On the sweep
+they agree except on the frames where the camera is stepping, where `$C3/$C4`
+differs by one 6-7 px step — because at composite time it already holds the
+camera for the frame *after* the one being presented. Using `$C3/$C4` puts
+standalone margin sprites a whole camera step ahead of the court under them.
+
+The answer is the scroll, and it is the game's own behaviour rather than a
+preference: **the machine glues its sprites to its background.** Measured by
+world-aligning the stock picture frame by frame through the fastest pan in the
+sweep — consecutive frames match to a mean absolute difference of **0.00**, and a
+tracked sprite's `OAM X + scroll` holds constant across a 72-pixel pan. So the
+margin background, the machine's sprites and the margin sprites are all on the
+scroll, and the stock game has no judder of this kind to reproduce.
+
+**5. The 8 revealed columns lose sprites too, and the filter was inverted.**
+PPUMASK bit 1 is clear for this game, so screen columns 0-7 are never painted —
+and the game does not cull those sprites, it writes them to OAM and the hardware
+declines. With `overscan` revealing those columns from the nametable, a sprite
+standing in them is lost exactly as surely as one the game culled, and nothing
+drew it. The first version of the filter had the sense backwards, so the band
+dropped its sprites instead of keeping them: a **head with no body** at the
+screen edge, which is what the overscan band looked like.
+
+**6. A visit is not a list, and a part is identified by (offset, row).** `$8231`
+fires once per object per *visit*, but one visit does not emit the whole object:
+object 9 is visited at frame 624 and emits four parts, at 626 and emits seven, at
+632 and emits two, and the character is eight. Resetting the slot per visit
+published a **fragment** — frames 631-632 carried the head and no body. The
+accumulate-across-visits boundary is `$0617` going backwards, which is the only
+boundary this feature can see (it walks 04, 24, 40, 60, 80, 84, 94, C8, E8, 00
+and restarts, never backwards in between). And a part must then be keyed on
+(offset, row) rather than appended blindly, or the previous emission's tiles sit
+in the slot until the next list — up to six frames of an older animation frame
+pinned in the band while the machine draws the new one beside it.
+
+**The one that is not in this list, because it was wrong and is now removed:** the
+attempt to use `$C3/$C4` for parts completing a clipped sprite and the scroll for
+the rest. It reads like a refinement and it is a disaster — a character is sixteen
+columns of two eight-wide sprites, so splitting its halves across two bases
+collapses the eight pixels between them to one and draws it at a sixteenth of its
+width. Measured at frame 1060 of the sweep: object 10's rows 184, 168 and 176 came
+out one pixel apart instead of eight, then were correct again at 1063 when the two
+bases happened to agree. That was the "shifted a pixel, slightly the wrong size"
+report. `margin_track.py`'s `ghost` check exists to catch exactly it.
+
+### Verification
+
+- **Presentation only, and proven rather than asserted.** A `--frame-log` with the
+  feature on is **byte-identical** to the same run with it off — CPU RAM, CIRAM,
+  palette, OAM and the whole 256×240 picture — on all four vectors, with and
+  without `overscan`: `sdb_sweep` 1200, `sdb_pan` 1200, `sdb_idle` 1200,
+  `sdb_throw` 1500. Both capture callbacks return 0, the site's own instruction
+  and the game's own cull still run, and `$0617` is untouched because the culled
+  path branches past the cursor bump at `$84B6`.
+- **The machine's own columns are untouched, and that is also the no-doubling
+  proof.** Over all 1200 sweep frames the presented native columns differ from a
+  `--margin-sprites 0` run by **0 pixels on every frame**, at 16:9, 21:9 and 32:9,
+  while the canvas as a whole differs by 1.5-1.6 million pixels. The blit is
+  clipped to the columns the machine does not own, so a margin sprite cannot land
+  on the machine's picture — which is the same statement as "no player is drawn
+  twice". This is where the no-doubling claim is proved; the per-sprite audit
+  cannot make it (see below).
+- **No blink, no ghost, no jump — audited per sprite, per frame.**
+  `tools/widescreen/margin_track.py` over frames 500-1200 of the sweep, **eleven
+  objects, 701 frames, no anomalies**, at 16:9 and 32:9, with and without
+  `overscan`, and with the character-flicker feature on. Objects 2 and 8 — the two
+  the game's display list almost never contains — are drawn on **701/701** frames.
+- **Glued to the court.** World-aligning the presented frame by
+  `cyc_render_line_scroll_x` and stepping through the fastest pan in the sweep
+  (frames 1189-1198, a 7 px scroll step), margin sprites hold their position in
+  the world-aligned crop exactly as the machine's own sprites do in the native
+  one. The margin background and the margin sprites are on the same basis, and so
+  is the machine's.
+- **The revealed columns carry sprites.** With `overscan` on, the 8 columns the
+  PPU hides differ from a `--margin-sprites 0` run on 344 of 1200 frames, mean 74
+  pixels, max 627. Before this work the band could only ever show the
+  reconstructed background.
+- **Continuity.** A player's column marches outward in even steps across builds
+  (−6, −18, −30, −41), so where a character appears in the margin is where it
+  walked off the edge, not a fresh location. `SDB_TRACE_CAPTURES` prints the list
+  the compositor drew, per frame, to check this by eye.
+- **Declaring the sites costs nothing.** With the feature off the run is
+  byte-identical to the committed baseline — same 18312628 cycles and same
+  13466382 native cycles at 615 frames, and 0 callbacks.
+- **Mod off = stock**: the catalog present with every feature disabled is
+  byte-identical to no `--mods-root` at all, **1200/1200 frames** on both the
+  sweep and the pan vector.
+- **Stress vector** (`sdb_throw`, 3000 frames, 16:9 + overscan): **104240 margin
+  sprites drawn, peak 64, 0 backstop trips**, 0 part-limit warnings. `SDB_MARGIN_PARTS`
+  is 24, not 8: objects 9 and 11 legitimately emit more than a character's eight,
+  and at 8 they were losing sprites on 15 frames per 3000.
+- Arms from the manifest (`state.toml`, `widescreen` ticked; margin sprites are
+  part of it).
+
+**What the per-sprite audit deliberately does not check.** A margin sprite drawn
+on top of the machine's own copy of the same player. Matching tile and row against
+OAM reports thousands of false hits — Super Dodge Ball gives every player the same
+tiles — and the apparently exact version, matching the OAM *slot* the emitter was
+about to use, cannot work at all: `$0617` only advances for sprites the game
+actually draws, so a run of culled sprites shares one cursor value and the slot
+identifies nothing. The property is proved by the 0-pixel gate above instead, and
+`margin_track.py` says so in its own docstring rather than shipping a check that
+looks rigorous and cannot fire.
+
+### The content-mismatch count is the content key working
+
+Enabling these sites reports **386 content mismatches** where the existing ten
+report 0. That is the mechanism doing its job, not a defect:
+
+`cyc_hooks_due()` (`cyc_hooks.c:89`) tests the *address bit alone*, so a site at
+`$8483` is entered whenever the PC is `$8483` in **any** bank — and MMC1 maps a
+different 16 KiB bank there at different times. `cyc_hooks_fire()` then calls
+`holds()`, which reads the bytes **in the currently mapped bank** and rejects
+on a mismatch (`cyc_hooks.c:119-123`). Verified rather than inferred:
+
+- with the hooks **disabled**: 0 mismatches, 0 callbacks, identical cycles;
+- with them enabled: 4150 callbacks fire, so the declared CRC *is* bank 5's —
+  a wrong key could never fire — and the 386 rejections are other banks;
+- and the guest is byte-identical throughout, so nothing was dropped that
+  mattered.
+
+`$8302` is the same story (`$8302` in bank 3 is `A9 00 85 D1 …`, in bank 7
+`69 02 C6 00 …`). The existing ten sites report 0 only because their addresses
+happen not to be reached with a foreign bank mapped.
+
+### The seventh: a ghost in the band (found by playing it, not by the sweep)
+
+The audit above is clean over 701 sweep frames and this bug was still there.
+It was found by *playing* the game and recording the run, which is why
+`--record-input` exists (see below) — no hand-written vector had ever put a
+sprite inside the PPU's own hidden band while the camera was still.
+
+**The symptom.** A two-column stripe of black and grey stands in the revealed
+band, a few pixels left of the machine's own picture, with nothing on the other
+side of the seam. It shrinks, flickers off for a few frames, and comes back.
+
+**Reproduced from a recorded playthrough.** `tools/play_record.sh bar-artifact`
+→ 16:9 + overscan + the flicker mod, played by hand. Frames 1148/1152/1164 have
+it, 1157/1161 do not. Two more instrumented replays of the same recorded vector
+(±1 frame and ±2 frames) put it at 1142–1150 and 1148–1154.
+
+The capture itself is scratch (`tmp/`, gitignored) and is not committed — but the
+**vector is not needed** to reproduce the bug, only to find it: the identification
+below rests on the `sdbw` trace and the `oam-band:` line, which any run that puts
+a sprite in the band will print. What the played session bought was the *route*
+into the state.
+
+**Attributed by A/B, not by eye.** The same run with `--margin-sprites 0` has a
+band that is *completely clean* at every one of those frames. So it is a margin
+sprite, not a reconstruction fault.
+
+**Identified from the per-sprite trace.** `SDB_TRACE_CAPTURES` prints one
+`sdbw` line per presented frame listing what the compositor painted:
+
+```
+f1148: … [o10:6,161,tB0] … [o11:5,137,tC4] [o11:5,145,tC6]
+f1156: … [o11 is gone] …
+f1164: … [o11:5,137,tC4] [o11:5,145,tC6] …
+```
+
+Object 11 contributes **two** parts, both at screen column 5. Every other object
+in that frame is a full 8-part character. `margin_track.py` says
+`obj 11: column 5..5, parts min 2 max 2` — and, importantly, reports
+**`no anomalies`**, because its `part` check only fires for objects *wholly*
+outside the viewport and object 11 is on-screen at column 5. That is a real gap
+in the gate, not in the feature.
+
+**The cause.** A new trace line answers it directly:
+
+```
+oam-band: [17:y160,$B0,$40,x6] [18:y168,$10,$40,x4] [19:y176,$20,$40,x3] [20:y183,$30,$40,x3]
+```
+
+The band holds exactly four OAM sprites — slots 17–20, tiles `$B0/$10/$20/$30`,
+the same rows and columns as **object 10**. Object 11's tiles `$C4/$C6` are
+**nowhere in OAM at any column**. The game never emitted it.
+
+So the overscan capture rule — "take anything the PPU's left clip would hide" —
+was admitting a sprite the game had thrown away. It then clipped the blit at
+column 8 like every other band sprite, on the assumption that the machine owns
+everything past it. Nothing did. Columns 5–7 survived; columns 8–12 were thrown
+away; what was left was the sliver. And because object 11's emission comes and
+goes, the ghost blinks with it rather than with the camera — `scr == cam == 184`
+throughout the window, so this is **not** the camera-step basis problem of bug 4.
+
+**The fix.** `sdb_oam_has()` — a part in the band is drawn only when OAM really
+holds a sprite at that column and row, matched with a sprite's width of slack.
+Measured, same vector:
+
+```
+11  [o10:3,184,t30]        still drawn   (OAM slot 20)
+11  [o10:4,169,t10]        still drawn   (slot 19)
+11  [o10:6,161,tB0]        still drawn   (slot 18)
+ 8  [o11:5,137,tC4 GHOST]   rejected     (no OAM entry)
+ 8  [o11:5,145,tC6 GHOST]   rejected     (no OAM entry)
+```
+
+`drawn` 26795 → 26555 over 1180 frames. Object 10 is unaffected, so a sprite the
+game *did* emit and the hardware hid is still completed, which is the whole
+point of the feature.
+
+### Recording a playthrough: `--record-input`, and why it is not optional
+
+`CycHostExtras` has an `input` callback — "final NES controller bytes, after host
+mapping and before latching". Both host loops call it immediately before
+`cyc_session_frame_begin()` (`cyc_sdl.c:1470`, `cyc_host.c:1602`), so `s_frame`
+there *is* the index of the frame about to run, which is exactly what
+`input_tick()` matches steps against. `--record-input FILE` therefore writes the
+plain `--input` schedule format, not a new one, and `tools/play_record.sh` wraps
+it with the trace and the screenshots.
+
+This is not a convenience. Two hand-written vectors had already failed here for
+reasons nobody could have guessed by reading the code — the court input window
+opens at frame 594 and a margin boundary artifact needs the camera to pan the
+whole width before it shows anything — and **neither is expressible as a
+schedule someone typed**. The seventh bug above was found by a played session and
+had survived the sweep vector, the pan vector, the idle vector and the throw
+stress vector.
+
+Two windowed runs of one schedule are byte-identical to each other (same recorded
+vector, same trace), which is what makes a played session reproducible.
+
+### Two bugs in the instrumentation, both found by using it
+
+1. **The `sdbw` trace line had no newline before `sdbm`**, so the per-sprite
+   entries were glued onto the summary line and `margin_track.py`'s regex matched
+   nothing — it reported `no sdbw lines in that log` on exactly the runs where
+   you turn the trace on to run it. Fixed by printing the line closer first.
+2. **`margin_track.py`'s `part` check only fires for wholly off-screen objects.**
+   An object straddling the band at column 5, holding 2 parts instead of 8,
+   passes clean. That is how the seventh bug survived an audit that was otherwise
+   green.
+
+### Open, shelved: Bean Ball loses sprites while running across the full map
+
+Found by the owner playing, not by a vector. Game mode **"bean ball"** lets you
+run across the entire map; widescreen's margins and the flicker mod both work in
+that mode in general, but **running from one end of the screen to the other**
+makes sprites disappear one at a time until a single player sprite is left, cut
+in half. `overflow 0`, `backstop 0` — not §2.1's runaway list — and the
+background is perfect (`1183 composed, 1 pillarboxed, seam diff 2 px`), so the
+compositor is not involved. The mod replaces the machine's sprites with its own
+captured list, so a short list is missing sprites.
+
+**Not attributed.** Whether the game emits fewer sprites or the mod drops them is
+unknown, and the two need opposite fixes. See **plan.md item 14**, which carries
+the owner's frame-by-frame description, the measured per-frame list decay, the
+next measurement, and how to get a fresh capture.
+
+### What this does not fix
+
+- **Vertical culling is untouched, deliberately.** A sprite culled for being
+  above or below the viewport is not captured: the camera scrolls horizontally
+  only, so an off-screen row is off-screen for good and there is no vertical
+  margin to put it in.
+- **Only the two culled emitters.** The damage-number pair (`$966D`) and the
+  block copier (`$A36C`) have no position accumulator and no such cull; they
+  are HUD-ish and never strayed off-screen in any measured frame.
+- **Past the stadium's end there is nothing.** §25's limit stands: the world is
+  512 pixels wide, so at 32:9 an object far enough out lands on backdrop. The
+  sprite is drawn where the game put it, which may be over black.
+- **The 8-per-scanline limit is still not modelled** in the margin (nor in the
+  flicker mod — research §2 open item 11).
+- **A margin sprite's part set is the last list's, not this frame's.** The game
+  rebuilds a list over two frames and leaves OAM alone for three to six more, and
+  the margin follows that cadence by construction — it re-places from the record
+  every frame but re-reads tiles only when the object is emitted. That is the same
+  staleness the machine has, and it is why the audit's `part` check tolerates a
+  partial set while an object is on-screen.
+
+---
+
+## 27. Sprite judder: the sprite list and the scroll take turns
+
+**OPEN.** Recorded with a measurement and a reproduction, and deliberately
+*not* with a conclusion: whether the game's own cadence or this engine's PPU
+model is responsible is the open question, and it decides where a fix would go.
+
+### What it looks like
+
+While the camera is moving, a player does not slide smoothly across the court.
+He holds still for several frames, then jumps several pixels — and the jump is
+not the same size as the court's, so he visibly detaches from the floor he is
+standing on and snaps back. It is most obvious with a **still** camera
+elsewhere in the frame to compare against, and on a **flat** stretch of court
+where the background has little horizontal detail to hide it.
+
+### Reproducing it
+
+`tas/vectors/sdb_bar.input`. Measured timings on this ROM, all of which had to be
+found rather than guessed, and each of which silently swallows input aimed
+before it:
+
+| frame | what |
+|---|---|
+| **412** | the court appears — camera 128 shows up, the display records start populating at 421 |
+| **594** | the input window opens. Direction presses before this are **dropped**: pulsing LEFT from frame 380 leaves the camera at 128 until 594, when it starts stepping 128, 121, 115, 108, 102, 95, 89 … |
+| **617** | a single left tap starts a run |
+
+```bash
+./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 700 \
+  --input tas/vectors/sdb_bar.input --ram-init zeros \
+  --shot-every 1 --screenshot tmp/jud/s_
+# frames 614-619, native 256 columns, side by side
+```
+
+It needs **no mods at all** — this is the stock picture. That is the first thing
+to establish, because the obvious suspects (the flicker mod restoring sprites,
+the widescreen compositor re-placing margin sprites) are all absent here.
+
+### What is measured
+
+Pick one sprite — OAM row 143, tile `$20`, present on 60 consecutive frames — and
+compare its OAM X with the frame's scroll. `cyc_render_line_scroll_x(160)` gives
+the scroll the background was actually rendered with; the OAM comes from a
+`--frame-log`.
+
+```
+frame | scroll | OAM X | X + scroll |   d(X) | d(scroll)
+ 602  |  134   |   73  |   207   |
+ 603  |  134   |   66  |   200   |   -7   |    0     <- sprite moves, court does not
+ 605  |  141   |   66  |   207   |    0   |   +7     <- court moves, sprite does not
+ 610  |  141   |   60  |   201   |   -6   |    0
+ 612  |  147   |   60  |   207   |    0   |   +6
+ 617  |  147   |   53  |   200   |   -7   |    0
+ 619  |  154   |   53  |   207   |    0   |   +7
+```
+
+`X + scroll` alternates between **200 and 207**. The sprite's position *relative
+to the court* is oscillating by 6-7 px — half a character's width — and the sprite
+step and the scroll step are **2 frames apart** for the whole constant-direction
+part of the run (603/605, 610/612, 617/619, 624/626), compressing to 1 frame at
+the turnaround. That is the judder: two 7 px steps that should coincide,
+alternating.
+
+### What is ruled out
+
+- **A mid-frame scroll split.** `cyc_render_line_scroll_x` at rows 60, 120, 160,
+  200 and 239 is **identical on every frame checked** (597-625). So this is not
+  the game writing `$2005` part-way down the screen and the screen tearing at the
+  write point.
+- **A deliberate OAM snapshot in the renderer.** `cyc_render_sprites`
+  (`cyc_render.c:126`) reads `ppu.oam` live, so there is no frame-boundary buffer
+  that could be a frame stale.
+- **Fine scroll.** The scroll never takes a value between its 6-7 px steps at all
+  (128 → 134 at frame 598 → 141 at 605 → 147 at 612 → 154 at 619), so the game is
+  scrolling coarsely — there is no sub-pixel motion being dropped.
+
+### What is NOT established
+
+**Whether the game writes `$2005` and OAM two frames apart, or this engine adds
+the latency.** Nothing measured so far distinguishes them, and guessing is how an
+emulator bug gets shipped as a faithful reproduction — or the reverse.
+
+The oracle settles it, and the harness exists:
+
+```bash
+python3 tools/tas/input_to_tas.py tas/vectors/sdb_bar.input \
+    --out tas/vectors/sdb_bar.tas.json --frames 700
+python3 tools/tas/run_tas.py --tas tas/vectors/sdb_bar.tas.json \
+    --frames 700 --out tas/runs/bar700
+# then compare MesenCE's own (OAM X + scroll) against the table above
+```
+
+`mesen_tas.lua` already logs scroll and OAM per frame in
+`mesen_state.jsonl`. The gap that had to be filled first is that no converter
+read our own `.input` vectors — only speedrun movies, via `bk2_to_tas.py` and
+`fm2_to_tas.py` — so `tools/tas/input_to_tas.py` was written for it, verified to
+reproduce the vector's effective input on **0 differing frames out of 1200**.
+
+- MesenCE shows the same 200↔207 alternation → **the game's own cadence**.
+  Nothing to fix; it is recorded here so nobody re-chases it, and it is *not* a
+  mod.
+- MesenCE holds it constant → **ours**, and it belongs upstream in the PPU model
+  as a patch beside `patches/006`, not in `src/sdb_host_extras.c`.
+
+### Why it must not become a mod either way
+
+A presentation mod cannot reach it: the judder is in the machine's own 256-column
+picture, which the compositor's contract is to reproduce faithfully. A mod that
+smoothed it would make the widescreen frame disagree with the stock frame, which
+is the one thing §25's copy-back and the 0-pixel gate exist to prevent.
+
+The margin sprites of §26 are the only thing a mod legitimately owns here, and
+they already track the presented frame's scroll rather than the game's camera
+variable — see §26's note on the two bases.
+
+### Related, and *not* the same thing
+
+§2's character flicker is sprites being **dropped**; this is sprites being drawn
+at a position two frames behind the floor. Both come from the same underlying
+cadence — the game rebuilds a list over two frames and then leaves OAM alone —
+but they are different symptoms, different measurements, and a fix for one says
+nothing about the other. §2's fix is opt-in because it changes the guest; this one
+cannot be changed by a mod at all.

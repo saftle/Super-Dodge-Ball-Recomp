@@ -129,3 +129,54 @@ crc32 = 0x2455BC0C
 addr = 0xA394
 length = 10
 crc32 = 0x21EC8CC4
+
+# The per-sprite position point ($8483, bank 5), which the widescreen
+# compositor's margin-sprite feature reads. One instruction after the
+# accumulator loop that folds the object's camera-relative X ($0A/$0B) and Y
+# ($0C/$0D) into the per-part position ($04/$05, $06/$07), and BEFORE the
+# game's own off-screen cull:
+#
+#     $8488: LDA $04 / CMP #$04 / BCC $849A     X < 4      -> hide
+#     $848E: LDA $06 / CMP #$04 / BCC $849A     Y < 4      -> hide
+#     $8494: LDA $05 / ORA $07 / BEQ $84A1      high byte != 0 -> hide
+#     $849A: LDA #$F8 / STA $0200,X             hide (Y = $F8)
+#     $84A1: LDA $04 / SEC / SBC #$04 / STA $0203,X   OAM X = X16 - 4
+#     $84A9: LDA $06 / CLC / ADC #$04 / EOR #$FF / SEC / SBC #$10
+#           STA $0200,X                             OAM Y = $EB - Y16
+#
+# So the game computes every sprite's position as a 16-bit SCREEN coordinate
+# and then throws away anything outside [4, 255] -- it culls by writing Y=$F8
+# into the OAM slot it would have used. $0617 is unchanged at this point (the
+# culled path branches to $84C1, past the cursor bump at $84B6), so a sprite
+# here is one the game decided not to draw, and $04/$05 is where it would have
+# gone. That 16-bit value is the whole margin-sprite mechanism: OAM X is a byte
+# and cannot express it, but the accumulator can (docs/research.md 26).
+#
+# It is in the same routine as the $84B6 site above, so the $821E seed already
+# compiles it natively and no new seed is needed.
+
+[[mod_function_hook]]
+addr = 0x8483
+length = 10
+crc32 = 0x00F439CD
+
+# The single-sprite emitters' equivalent of the same cull ($8302), which the
+# three one-sprite paths -- $8294 (record bit 6), $82B9, $82DD (bit 4) -- all
+# jump to:
+#
+#     $8307: LDA $04 / CMP #$04 / BCC $8342     X < 4         -> hide
+#     $830D: LDA $06 / CMP #$04 / BCC $8342     Y < 4         -> hide
+#     $8313: LDA $05 / ORA $07 / D0 29 BNE $8342   high byte set -> hide
+#     $8342: LDA #$F8 / STA $0200,X / RTS       hide (Y = $F8)
+#     $8319: ... STA $0200,X                     OAM Y = $EB - Y16
+#     $8330: LDA $04 / SEC / SBC #$04 / STA $0203,X   OAM X = X16 - 4
+#
+# Same 16-bit position, same [4,255] window, different tile source: this path
+# still holds the tile and attribute in $02/$03 and stores them only after the
+# cull passes, where the strip walk has already written them into the OAM slot.
+# That is the one thing the capture callback has to branch on.
+
+[[mod_function_hook]]
+addr = 0x8302
+length = 10
+crc32 = 0x0C4B38A0

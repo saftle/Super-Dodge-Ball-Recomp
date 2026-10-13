@@ -1,0 +1,64 @@
+# Super Dodge Ball (USA) - "bean ball run" input schedule.
+#
+# RECORDED, not written. This is `tmp/bar-artifact-2/repro.input`, captured with
+# `nes_game --record-input` by playing the game, in game mode BEAN BALL, then
+# running across the full map. Kept because the Bean Ball sprite-list
+# degeneration (research.md 26, plan.md item 14) needs a run in that mode, and
+# no hand-written schedule reproduces it: the camera has to travel the whole map
+# while the player is moving, and the failure is in how the flicker mod's sprite
+# list behaves while it happens.
+#
+# The bug is OPEN and UNATTRIBUTED - it is not known yet whether the game emits
+# fewer sprites in this mode or the mod drops them, and those need opposite fixes.
+# Replay it in a WINDOW, not headless: the window and the headless host do not
+# run the same guest state (frames 0-3 match, frame 4 diverges -- research.md 26).
+# A --virtual-pad replay also needs Player1Source = 2, because player 1 is the
+# keyboard and player 2 the controller.
+#
+# Symptom to look for: the presented sprite list shrinks as the run proceeds
+# (SDB_TRACE=1 prints `sdb <frame> <peak-list> ...` per frame), ending with one
+# player sprite cut in half. Compare against the committed stadium vectors, which
+# sit at 44-54 throughout.
+#
+# Format: one "<frame> <BUTTONS>" line per state change, absolute state
+# ("-" is release). `#` starts a comment.
+36 START
+43 -
+103 DOWN
+105 -
+107 DOWN
+111 -
+136 START
+142 -
+175 START
+179 -
+328 DOWN
+340 DOWN+RIGHT
+358 DOWN
+392 -
+397 LEFT
+399 -
+403 LEFT
+492 -
+496 RIGHT
+500 -
+502 RIGHT
+518 -
+532 LEFT
+537 -
+541 LEFT
+547 -
+548 LEFT
+553 -
+559 LEFT
+563 -
+577 RIGHT
+580 -
+583 RIGHT
+585 -
+588 RIGHT
+726 -
+727 LEFT
+735 -
+742 START
+747 -

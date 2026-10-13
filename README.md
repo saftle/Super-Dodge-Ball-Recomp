@@ -4,7 +4,7 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 
 ![Super Dodge Ball title screen (recompiled build)](docs/assets/title.png)
 
-> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). Not yet tested on a full playthrough to completion, and there is one known mod bug below. See `docs/plan.md` for the frontier.
+> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). The **widescreen mod is playable and has been played**: 16:9 / 21:9 / 32:9 with the court *and the players* in the margins, including the columns the game itself hides. It was found to be correct by recording and replaying real playthroughs, which is how its last two bugs were caught. Not yet tested on a full playthrough to completion, and two open questions remain (one Bean Ball bug, one unattributed judder). See `docs/plan.md` for the frontier.
 
 > *Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong here. This port is in development — expect rough edges.*
 
@@ -121,6 +121,20 @@ with it off the output is byte-identical to the unmodded game.
   columns at the left that the game hides with PPUMASK — blank in every one of 2112
   measured frames. Only takes effect together with widescreen.
 
+  The extra columns carry **the players too**, not just the court. Super Dodge Ball
+  places every sprite in a 16-bit screen coordinate and then hides anything
+  outside its own 256-column viewport, so **40% of the objects on the pitch are
+  off-screen at any moment** and the NES simply cannot show them. Widescreen
+  recovers the placement the game computed and draws it there — facing,
+  animation frame and palette included. This is the thing wideNES names as the
+  reason it never shipped: it warps pixels it has already been given, so a
+  sprite that was never drawn is unreachable. Here the guest still knows where
+  the object is.
+
+  It is strictly presentation: 700 frames of RAM, CIRAM, OAM, palette and picture
+  are byte-identical with it on or off, and the centre 256 columns differ by
+  zero pixels. For background-only margins, pass `--margin-sprites 0`.
+
   Headless:
 
   ```bash
@@ -129,7 +143,13 @@ with it off the output is byte-identical to the unmodded game.
   ```
 
   Design notes, the four reconstruction bugs the seam check caught, and the
-  overscan measurement are in `docs/research.md` §25.
+  overscan measurement are in `docs/research.md` §25. The margin-sprite half —
+  and the seven placement/boundary bugs found while auditing it, the last two by
+  recording a played session — are in §26.
+
+  **To play it and record what you see**, use `tools/play_record.sh` below. That
+  is how the margin feature was verified: not by running a script, but by playing
+  the game and replaying the session.
 
 For headless runs the catalog is only read when you point at it, and the feature is
 off unless you ask for it:
@@ -191,7 +211,7 @@ Clones `external/mesence` from GitHub, builds with `USE_GCC=true make -j$(nproc)
 | NES Button | Keyboard | Gamepad 1 |
 |---|---|---|
 | A | Z | a |
-| B | X | y |
+| B | X | x |
 | Select | \ | back |
 | Start | Return | start |
 | Up | Up | d-pad Up |
@@ -206,16 +226,56 @@ Static recompilation, not an emulator. The original 6502 machine code is transla
 - **`CMakeLists.txt`** — The game project (root). Wraps the submodule's `runner/cyc/project.cmake` and adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own project file can't express — so the submodule stays pristine.
 - **`src/game.toml`** — Recompiler config: display `name` (window title), a `cycle_seed_file`, and ten content-keyed `[[mod_function_hook]]` sites. Hooks are keyed by `crc32`, never by ROM bytes. Fed to the cycle backend at configure time.
 - **`src/cycle_seeds.txt`** — Recompiler discovery roots. A mod hook site only exists in *recompiled* code, and the sprite emitters the mod hooks ran on the interpreter; these six lines make them native. Total cycle count unchanged.
-- **`src/sdb_host_extras.c`** — Our three mods: the **character-flicker mod** (captures every OAM sprite the game emits and presents them host-side, overriding the game's own object culling — research.md §2.1), the **PPU-overclocking mod** (picks a value for the backend's extra-scanlines setting — research.md §23) and the **widescreen compositor** (reads the nametable to fill a 426/560/854-column canvas, with a seam check against the machine's own background — research.md §25).
+- **`src/sdb_host_extras.c`** — Our three mods: the **character-flicker mod** (captures every OAM sprite the game emits and presents them host-side, overriding the game's own object culling — research.md §2.1), the **PPU-overclocking mod** (picks a value for the backend's extra-scanlines setting — research.md §23) and the **widescreen compositor** (reads the nametable to fill a 426/560/854-column canvas, and the game's own 16-bit sprite positions to fill it with players — research.md §25 and §26).
 - **`mods/`** — The mod packages (`manifest.toml` only; `.nesmod` archives can't carry native code). Off by default, toggleable in the launcher's Mods screen.
 - **`build-cycle/`** — Cycle-backend build (gitignored): per-instruction C (`game_cyc*.c`, one revision dir per ROM/config) + `nes_game` runner + the preloaded `mods/` catalog.
 - **`external/nesrecomp/`** — NESRecomp framework submodule (recompiler + runners)
 - **`external/mesence/`** — MesenCE emulator (reference rendering + oracle Lua API)
 - **`tools/frame_gen/`** — Mesen frame export Lua script + wrapper
 - **`tools/overclock/`** — PPU-overclocking oracle harness (research.md §23)
-- **`tools/widescreen/`** — Nametable and blank-border measurement behind widescreen (research.md §25)
+- **`tools/widescreen/`** — Nametable, blank-border and object-record measurement behind widescreen, plus `margin_track.py`, the per-sprite audit of the margin sprites (research.md §25 and §26)
 - **`tools/blargg/`** — blargg test-ROM suite on the cycle backend (`run_blargg.py`, `manifest.json`); per-ROM builds in `build-cyc-blargg/`, ROMs in `external/nes-test-roms/` (both gitignored)
 - **`tools/tas/`** — TAS-integrated differential harness: bk2/fm2 → canonical `tas.json`, shared-input runners for MesenCE + cycle backend with full state capture, three-layer first-divergence diff (`run_tas.py`, `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored)
+- **`tools/widescreen/`** — Nametable, blank-border and object-record measurement behind widescreen, plus `margin_track.py` (the per-sprite audit of the margin sprites), `objects.py`, `band_fault.py` (research.md §25, §26)
+
+## Recording a playthrough
+
+The widescreen margin bugs are found by *playing*, not by running a script: the
+court's input window opens late, a boundary artifact needs the camera to pan the
+whole width, and one bug needs the player to run across the map. None of those
+is expressible as a hand-written input schedule.
+
+```bash
+tools/play_record.sh bar-artifact 2000
+```
+
+Plays the game in a window and records the session to `tmp/bar-artifact/` as a
+replayable `--input` vector, an `SDB_TRACE=1` log, and a screenshot per frame.
+Close the window when you have what you came for — the vector records the true
+frame count.
+
+```bash
+SDB_SCALE=2 SDB_SHOT_EVERY=1 tools/play_record.sh bar-artifact   # bigger window
+```
+
+| | |
+|---|---|
+| `SDB_ASPECT` | `16:9` (default), `21:9`, `32:9`, `stock` |
+| `SDB_OVERSCAN` | `1` reveals the 8 hidden left columns (default) |
+| `SDB_FLICKER` | `1` runs the character-flicker mod (default) |
+| `SDB_SHOT_EVERY` | screenshot every N frames (default 1) |
+| `SDB_SCALE` | window scale, `1` or `2` (default 1) |
+| `SDB_FRAMES` | frame cap (default 2000) |
+
+**The scale is not optional.** `WindowScale = 3` + `Fullscreen = 1` makes each
+screenshot a 14.87 MB 1080p encode, which drops the run to ~41 fps and the game
+*and its audio* into slow motion. The script pins it; leave it pinned. Details
+and the measurements in AGENTS.md.
+
+**Analyse a capture where it was made.** The window and headless hosts do not
+run the same guest state (frames 0-3 match, frame 4 diverges), so replaying a
+recorded vector headless describes a different game. `margin_track.py` reads the
+trace log directly and needs no replay.
 
 ### Project Structure
 
@@ -349,7 +409,8 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 - ~~**Sprite flickering**~~ — **fixed, all causes.** Not emulator sprite-limit removal: the game (1) stops emitting once OAM's 64 slots fill, (2) deliberately culls one object off its own display list each frame, rotating which, so a character blinks out 4 frames in 9, and (3) draws its damage numbers and menu digits through emitters no bump hook could see. Characters now stay whole with the opt-in `super-dodgeball.character-flicker` mod — toggleable in the launcher's **Mods** screen. See `docs/research.md` §2 and §2.1.
 - **Palette mirrors** — sprite entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`) read stale in cycle snapshots (upstream model keeps power-on bytes; hardware mirrors the backdrop). Masked in the TAS diff; rendering unaffected.
 - **Widescreen cannot show more world than the game has** — the court is a 512-pixel-wide loop, so at 21:9 and 32:9 the extra columns run off the end and are filled with the backdrop. Expect a black band at whichever end the camera has reached; 16:9 usually fits.
-- **Widescreen margins are background only** — players are not drawn outside the 256-column viewport, because the game only emits sprites for what it can see.
+- ~~**Widescreen margins are background only**~~ — **fixed, and it is part of the `widescreen` feature, not a toggle.** A margin with no players in it is not a wider game, so the players the game placed outside its own viewport (40% of them at any moment) are drawn there too. `--margin-sprites 0` still exists, but only as the headless A/B switch. Seven placement/boundary bugs were found and fixed while auditing this; see `docs/research.md` §26.
+- **Bean Ball loses sprites while running across the full map** — **open, not fixed.** In that game mode (which lets you run the length of the map rather than a half-width court), running from one end of the screen to the other makes the character-flicker mod's presented sprite list shrink frame by frame — 53 sprites down to 10 — until one player sprite remains, cut in half. The background stays perfect, so it is not the widescreen compositor. It is **not yet known** whether the game emits fewer sprites in that mode or the mod drops them; the two need opposite fixes. Full write-up, measurements and the next step in `docs/plan.md` item 14.
 
 ## Developer Docs
 
