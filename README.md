@@ -224,7 +224,7 @@ Clones `external/mesence` from GitHub, builds with `USE_GCC=true make -j$(nproc)
 Static recompilation, not an emulator. The original 6502 machine code is translated to C at build time — one block per ROM instruction with every CPU cycle's bus activity spelled out — then compiled to native code and run on a cycle-accurate console model (CPU, PPU, APU, DMAs, mappers).
 
 - **`CMakeLists.txt`** — The game project (root). Wraps the submodule's `runner/cyc/project.cmake` and adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own project file can't express — so the submodule stays pristine.
-- **`src/game.toml`** — Recompiler config: display `name` (window title), a `cycle_seed_file`, and ten content-keyed `[[mod_function_hook]]` sites. Hooks are keyed by `crc32`, never by ROM bytes. Fed to the cycle backend at configure time.
+- **`src/game.toml`** — Recompiler config: display `name` (window title), a `cycle_seed_file`, and twelve content-keyed `[[mod_function_hook]]` sites: the ten the character-flicker mod hooks, plus `$8483` and `$8302` that read the game's off-screen sprite cull for the widescreen margins. Hooks are keyed by `crc32`, never by ROM bytes. Fed to the cycle backend at configure time.
 - **`src/cycle_seeds.txt`** — Recompiler discovery roots. A mod hook site only exists in *recompiled* code, and the sprite emitters the mod hooks ran on the interpreter; these six lines make them native. Total cycle count unchanged.
 - **`src/sdb_host_extras.c`** — Our three mods: the **character-flicker mod** (captures every OAM sprite the game emits and presents them host-side, overriding the game's own object culling — research.md §2.1), the **PPU-overclocking mod** (picks a value for the backend's extra-scanlines setting — research.md §23) and the **widescreen compositor** (reads the nametable to fill a 426/560/854-column canvas, and the game's own 16-bit sprite positions to fill it with players — research.md §25 and §26).
 - **`mods/`** — The mod packages (`manifest.toml` only; `.nesmod` archives can't carry native code). Off by default, toggleable in the launcher's Mods screen.
@@ -233,10 +233,9 @@ Static recompilation, not an emulator. The original 6502 machine code is transla
 - **`external/mesence/`** — MesenCE emulator (reference rendering + oracle Lua API)
 - **`tools/frame_gen/`** — Mesen frame export Lua script + wrapper
 - **`tools/overclock/`** — PPU-overclocking oracle harness (research.md §23)
-- **`tools/widescreen/`** — Nametable, blank-border and object-record measurement behind widescreen, plus `margin_track.py`, the per-sprite audit of the margin sprites (research.md §25 and §26)
 - **`tools/blargg/`** — blargg test-ROM suite on the cycle backend (`run_blargg.py`, `manifest.json`); per-ROM builds in `build-cyc-blargg/`, ROMs in `external/nes-test-roms/` (both gitignored)
 - **`tools/tas/`** — TAS-integrated differential harness: bk2/fm2 → canonical `tas.json`, shared-input runners for MesenCE + cycle backend with full state capture, three-layer first-divergence diff (`run_tas.py`, `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored)
-- **`tools/widescreen/`** — Nametable, blank-border and object-record measurement behind widescreen, plus `margin_track.py` (the per-sprite audit of the margin sprites), `objects.py`, `band_fault.py` (research.md §25, §26)
+- **`tools/widescreen/`** — Measurement behind research.md §25–26: `nametable.py`, `blank_extent.py`, `objects.py`, `margin_track.py` (the per-sprite audit of the margin sprites) and `band_fault.py`
 
 ## Recording a playthrough
 

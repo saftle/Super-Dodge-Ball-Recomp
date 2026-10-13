@@ -873,8 +873,8 @@ not primary.
 - **Game project**: repo-root `CMakeLists.txt` (adds `CXX`/`MODS`/`GAME_ID`/`HOST_EXTRAS`); builds `build-cycle/nes_game`
 - **Generated C code**: `build-cycle/cycle-nes_game/<rev>/generated/game_cyc*.c`, gitignored, one revision dir per ROM/config revision
 - **Builds**: `build-cycle/` only (the legacy `build/` and `build-diag/` are gone with the legacy runner)
-- **Config**: `src/game.toml` carries the display name plus ten `[[mod_function_hook]]` sites and a `cycle_seed_file`; no `extra_func`, no `force_interp`, no discovery tuning needed for the stock ROM
-- **Mods**: `super-dodgeball.character-flicker` and `super-dodgeball.ppu-overclock`, both off by default; packages preloaded into `build-cycle/mods/` at build time; window picks them up via the launcher, headless needs `--mods-root build-cycle/mods`. VSync is a launcher Graphics setting (patch 007), not a mod. Reproduction vector for both flicker fixes: `tas/vectors/sdb_idle.input`
+- **Config**: `src/game.toml` carries the display name plus twelve `[[mod_function_hook]]` sites (ten for the character-flicker mod, two for the widescreen margins) and a `cycle_seed_file`; no `extra_func`, no `force_interp`, no discovery tuning needed for the stock ROM
+- **Mods**: `super-dodgeball.character-flicker`, `super-dodgeball.ppu-overclock` and `super-dodgeball.widescreen`, all off by default; packages preloaded into `build-cycle/mods/` at build time; window picks them up via the launcher, headless needs `--mods-root build-cycle/mods`. VSync is a launcher Graphics setting (patch 007), not a mod. Reproduction vector for both flicker fixes: `tas/vectors/sdb_idle.input`
 - **Native share**: ~60–77% of cycles run recompiled code, the rest via the interpreter — bit-exact either way, informational only, never a gate. `src/cycle_seeds.txt` roots the sprite emitter natively so the mod's hooks can exist there at all; total cycle count unchanged by it
 - **Verification**: 400-frame TAS byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25
 - **Venv**: `nesasm` 0.0.8 only (pip broken); system `python3` has Pillow + numpy
@@ -1616,7 +1616,9 @@ backdrop     left sideline     crowd             right sideline     backdrop
 
 So a margin pixel is *read*, not remembered: scroll → world column → tile →
 attribute → pattern byte → palette, exactly as the PPU would. No isolated
-guest calls, no world cache, no `[[mod_function_hook]]` sites, no seeds.
+guest calls and no world cache; the background margin needs no
+`[[mod_function_hook]]` sites and no new seeds. (§26 later adds two sites, but
+for the *sprites* in the margin rather than the court under them.)
 
 **The four bugs the seam check caught** (each produced a plausible picture, none
 produced an error; found by comparing our reconstruction against the machine's
