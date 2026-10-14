@@ -1,8 +1,10 @@
 # tools/widescreen — analysis behind research.md §25 and §26
 
-Five scripts. Four read a `--frame-log` binary or a trace and back a specific
-claim in `docs/research.md` §25-26; `json_trace.py` reads the `SDB_TRACE_JSON`
-stream instead. Nothing here runs the emulator; make the log first.
+Six scripts, and one of them is shared rather than run. Five read a
+`--frame-log` binary or a trace and back a specific claim in
+`docs/research.md` §25-26; `json_trace.py` reads the `SDB_TRACE_JSON` stream
+instead. `cycframe.py` is the `--frame-log` reader the other four sit on.
+Nothing here runs the emulator; make the log first.
 
 ## Make the logs
 
@@ -19,6 +21,50 @@ mkdir -p tmp/ws
 The logs are ~127 MiB each; `tmp/` is scratch, so regenerate rather than commit
 them. Use a **copy** of the mods dir if you also pass `--mods-root`, because
 `state.toml` is shared mutable state.
+
+## `cycframe.py` — the `--frame-log` reader (a library, not a tool)
+
+Four of the scripts here each re-implemented the same twenty lines of CYCFRAME
+header parsing. That is not a style complaint. A change to the format breaks
+three of them **silently**, and a tool that reads nothing reports nothing wrong
+— the same failure the project has already paid for twice with its own trace
+(research.md §26). One reader, one place to be wrong.
+
+Format, from `runner/cyc/cyc_host.c` `write_frame_log()`:
+
+```
+"CYCFRAME"  u32 version(2)
+per frame:  u32 frame, u32 cycles lo, u32 cycles hi, u32 lengths[6]
+            u8 palette[32], u8 oam[256], then ram, ciram, cart, chr, picture, audio
+```
+
+`lengths` is CPU RAM, CIRAM, cartridge RAM, CHR RAM, picture bytes, FDS sound
+state. The picture is 256x240 little-endian u16 colour indices (`index |
+emphasis << 6`). Version 1 had neither the FDS length nor its blob.
+
+```python
+import sys; sys.path.insert(0, "tools/widescreen")
+from cycframe import records, picture_indices, backdrop
+for r in records(path, want=("frame", "cycles", "ram")):
+    ...
+```
+
+- **`want`** names the fields to materialise; everything else is `seek`-ed past.
+  That is free, and it is **not a speedup for this game**: its cart has no
+  cartridge RAM and no CHR RAM blobs, so `blank_extent.py` skips 4 KiB of a
+  127 KiB record and the timings are unchanged. The saving is real on a cartridge
+  that has them. `want` is worth having for the honesty, not the microseconds.
+- **`r.cycles`** is the per-frame cycle count, which every one of the four
+  parsers was discarding as an unnamed unpack field. Measured on a 400-frame
+  `sdb_sweep` log: **29780.5 cycles/frame**, against the documented NTSC 29781.
+  That is a free cross-check on any `--frame-log`.
+- **Truncation is bounds-checked.** Seeking past EOF succeeds in Python and the
+  next read just returns `b''`, so a log cut mid-record would otherwise still
+  yield that record — silently, on exactly the runs where the data is short. The
+  original four all had that hole. Verified: cutting 1 B … 400 KB off a 400-frame
+  log yields exactly `400 - floor(cut / 127300)` records for every `want`-set.
+- A bad magic or an unknown version is a `SystemExit` naming the path, not a
+  traceback.
 
 ## `nametable.py` — why the margins can be read, not remembered
 

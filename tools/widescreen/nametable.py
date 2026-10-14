@@ -17,29 +17,14 @@ $2000-$23FF and $2400-$27FF are two distinct pages -- 32x30 tiles side by side,
 attribute table. Attributes therefore live at page offset 0x3C0 ($23C0/$27C0),
 which is why an attribute address built the textbook way reads tile bytes.
 """
-import struct
 import sys
+
+from cycframe import records as _records
 
 
 def records(path):
-    with open(path, "rb") as f:
-        if f.read(8) != b"CYCFRAME":
-            raise SystemExit("not a CYCFRAME log")
-        f.read(4)
-        while True:
-            head = f.read(36)
-            if len(head) < 36:
-                return
-            (fr, _, _, l_ram, l_ciram, l_cart, l_chr, l_pic, l_aud) = struct.unpack("<9I", head)
-            f.read(32)      # palette
-            f.read(256)     # oam
-            f.read(l_ram)
-            ciram = f.read(l_ciram)
-            f.read(l_cart)
-            f.read(l_chr)
-            f.read(l_pic)
-            f.read(l_aud)
-            yield fr, ciram
+    for r in _records(path, want=("frame", "ciram")):
+        yield r.frame, r.ciram
 
 
 def show(ciram, rows):

@@ -60,8 +60,9 @@ frame, so a report can point at a number instead of "somewhere around there".
 import argparse
 import collections
 import re
-import struct
 import sys
+
+from cycframe import records as _records
 
 REC_BASE = 0x0618
 REC_STRIDE = 7
@@ -93,27 +94,17 @@ def read_trace(path):
 def read_records(path, lo, hi):
     """{frame: {index: (state, selector, screen X)}} from a --frame-log."""
     out = {}
-    with open(path, "rb") as f:
-        if f.read(8) != b"CYCFRAME":
-            raise SystemExit(f"{path}: not a CYCFRAME log")
-        f.read(4)
-        while True:
-            head = f.read(36)
-            if len(head) < 36:
-                return out
-            (fr, _, _, l_ram, l_ciram, l_cart, l_chr, l_pic, l_aud) = struct.unpack("<9I", head)
-            f.read(32)
-            f.read(256)                       # OAM: not used, see the note below
-            ram = f.read(l_ram)
-            f.read(l_ciram); f.read(l_cart); f.read(l_chr); f.read(l_pic); f.read(l_aud)
-            if not (lo <= fr <= hi):
-                continue
-            cam = ram[CAMERA] | (ram[CAMERA + 1] << 8)
-            recs = {}
-            for i in range(13):
-                r = ram[REC_BASE + REC_STRIDE * i: REC_BASE + REC_STRIDE * i + REC_STRIDE]
-                recs[i] = (r[0], r[1], (r[3] | (r[4] << 8)) - cam)
-            out[fr] = recs
+    for rec in _records(path, want=("frame", "ram")):
+        if not (lo <= rec.frame <= hi):
+            continue
+        ram = rec.ram
+        cam = ram[CAMERA] | (ram[CAMERA + 1] << 8)
+        recs = {}
+        for i in range(13):
+            r = ram[REC_BASE + REC_STRIDE * i: REC_BASE + REC_STRIDE * i + REC_STRIDE]
+            recs[i] = (r[0], r[1], (r[3] | (r[4] << 8)) - cam)
+        out[rec.frame] = recs
+    return out
 
 
 def main():

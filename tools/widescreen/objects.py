@@ -36,8 +36,9 @@ how many of them fall outside the viewport.
     python3 tools/widescreen/objects.py tmp/ws/objs.bin --cull
     python3 tools/widescreen/objects.py tmp/ws/objs.bin --records 605
 """
-import struct
 import sys
+
+from cycframe import records as _records
 
 REC_BASE = 0x0618       # display record, 7 bytes per object
 REC_STRIDE = 7
@@ -48,25 +49,9 @@ CURSOR = 0x0617
 
 
 def records(path):
-    """Yield (frame, ram, oam, ciram, picture) from a CYCFRAME v2 log."""
-    with open(path, "rb") as f:
-        if f.read(8) != b"CYCFRAME":
-            raise SystemExit("not a CYCFRAME log")
-        f.read(4)
-        while True:
-            head = f.read(36)
-            if len(head) < 36:
-                return
-            (fr, _, _, l_ram, l_ciram, l_cart, l_chr, l_pic, l_aud) = struct.unpack("<9I", head)
-            f.read(32)
-            oam = f.read(256)
-            ram = f.read(l_ram)
-            ciram = f.read(l_ciram)
-            f.read(l_cart)
-            f.read(l_chr)
-            pic = f.read(l_pic)
-            f.read(l_aud)
-            yield fr, ram, oam, ciram, pic
+    """Yield (frame, ram, oam, ciram, picture) from a CYCFRAME log."""
+    for r in _records(path, want=("frame", "ram", "oam", "ciram", "picture")):
+        yield r.frame, r.ram, r.oam, r.ciram, r.picture
 
 
 def obj_records(ram):

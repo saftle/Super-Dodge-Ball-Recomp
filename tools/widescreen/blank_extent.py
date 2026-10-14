@@ -20,30 +20,15 @@ feature removes; the right 8 carry the court, and the blank top and bottom
 bands are used by frame 420, a full-screen wipe -- so neither side nor the
 vertical bands may be cut.
 """
-import struct
 import sys
 from collections import Counter
 
+from cycframe import backdrop, picture_indices, records
+
 
 def frames(path):
-    with open(path, "rb") as f:
-        if f.read(8) != b"CYCFRAME":
-            raise SystemExit("not a CYCFRAME log")
-        f.read(4)
-        while True:
-            head = f.read(36)
-            if len(head) < 36:
-                return
-            (fr, _, _, l_ram, l_ciram, l_cart, l_chr, l_pic, l_aud) = struct.unpack("<9I", head)
-            f.read(32)
-            f.read(256)
-            f.read(l_ram)
-            f.read(l_ciram)
-            f.read(l_cart)
-            f.read(l_chr)
-            pic = f.read(l_pic)
-            f.read(l_aud)
-            yield fr, pic
+    for r in records(path, want=("frame", "picture")):
+        yield r.frame, r.picture
 
 
 def main():
@@ -57,8 +42,8 @@ def main():
     odd = []
     for p in paths:
         for fr, pic in frames(p):
-            vals = struct.unpack("<%dH" % (256 * 240), pic)
-            bg = Counter(v & 0x3F for v in vals).most_common(1)[0][0]
+            vals = picture_indices(pic)
+            bg = backdrop(pic)
             backdrops[bg] += 1
             rowink = [0] * 240
             colink = [0] * 256
@@ -66,7 +51,7 @@ def main():
                 base = y * 256
                 n = 0
                 for x in range(256):
-                    if (vals[base + x] & 0x3F) != bg:
+                    if vals[base + x] != bg:
                         n += 1
                         colink[x] += 1
                 rowink[y] = n
