@@ -213,7 +213,7 @@ when you do not know the frame count in advance.
 *presenting*.** It decides how often the frame is presented at all, and the
 compositor only runs when something presents. So a large stride skips the
 compositor entirely: at `--present-every 200` over 1200 frames the compositor ran
-~6 times and `margin sprites:` read **167 drawn** instead of 33726. Verified
+~6 times and `margin sprites:` read **167 drawn** instead of 33855. Verified
 2026-10-13. Consequences:
 
 - **Every `drawn` / `margin sprites:` figure is stride-dependent and only
@@ -521,6 +521,12 @@ Gates:
 5. **No black gutter** — measure fully-black column runs in the output. The game's PPUMASK
    left-column clip puts one at the margin boundary unless the reveal is on (it is, with
    `widescreen`; `SDB_OVERSCAN=0` in the environment turns it off for this measurement).
+   **And no holes in the revealed band.** Screen columns 0-7 are PPUMASK-clipped, so the
+   PPU never paints them and a sprite standing there is drawn ONLY by the margin path.
+   Do **not** reintroduce a `sdb_oam_has`-style test that skips a band part when OAM
+   lacks it: that reads "the machine did not emit it this frame", which is the truncation
+   this mod exists to undo, and it punches background-coloured holes through sprites that
+   flicker as the camera pans (research §26).
 6. **Play it** — a scripted run never reaches team-select, the roster screens or the
    innings changes, which are exactly the states the seam gate has to hold through.
 
@@ -591,14 +597,15 @@ line means the capture is off, not that there is nothing to capture.**
    committed baseline exactly (cycles *and* native cycles, 0 callbacks). Extra
    `[[mod_function_hook]]` sites must cost nothing when disabled.
 5. **They actually fire** — `off-edge` must be non-zero (3951 over 1200 sweep frames
-   with the flicker mod on) and `drawn` must follow it (**33726**; **104519** over 3000
+   with the flicker mod on) and `drawn` must follow it (**33855**; **104612** over 3000
    `sdb_throw` frames). **All four figures are `--present-every 1` figures** — see
    the stride warning above; at any other stride they read far lower and mean
    nothing. A callback count of 4150 with `off-edge` at 0 means the CRC
-   key is wrong. **33726** and **104519**, re-baselined 2026-10-13.
-   The previous sweep figure of 33855 is *explained*: it is what `drawn` was
-   before research §26's `sdb_oam_has()` ghost fix, and that fix rejects exactly
-   **129** parts over this vector — 33726 + 129 = 33855, no residue. The
+   key is wrong. **33855** and **104612**, re-baselined 2026-10-13.
+   The sweep figure was **33855 before research §26's `sdb_oam_has()` ghost filter
+   and 33726 after it**, a difference of exactly **129** parts over this vector.
+   That ordering was the wrong way round and is now reversed — the filter was the
+   bug, so 33855 is current and 33726 is the broken reading (research §26). The
    previous throw figure of 104240 is **not** explained: it is 279 *below* what
    this binary produces while that vector's ghost count is only 93, and no
    configuration reproduces it (aspect, reveal, flicker mod and vector length

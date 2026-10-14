@@ -2275,6 +2275,74 @@ Also measured here, and worth keeping: **`--present-out` indexes one frame ahead
 of the trace's frame counter.** Replay frame *f* is capture frame *f+1*. Both of
 the captures above were misread for several passes because of it.
 
+### The revealed band had holes in it: `sdb_oam_has` was the bug it claimed to fix
+
+Reported as *not* truncation — light pixels blinking out of a sprite, head to
+toe, as the edge of the 4:3 viewport swept across it, sometimes in the middle of
+the wide frame. That is the **revealed band**: screen columns 0-7, which PPUMASK
+clips, so the PPU never paints them. The compositor refills them from the
+nametable, and a sprite standing in them is drawn only by the margin path.
+
+The margin path carried this guard:
+
+    if (completes && !sdb_oam_has(sx, m->y)) continue;   /* "GHOST" */
+
+— skip a band part when OAM does not hold it. **That is the wrong question.** OAM
+not holding the sprite means the machine did not emit it *this frame*, which for
+this mod is the truncation it exists to undo; and the PPU could not have painted
+those columns anyway, so a skipped part is a hole nothing else fills. What shows
+through is the reconstructed band background: at sweep frame 618 a light-blue
+block appears *inside the player's head*, and at 611 a dark vertical chunk is
+missing from his body.
+
+It flickered because `sdb_oam_has` is a live scan of a list the game rebuilds over
+four frames and truncates at 64 sprites, so its answer changes frame to frame.
+
+Removing it costs nothing at the seam: the blit already clips a band part to
+`px0 + 8 - left_limit` columns, and `left_limit` is `native_x0 + SDB_WS_CLIP`, so a
+part that reaches the draw paints ONLY inside the clipped band and cannot touch a
+column the machine owns. The doubling the guard was written for was impossible.
+
+    GHOST skips on a played capture:  14 -> 0
+    changed pixels:  34 of 1100 sweep frames, ALL inside canvas columns 85-92
+
+**The 129 "ghost" parts were misclassified by the very predicate that proved
+unreliable.** "no OAM entry behind it" was read as "nothing is there"; the correct
+reading is "the machine did not emit it this frame". Re-baselined: sweep 1200
+`drawn` 33726 -> **33855** (off-edge 3951, peak 64, backstop 0 unchanged); throw
+3000 104519 -> **104612** (off-edge 3237, peak 64, backstop 0 unchanged).
+
+Same lesson as the menu ghost one section down, approached from the opposite
+direction: the recurring mistake is **asking live OAM whether the machine holds a
+sprite**, because OAM is unreliable in exactly the way this mod exists to fix.
+
+**What this did NOT fix, and it is the next one.** Removing the filter leaves the
+seam *doubling*: a character straddling the edge of the 4:3 viewport is drawn by
+two sources at once — the machine paints the half inside its own picture from
+current OAM, the margin paints the band half from the captured list — and the two
+are a build apart, so the halves register 1-2 px out of line and the character
+reads as doubled with a jog down it. Reported as "the partial person from stock
+isn't lined up with the widescreen drawing of the rest of the body". That is the
+one-build staleness (plan.md 15), not a new defect, and the band holes used to sit
+on top of it and hide it. Every camera step re-registers the halves, which is why
+it reads as worse the more the view pans. Fixing it needs each entry compared
+against the OAM snapshot from its **own build**, not live OAM — the same wrong
+question as above, answered from a snapshot instead of a scan.
+
+### The doubling invariant does not hold on a match
+
+Measured while verifying the above; it qualifies a claim in this file. "Wide native
+256 == flicker-only native 256, byte for byte" was established on a **menu walk**
+(199 frames, 0 differing). On a full match it does not hold: **479 of 900 sweep
+frames differ, and 289 of 900 on a played vector** — at HEAD, before any of this
+session's work, and on the *identical* frame set with the band fix applied, which
+is neutral on it.
+
+So it is a property of quiet screens, not a general one, and the §26 measurement
+should not be read as "the two paths cannot drift". What the band fix does
+establish is narrower and checked: it changes pixels in canvas columns 85-92 and
+nowhere else.
+
 ### The `drawn` re-baseline: one figure explained, one not
 
 `SDB_TRACE_JSON` makes this decidable rather than a matter of opinion, because
@@ -2289,12 +2357,16 @@ it reports the *outcome of every part* rather than only a total. Over the
 | clip | 0 |
 | oob | 1405 |
 
-**The sweep figure is fully explained.** The previously documented `33855` is
-exactly what `drawn` was *before* the `sdb_oam_has()` ghost filter existed: the
-run's own counter reports 33726, and 33726 + 129 = **33855** with no residue.
-That is the signature of a figure captured one fix earlier in this section, and
-the fix is the seventh bug above — which removes parts from `drawn` by
-construction. So it is not drift and not a regression; it is a stale measurement.
+**The sweep figure is fully explained — and the explanation was itself wrong.**
+The previously documented `33855` is exactly what `drawn` was *before* the
+`sdb_oam_has()` ghost filter existed: the run's own counter reported 33726, and
+33726 + 129 = **33855** with no residue. That was read as a stale measurement and
+the filter as a fix.
+
+It is the other way round. **33855 is the correct figure and 33726 was the
+broken one**, because the filter asks live OAM whether the machine holds a sprite
+and acts on the answer. See "The revealed band had holes in it" immediately
+below. With the filter removed this run's counter reports **33855** again.
 
 **The throw figure is not explained.** The previously documented `104240` is
 *below* what this binary produces (104519) while that vector's ghost count is
