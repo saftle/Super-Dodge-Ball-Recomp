@@ -8,8 +8,9 @@ Cycle backend is the only play path; legacy runner retired (§§18–19 keep its
 Team-select verified byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM, 400-frame TAS); blargg
 cpu tier 25/25.
 
-**Character flicker: SOLVED, twice** (§2, §2.1). Neither cause was emulator sprite-limit
-removal; the game throttles its own sprites twice over.
+**Character flicker: SOLVED, all three causes** (§2, §2.1). None of them is emulator
+sprite-limit removal; the game throttles its own sprites three ways, and two more sprite
+classes turned up afterwards that no cursor-bump hook could see.
 
 1. OAM is built in place at `$0200` behind a cursor `$0617`, characters are 8 sprites each, and
    the `BEQ` bail at `$84B6` stops emission at 64 slots, so the missing tiles are never
@@ -31,11 +32,12 @@ team-select position numbers (§2.1).
 Frame comparison (MesenCE reference) and the blargg suite are the standing gates.
 
 **Presentation mods: three, all opt-in** — `super-dodgeball.character-flicker` (§2, §2.1),
-`super-dodgeball.ppu-overclock` (§23) and `super-dodgeball.widescreen` (§25, §26 — whose margins carry the players too, which
-also carries an `overscan` feature). Only the flicker fix changes guest
-behaviour, and only in its culling half; overclocking changes console *timing*; **widescreen
-changes nothing at all** — it reads the nametable the frame already wrote and re-presents the
-picture.
+`super-dodgeball.ppu-overclock` (§23) and `super-dodgeball.widescreen` (§25, §26). The
+widescreen package is one feature: it presents the wider canvas, reveals the clipped
+left-hand columns and draws the players the game culled off-screen, because the same
+compositor does all three. Only the flicker fix changes guest behaviour, and only in
+its culling half; overclocking changes console *timing*; **widescreen changes nothing at
+all** — it reads the nametable the frame already wrote and re-presents the picture.
 
 **Widescreen: the margins are already in the nametable, and so are the sprites** (§25, §26).
 Presenting 16:9 / 21:9 / 32:9 (426 / 560 / 854 columns) needed **no engine patch** — the widths
@@ -874,7 +876,7 @@ not primary.
 - **Generated C code**: `build-cycle/cycle-nes_game/<rev>/generated/game_cyc*.c`, gitignored, one revision dir per ROM/config revision
 - **Builds**: `build-cycle/` only (the legacy `build/` and `build-diag/` are gone with the legacy runner)
 - **Config**: `src/game.toml` carries the display name plus twelve `[[mod_function_hook]]` sites (ten for the character-flicker mod, two for the widescreen margins) and a `cycle_seed_file`; no `extra_func`, no `force_interp`, no discovery tuning needed for the stock ROM
-- **Mods**: `super-dodgeball.character-flicker`, `super-dodgeball.ppu-overclock` and `super-dodgeball.widescreen`, all off by default; packages preloaded into `build-cycle/mods/` at build time; window picks them up via the launcher, headless needs `--mods-root build-cycle/mods`. VSync is a launcher Graphics setting (patch 007), not a mod. Reproduction vector for both flicker fixes: `tas/vectors/sdb_idle.input`
+- **Mods**: `super-dodgeball.character-flicker`, `super-dodgeball.ppu-overclock` and `super-dodgeball.widescreen`, all off by default; the widescreen package is **one feature** (`widescreen`, with an `aspect` choice) that also reveals the clipped left-hand columns and draws the off-screen players. Packages preloaded into `build-cycle/mods/` at build time; window picks them up via the launcher, headless needs `--mods-root build-cycle/mods`. A `state.toml` naming a feature this build does not have (e.g. one written before the overscan fold) **hard-fails the whole catalog** rather than degrading — delete it and let the launcher rewrite it. VSync is a launcher Graphics setting (patch 007), not a mod. Reproduction vector for both flicker fixes: `tas/vectors/sdb_idle.input`
 - **Native share**: ~60–77% of cycles run recompiled code, the rest via the interpreter — bit-exact either way, informational only, never a gate. `src/cycle_seeds.txt` roots the sprite emitter natively so the mod's hooks can exist there at all; total cycle count unchanged by it
 - **Verification**: 400-frame TAS byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25
 - **Venv**: `nesasm` 0.0.8 only (pip broken); system `python3` has Pillow + numpy
@@ -1280,11 +1282,15 @@ survived it.)
 Upstream `runner/cyc`, built by our repo-root `CMakeLists.txt` (see §10): `build-cycle/nes_game`
 from our ROM + `src/game.toml`, windowed (`./build_and_run.sh`; headless flags imply headless).
 The guest machine runs **stock** — patches 006/007 are inert at stock settings,
-and of the three mods only the truncation half is presentation-only (§2, §22, §25).
+and of the three mods only the flicker mod's truncation half is presentation-only
+(§2); its culling half is not, and the overclocking mod changes console timing by
+design (§23), while widescreen changes nothing at all (§25, §26).
 Schedulable
 input (`<frame> NAMES` absolute state, same bit map).
 
-- **Mods**: all three are opt-in (off by default). They never appear in
+- **Mods**: all three are opt-in (off by default). The widescreen package is now a
+  single `widescreen` feature — enabling it also reveals the clipped left columns and
+  draws the off-screen players, because one compositor does all three (§25). They never appear in
   `--frame-log`/`--screenshot` output (those capture the machine's native frame); only
   `--present-out` and the window show them. The truncation fix (§2) is presentation only — same
   cycle count, `$02FD`/`$02FF` the only differing bytes. The culling fix (§2.1) is **not**: it
@@ -1325,12 +1331,19 @@ input (`<frame> NAMES` absolute state, same bit map).
   while either shift breaks vs unshifted at frame 6 (stack byte `$01F6`).
   Both players share input semantics; the 474 split is execution phasing,
   not input handling.
-- Windowed == headless (2026-10-02): `--virtual-pad` playback vs
-  `--input` headless, same TAS/schedule/RAM-init, pixel-identical
-  (`--present-out` vs `--screenshot`, 256x240) at frames 1/101/…/501.
-  The window adds no divergence of its own; the only input-path
-  difference anywhere is 9 opposing-dpad frames (first at 5619) the
-  windowed bindings cancel to neutral.
+- Windowed == headless — **SUPERSEDED 2026-10-13, do not rely on this.** The original
+  2026-10-02 measurement (`--virtual-pad` vs `--input`, pixel-identical at
+  frames 1/101/…/501) was five sampled frames at 256×240 with **no mods**, and it does
+  not hold further in. A windowed recording replayed headless diverges at **frame 4**
+  (scroll 32 vs 256, 496 frames matching on 0-3) and ends on a different game state —
+  2666 vs 2121 off-edge captures, 32200 vs 15504 margin sprites drawn, 769 vs 752
+  frames composed. Two windowed runs of one schedule *are* byte-identical to each other.
+  Cause is **unattributed**; it is not input (the recorded frames are exactly the frames
+  the schedule fired on, and the divergence starts four frames before the first press) and
+  it is not the pacing/slowness noted under `--present-out`. Consequence for tooling:
+  **analyse a windowed capture where it was made** — `trace.log` is the ground truth,
+  `margin_track.py` reads it directly, and a headless replay describes a different game.
+  The earlier "the window adds no divergence of its own" conclusion does not survive.
 - Power-on state feeds the game (2026-10-03): Mesen `RamPowerOnState`
   `Random` vs `AllZeros` splits from cycle-zeros at frame 25 (same 16
   title/menu bytes, deterministic across boots) while frame-0
@@ -1548,10 +1561,12 @@ no present timing can subdivide a step the guest never drew.
 
 ---
 
-## 25. Widescreen and overscan: the margins are already in the nametable
+## 25. Widescreen: the margins are already in the nametable
 
-Goal: present 16:9 / 21:9 / 32:9, and offer the "remove overscan" option
-emulators ship. **No engine patch is needed** — unlike §23, where the feature
+Goal: present 16:9 / 21:9 / 32:9, and reveal the "remove overscan" columns
+emulators ship. The reveal was originally a second feature of this package and
+was folded into `widescreen` — see "One more trap, in the mod state file" below
+for why the separation was not just redundant. **No engine patch is needed** — unlike §23, where the feature
 existed but was refused on MMC1. The whole mechanism is already upstream at our
 pin (PR #58, `3ef948cd`, an ancestor of `2b4fcdb`):
 `common/nes_video_geometry.h` (the widths), `runner/cyc/cyc_video.*` (the
@@ -1574,13 +1589,23 @@ invented here: **426 / 560 / 854** for 16:9 / 21:9 / 32:9, plus `fit`. Note
 on the cycle path it is 426 and the two must not be treated as interchangeable
 (`docs/CUSTOM_RENDERER.md:349`).
 
-**The collision that had to be resolved first:** the character-flicker mod's
+**The first of two collisions with the compositor.** This one: the character-flicker mod's
 `present()` returned a non-NULL 256x240 buffer, and both the window
 (`cyc_sdl.c:306`) and `--present-out` (`cyc_host.c:886`) take `present()` over
 `cyc_render_present()`. A compositor would have been silently bypassed whenever
 flicker was on. `present()` now always asks `cyc_render_present()` first — it is
 the only place the compositor runs and the only place the width is decided — and
 returns the engine's buffer untouched when there is nothing else to do.
+
+**The second collision was found much later, and only by playing** (§26, "Two mods
+on at once"): once both features *were* on, the compositor's native region already
+carried the machine's sprites and the mod's captured list was blitted on top of
+them, so every sprite was drawn twice, 1-2 px apart because the captured list is a
+build old. Fixing it established the invariant that keeps the two apart —
+**wide native 256 == flicker-only native 256, byte for byte** — measured over 199
+frames of the menu walk with 0 differing frames. Neither collision was reachable
+from a single-feature gate; both needed both features on, and the second needed a
+human.
 
 ### Not wideNES
 
@@ -1653,6 +1678,12 @@ free instead of growing garbage margins.
 
 - **Mod off = stock**: with the catalog present and every feature off, the
   `--present-out` frame is byte-identical to a run with no `--mods-root` at all.
+  **One caveat since the `overscan` fold**: a `state.toml` written *before* it
+  still names the removed feature, and the catalog then refuses to run at all —
+  "does not provide this trusted plugin", nothing starts. That is a harder
+  failure than a soft one, and it is the one way this gate can go from green to
+  "nothing runs". Delete `build-cycle/mods/state.toml` and let the launcher
+  rewrite it.
 - **Stock centre**: the presented native 256 columns are pixel-for-pixel the
   unmodded picture at every aspect ratio (verified by array compare against a
   stock run), because the compositor copies the machine's picture over its own
@@ -1691,8 +1722,8 @@ reads clear, and the 240p Test Suite's NES safe-area test calls rows 0–7 and
 **Reveal, not crop.** Every emulator's overscan subtracts the border. Here that
 would splice the world: the left margin ends at world column `sx-1` and the
 picture would resume at `sx+8`, an 8-column skip through the court. So the
-`overscan` feature instead draws the real background in those columns and leaves
-them alone when copying the machine's picture over the centre. The whole canvas
+widescreen compositor instead draws the real background in those columns and
+leaves them alone when copying the machine's picture over the centre. The whole canvas
 is then one continuous run of world columns with no black gutter. Measured on the
 output: the fully-black 8-column strip at the margin boundary (columns 85–92 at
 16:9) is present without the feature and **absent** with it.
@@ -1720,14 +1751,38 @@ inside it.
 ### One more trap, in the mod state file
 
 Hand-writing `state.toml` to test the package: **`[feature.values]` binds to the
-`[[feature]]` block declared immediately above it.** With two features in the
-package, a values table written after `overscan` but meant for `widescreen` is
-silently dropped — `overscan` has no `aspect` option, so nothing is written
-back and `widescreen` falls back to its manifest default (`fit`). Headless,
-`fit` resolves to the stock aspect, the width stays 256, and the engine does not
-call the compositor at 256 — so the feature appears to do nothing at all, with
-no error anywhere. The launcher never hits this because it writes the file; only
-a hand-built test file does.
+`[[feature]]` block declared immediately above it.** When the package carried two
+features, a values table written after `overscan` but meant for `widescreen` was
+silently dropped — `overscan` had no `aspect` option, so nothing was written back
+and `widescreen` fell back to its manifest default (`fit`). Headless, `fit`
+resolves to the stock aspect, the width stays 256, and the engine does not call
+the compositor at 256 — so the feature appears to do nothing at all, with no
+error anywhere. The launcher never hits this because it writes the file; only a
+hand-built test file does.
+
+That trap is now **unreachable by construction**: the package has one feature, so
+there is nothing for a values table to bind to the wrong block. It is kept
+because the rule is about the file format, not about this package.
+
+The fold was decided on the same grounds as the margin sprites (§26), and the
+decisive argument is the artefact rather than the tidiness: with the two features
+separately switchable, "widescreen on, reveal off" is a legal state, and it is a
+wide frame with the game's own black clip back at the margin boundary — the
+exact thing widescreen exists to stop. Two toggles for one compositor's output is
+one too many. `SDB_OVERSCAN=0` in the environment still forces the clip back,
+because the gate 5 measurement needs the band to be measurable in the first place.
+
+A consequence worth recording, because it is a hard failure and not a soft one:
+**a `state.toml` written before the fold keeps referencing the removed feature,
+and the whole catalog then refuses to run** —
+
+```
+[Mods] super-dodgeball.widescreen/overscan: The executable does not provide this trusted plugin.
+mods: Resolve the highlighted mod conflicts before Play.
+```
+
+It does not degrade to stock; nothing starts. Delete `build-cycle/mods/state.toml`
+and let the launcher rewrite it.
 
 ### Not sprites in the margins
 
@@ -1939,7 +1994,7 @@ scroll, and the stock game has no judder of this kind to reproduce.
 **5. The 8 revealed columns lose sprites too, and the filter was inverted.**
 PPUMASK bit 1 is clear for this game, so screen columns 0-7 are never painted —
 and the game does not cull those sprites, it writes them to OAM and the hardware
-declines. With `overscan` revealing those columns from the nametable, a sprite
+declines. With the reveal drawing those columns from the nametable, a sprite
 standing in them is lost exactly as surely as one the game culled, and nothing
 drew it. The first version of the filter had the sense backwards, so the band
 dropped its sprites instead of keeping them: a **head with no body** at the
@@ -1972,7 +2027,7 @@ report. `margin_track.py`'s `ghost` check exists to catch exactly it.
 - **Presentation only, and proven rather than asserted.** A `--frame-log` with the
   feature on is **byte-identical** to the same run with it off — CPU RAM, CIRAM,
   palette, OAM and the whole 256×240 picture — on all four vectors, with and
-  without `overscan`: `sdb_sweep` 1200, `sdb_pan` 1200, `sdb_idle` 1200,
+  without the reveal: `sdb_sweep` 1200, `sdb_pan` 1200, `sdb_idle` 1200,
   `sdb_throw` 1500. Both capture callbacks return 0, the site's own instruction
   and the game's own cull still run, and `$0617` is untouched because the culled
   path branches past the cursor bump at `$84B6`.
@@ -1987,7 +2042,7 @@ report. `margin_track.py`'s `ghost` check exists to catch exactly it.
 - **No blink, no ghost, no jump — audited per sprite, per frame.**
   `tools/widescreen/margin_track.py` over frames 500-1200 of the sweep, **eleven
   objects, 701 frames, no anomalies**, at 16:9 and 32:9, with and without
-  `overscan`, and with the character-flicker feature on. Objects 2 and 8 — the two
+  the reveal, and with the character-flicker feature on. Objects 2 and 8 — the two
   the game's display list almost never contains — are drawn on **701/701** frames.
 - **Glued to the court.** World-aligning the presented frame by
   `cyc_render_line_scroll_x` and stepping through the fastest pan in the sweep
@@ -1995,7 +2050,7 @@ report. `margin_track.py`'s `ghost` check exists to catch exactly it.
   the world-aligned crop exactly as the machine's own sprites do in the native
   one. The margin background and the margin sprites are on the same basis, and so
   is the machine's.
-- **The revealed columns carry sprites.** With `overscan` on, the 8 columns the
+- **The revealed columns carry sprites.** With the reveal on, the 8 columns the
   PPU hides differ from a `--margin-sprites 0` run on 344 of 1200 frames, mean 74
   pixels, max 627. Before this work the band could only ever show the
   reconstructed background.
@@ -2009,7 +2064,7 @@ report. `margin_track.py`'s `ghost` check exists to catch exactly it.
 - **Mod off = stock**: the catalog present with every feature disabled is
   byte-identical to no `--mods-root` at all, **1200/1200 frames** on both the
   sweep and the pan vector.
-- **Stress vector** (`sdb_throw`, 3000 frames, 16:9 + overscan, flicker on):
+- **Stress vector** (`sdb_throw`, 3000 frames, 16:9 with the reveal, flicker on):
   **104519 margin sprites drawn, peak 64, 0 backstop trips**, 0 part-limit
   warnings. Re-baselined 2026-10-13: the previously recorded 104240 does not
   reproduce on this binary and is **not explained** — see below. `SDB_MARGIN_PARTS`
@@ -2061,7 +2116,7 @@ band, a few pixels left of the machine's own picture, with nothing on the other
 side of the seam. It shrinks, flickers off for a few frames, and comes back.
 
 **Reproduced from a recorded playthrough.** `tools/play_record.sh bar-artifact`
-→ 16:9 + overscan + the flicker mod, played by hand. Frames 1148/1152/1164 have
+→ 16:9 with the reveal + the flicker mod, played by hand. Frames 1148/1152/1164 have
 it, 1157/1161 do not. Two more instrumented replays of the same recorded vector
 (±1 frame and ±2 frames) put it at 1142–1150 and 1148–1154.
 
@@ -2125,11 +2180,61 @@ Measured, same vector:
 game *did* emit and the hardware hid is still completed, which is the whole
 point of the feature.
 
+### Two mods on at once: every sprite drawn twice
+
+With the flicker mod **and** widescreen both on, sprites visibly double — a
+character's two 8-wide halves drawn 2 px apart. Stock, widescreen alone and flicker
+alone are all clean, so no single-feature gate could ever have found it; the owner
+found it by playing on the game-mode menu.
+
+Which side is wrong, measured against live OAM on the menu walk:
+
+| | offset vs stock | frames off |
+|---|---|---|
+| widescreen alone | **0 px**, 14/14 | 0/14 |
+| flicker alone | +1/+2 px, 12/14 (+11, −7 on build boundaries) | 12/14 |
+
+Widescreen is exact; the mod's captured list is a build old, so its x is stale. Both
+were being drawn.
+
+**Cause.** `sdb_present()` blits the whole captured list whenever flicker has
+something to say. At `cw == 256` that is right — `s_picture` there is a sprite-free
+background and the list *is* the sprite layer. At `cw == 426` it is not: the
+compositor's own contract is that the native 256 columns win, so its output is the
+machine's finished picture, sprites included.
+
+**Fix, and the invariant.** Present what the flicker-only path presents: replace the
+native columns with that same sprite-free redraw, draw the whole list over it, leave
+the margins alone.
+
+    wide native 256 == flicker-only native 256, byte for byte
+
+199 frames of the menu walk, **0 differing frames**, build boundaries included. That
+is the durable part — the two paths cannot drift apart again, and any future change
+to either is caught by diffing them.
+
+Copying all 256 columns instead of working around `[0, SDB_WS_CLIP)` puts the
+backdrop back over the reveal and returns the black band; the compositor's own seam
+check already has the right expression (`int first = s_ws_reveal ? SDB_WS_CLIP : 0`)
+and reusing it is the fix. Band measured on 0/900 frames with the reveal implied,
+against 495/900 with it off.
+
+Two dead ends, both of which look obviously right: content-matching the list against
+live OAM (`tile+y+x` misses on build boundaries; `tile+y` misses on animation
+changes, painting two whole characters), and drawing only entries past the live OAM
+count (live OAM is *not* a prefix of the list — prefix carry-over — and it suppressed
+the truncation, reported as bodies missing parts). The list must be compared against
+OAM as of the *same* build, which is the open item in **plan.md 15**.
+
+Not regressed, sweep 1200 / throw 3000 both mods on: `drawn` 33726 / 104519,
+`off-edge` 3951 / 3237, peak 64, backstop 0, with 3952 sprites still restored. The
+one-build staleness is pre-existing and **open** — plan.md 15.
+
 ### The `drawn` re-baseline: one figure explained, one not
 
 `SDB_TRACE_JSON` makes this decidable rather than a matter of opinion, because
 it reports the *outcome of every part* rather than only a total. Over the
-1200-frame `sdb_sweep` vector at 16:9 + overscan:
+1200-frame `sdb_sweep` vector at 16:9 with the reveal on:
 
 | outcome | count |
 |---|---|
@@ -2154,20 +2259,19 @@ configuration axis available was ruled out:
 | axis | result |
 |---|---|
 | aspect 16:9 / 21:9 / 32:9 | `drawn` identical (33726 at all three) |
-| overscan | 32108 without — and `off-edge` 3665 ≠ the documented 3951 |
+| reveal | 32108 without — and `off-edge` 3665 ≠ the documented 3951 |
 | character-flicker mod off | 33538, `off-edge` 3791 ≠ 3951 |
-| vector length, `--present-every` | ruled out; `off-edge` pins both vectors to flicker-on + overscan |
+| vector length, `--present-every` | ruled out; `off-edge` pins both vectors to flicker-on + reveal |
 
 `off-edge` reproducing **exactly** on both vectors (3951 and 3237) is what makes
 this tractable at all: the capture side is bit-identical, so the discrepancy is
 entirely in the presentation count and is not RNG divergence. The throw figure is
 recorded as stale; `AGENTS.md` gate 5 says not to expect it back.
 
-One methodological note: `--present-every` throttles **presenting**, not just
-screenshotting. At `--present-every 200` the compositor ran about six times in
-1200 frames and `drawn` read 167 instead of 33726 — so `drawn` is only comparable
-at stride 1, and a figure taken at another stride is meaningless rather than
-merely different.
+Every `drawn` figure here is a `--present-every 1` figure. That flag sets the
+*present* interval, so a stride above 1 skips the compositor and the counts drop
+meaningfully rather than slightly (at stride 200, 167 instead of 33726). AGENTS.md
+has the full note.
 
 ### Recording a playthrough: `--record-input`, and why it is not optional
 

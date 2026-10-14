@@ -23,7 +23,7 @@ NESRecomp recompiles NES 6502 → native C via a two-part system:
 - **`src/game.toml`**: Recompiler config — display `name` (window title), a `cycle_seed_file`, plus twelve content-keyed `[[mod_function_hook]]` sites: the ten the character-flicker mod hooks, plus two (`$8483`, `$8302`) that read the game's off-screen sprite cull for the widescreen margins. No discovery tuning; the stock ROM needs none.
 - **`src/cycle_seeds.txt`**: Recompiler discovery roots for the sprite emitters. A mod hook site only exists in recompiled code, and `$8040`/`$821E`/`$E32D`/`$966D`/`$A36C` ran on the interpreter — a hook there compiled, bound and never fired. These six lines fix that; total cycle count unchanged.
 - **`src/sdb_host_extras.c`**: Our three mods (`HOST_EXTRAS`), the only game-specific code. **(1) character-flicker**: captures every OAM sprite the game emits and presents them host-side, and overrides the game's own object culling (three gates). The truncation half is presentation only (identical cycle count; only `$02FD`/`$02FF` differ); the culling half is **not** — it makes the guest emit sprites it had dropped. **(2) PPU overclocking** (section 5): picks a value for `cyc_set_extra_scanlines` so the guest gets more CPU time per frame and runs faster; re-applied it from `power_on`, because `cyc_power_on()` zeroes the field after mods activate. **(3) widescreen** (section 4): a compositor that presents 426/560/854 columns, filling the margins from the nametable, CHR and the frame's own scroll, with a per-frame seam check against the machine's own background capture; it also draws the sprites the game placed outside its own viewport (research.md §26), which is part of what widescreen means, not a separate feature. No engine patch needed — the engine already ships the widths and the compositor API. See research.md §25 and §26. (VSync started as a mod here and moved to the launcher's Graphics section — patch 007, research §24.)
-- **`mods/packages/super-dodgeball.widescreen/`**: The widescreen package (manifest-only like the others), carrying two off-by-default features: `widescreen` (with an `aspect` **choice** option — stock / 16:9 / 21:9 / 32:9 / fit; it draws the players the game culled off-screen as well as the court, research.md §26) and `overscan` (reveal the 8 blank left-hand columns the game hides with PPUMASK).
+- **`mods/packages/super-dodgeball.widescreen/`**: The widescreen package (manifest-only like the others), carrying ONE off-by-default feature, `widescreen` (with an `aspect` **choice** option — stock / 16:9 / 21:9 / 32:9 / fit). Enabling it also reveals the 8 blank left-hand columns the game hides with PPUMASK and draws the players the game culled off-screen (research.md §26): all three are done by the same compositor, so they are not separable. It used to carry `overscan` as a second feature and was folded in, because the combination the toggle permitted — widescreen on, reveal off — is a wide frame with a black band at its edge, which is the artefact the feature exists to remove. `SDB_OVERSCAN=0` in the environment still forces the clip back for the gate 5 measurement.
 - **`mods/packages/super-dodgeball.character-flicker/`**: The mod *package* — a `manifest.toml` only, copied beside the executable at build time. Data-only by design; `.nesmod` archives may not carry native code, so the package is a declaration and the implementation is `src/sdb_host_extras.c`. Off by default, toggleable in the launcher's Mods screen.
 - **`mods/packages/super-dodgeball.ppu-overclock/`**: The PPU-overclocking package (same data-only design). Integer `[[option]]` so the launcher exposes the scanline count. Off by default because it changes console timing. Requires `patches/006_ppu_overclock_mmc1`; without it the backend refuses the setting on our MMC1 cart.
 - **`patches/006_ppu_overclock_mmc1.patch`**: The first active submodule patch — widens `cyc_extra_scanlines_supported()` from MMC3-only to MMC1 too. Strictly additive (consulted only when `extra_scanlines != 0`, so stock timing is unchanged for every game) and on its way upstream.
@@ -55,7 +55,7 @@ nesrecomp already integrates recomp-ui for the cycle host (`runner/cyc/project.c
 - **File size**: 262,160 bytes (16-byte header + 262,144 data)
 
 ### Key References
-- **`docs/research.md`** — ROM specs, NESRecomp framework details, sprite flickering analysis (§2, §2.1), PPU overclocking (§23), VSync (§24), widescreen and overscan (§25), Zelda/SMB/MesenCE research, input-frontier dossier (§18 pre-fix, §19 resolution)
+- **`docs/research.md`** — ROM specs, NESRecomp framework details, sprite flickering analysis (§2, §2.1), PPU overclocking (§23), VSync (§24), widescreen (§25), margin sprites (§26), the pan judder (§27), Zelda/SMB/MesenCE research, input-frontier dossier (§18 pre-fix, §19 resolution)
 - **`docs/plan.md`** — Consolidated project plan and todo list (merged from plan.md + todo.md)
 - **`README.md`** — Project overview, MesenCE installation options, frame comparison pipeline, TAS differential harness
 - **RetroPortingToolKit Docs**: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/main/data/docs
@@ -91,7 +91,7 @@ Three options (setup.sh uses Option C by default):
 ## Running
 
 ```bash
-./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" [--frames N] [--input schedule] [--shot-every N --screenshot shot.png] [--mem-frame N --mem-out mem.txt] [--miss-log seeds.txt] [--align 0-3] [--mods-root DIR] [--present-out FILE --present-every N --present-size WxH] [--ppu-overclock N] [--widescreen MODE] [--overscan]
+./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" [--frames N] [--input schedule] [--shot-every N --screenshot shot.png] [--mem-frame N --mem-out mem.txt] [--miss-log seeds.txt] [--align 0-3] [--mods-root DIR] [--present-out FILE --present-every N --present-size WxH] [--ppu-overclock N] [--widescreen MODE] [--margin-sprites 0]
 ```
 
 - **Interactive**: bare run — window opens (`[game] name` is the title), keyboard/gamepad input works
@@ -103,7 +103,7 @@ Three options (setup.sh uses Option C by default):
 - **PPU overclocking**: `--ppu-overclock <0..262>` (blank scanlines before NMI). Needs `patches/006`; refuses with the backend's MMC3 message otherwise. Deliberately changes timing; 0 is stock. The mod's manifest feature does the same thing for the window.
 - **VSync**: the launcher's Graphics section (needs `patches/007` or the row is absent). Off by default; persisted as `[Display] VSync` in `build-cycle/config.ini`. Presentation only — guest timing untouched.
 - **Widescreen**: `--widescreen stock|16:9|21:9|32:9|fit` (or the Mods screen). Widths come from the engine's `common/nes_video_geometry.h` — 426/560/854 — never hardcode them. Needs no patch.
-- **Overscan**: `--overscan` or the Mods screen; only has an effect together with widescreen, because at width 256 the engine never calls the compositor.
+- **Overscan**: revealed automatically with `widescreen`; there is no separate feature. It has no effect at width 256, because at that width the engine never calls the compositor. `SDB_OVERSCAN=0` in the environment forces the clip back for the headless A/B in gate 5; the launcher cannot turn it off.
 - **Presentation**: `--present-out` saves what the *window* would show — the only path that exercises the character-flicker mod. `--screenshot`/`--frame-log` capture the machine's native frame and ignore it. `--present-every N` sets the **present** interval, not a screenshot interval: the compositor only runs on a presented frame, so `N > 1` skips it and every `drawn`/`composed` count drops accordingly. Measure at `N = 1` (see the stride warning under Known Issues).
 
 ## Critical Rules
@@ -157,7 +157,7 @@ with the same schedule; ideal is 60.0988 fps (29781 cycles/frame).
 | config | fps |
 |---|---|
 | stock, nothing on | 55.6 |
-| + widescreen + overscan + flicker, **no** `--present-out` | 54.5 |
+| + widescreen + reveal + flicker, **no** `--present-out` | 54.5 |
 | fullscreen, `WindowScale = 3` (1080p), `--present-every 4` | 41.5 |
 | `WindowScale = 3` (1278×720), `--present-every 1` | 29.4 |
 | `WindowScale = 2` (852×480), `--present-every 1` | 40.9 |
@@ -384,7 +384,7 @@ over the flat court locks onto the wrong feature.
 
 ### docs/ Directory
 
-- **`docs/research.md`** — ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map (§13), MesenCE oracle (§16), NMI survey (§17), PPU overclocking (§23), VSync (§24), widescreen and overscan (§25)
+- **`docs/research.md`** — ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map (§13), MesenCE oracle (§16), NMI survey (§17), PPU overclocking (§23), VSync (§24), widescreen (§25), margin sprites (§26), the pan judder (§27)
 - **`docs/plan.md`** — Living project plan and todo list
 
 ## NESRecomp Submodule Status
@@ -497,14 +497,15 @@ Gates:
    headless also resolves to stock 256, so a lost aspect looks like "the mod did nothing".)
 2. **Stock centre** — the presented native 256 columns must be pixel-identical to a stock
    run at every aspect (array-compare; the compositor copies the machine's picture back over
-   its own). The one exception is the `overscan` feature's 8 revealed columns, which is the
+   its own). The one exception is widescreen's 8 revealed columns, which is the
    point of that feature.
 3. **Widths** — 426/560/854 for 240 rows, using the engine's rounding. Truncating turns
    32:9 into 852 and 3.55:1.
 4. **Frame 0 pillarboxes** in every mode — the background capture is not available until
    after the first frame, so the compositor declines rather than claiming an unchecked seam.
 5. **No black gutter** — measure fully-black column runs in the output. The game's PPUMASK
-   left-column clip puts one at the margin boundary unless `overscan` is on.
+   left-column clip puts one at the margin boundary unless the reveal is on (it is, with
+   `widescreen`; `SDB_OVERSCAN=0` in the environment turns it off for this measurement).
 6. **Play it** — a scripted run never reaches team-select, the roster screens or the
    innings changes, which are exactly the states the seam gate has to hold through.
 
@@ -529,12 +530,12 @@ line means the capture is off, not that there is nothing to capture.**
    count must also match (`mode=native ... cycles=` identical). Both callbacks return
    0, the site's own instruction and the game's own cull still run, and `$0617` is
    untouched because the culled path branches past the cursor bump at `$84B6`. Run
-   it on all four vectors and **with and without `overscan`**.
+   it on all four vectors and **with and without the reveal** (`SDB_OVERSCAN=0`).
 2. **Machine columns untouched — and this is also the no-doubling proof.** Compare
    a `--present-out` run with margin sprites on against the same run with
    `--margin-sprites 0`: the machine's 256 columns must differ by **0 pixels** on
    every frame, while the canvas as a whole differs by a million-odd pixels. At
-   every aspect and both overscan states. With `overscan` on, exclude the 8 revealed
+   every aspect and both reveal states. With the reveal on, exclude the 8 revealed
    columns from the comparison — revealing them is the point. It holds by
    construction (the blit is clipped to the columns the machine does not own), but
    measure it, do not reason about it.
@@ -555,7 +556,7 @@ line means the capture is off, not that there is nothing to capture.**
    ```bash
    SDB_TRACE_CAPTURES=500-1200 ./build-cycle/nes_game ROM --frames 1200 \
      --input tas/vectors/sdb_sweep.input --ram-init zeros --widescreen 16:9 \
-     --overscan --present-out tmp/mt/w_ --present-every 1 >/dev/null 2>tmp/mt/trace.log
+     --present-out tmp/mt/w_ --present-every 1 >/dev/null 2>tmp/mt/trace.log
    ./build-cycle/nes_game ROM --frames 1200 --input tas/vectors/sdb_sweep.input \
      --ram-init zeros --frame-log tmp/mt/sweep.bin --frame-log-frames 0:1199
    python3 tools/widescreen/margin_track.py tmp/mt/trace.log --records tmp/mt/sweep.bin
@@ -566,7 +567,7 @@ line means the capture is off, not that there is nothing to capture.**
    `shift` (the object moved further than its record and the camera did), `part`
    (a wholly off-screen object holding fewer parts than it did). Current baseline:
    **701 sweep frames, eleven objects, no anomalies**, at 16:9 and 32:9, with and
-   without `overscan`, and with the character-flicker feature on. Objects 2 and 8 —
+   without the reveal, and with the character-flicker feature on. Objects 2 and 8 —
    the two the game's display list almost never contains — must read **701/701**.
    **A `ghost` is the one to take seriously**: a character is sixteen columns of two
    eight-wide sprites, so two halves placed on different bases come out one pixel
@@ -585,14 +586,14 @@ line means the capture is off, not that there is nothing to capture.**
    **129** parts over this vector — 33726 + 129 = 33855, no residue. The
    previous throw figure of 104240 is **not** explained: it is 279 *below* what
    this binary produces while that vector's ghost count is only 93, and no
-   configuration reproduces it (aspect, overscan, flicker mod and vector length
-   all ruled out — `off-edge` pins throw to flicker-on + overscan at 3237).
+   configuration reproduces it (aspect, reveal, flicker mod and vector length
+   all ruled out — `off-edge` pins throw to flicker-on + reveal at 3237).
    Treat 104240 as stale and do not expect it back.
 6. **`peak` and `backstop`** — peak around 64 and backstop **0**. `SDB_MARGIN_PARTS`
    is 24, not 8: objects 9 and 11 legitimately emit more than a character's eight, and
    at 8 they lost sprites on 15 frames per 3000. Any non-zero backstop count means
    the per-object slots are not being reset when `$0617` restarts a list.
-7. **The revealed columns carry sprites** — with `overscan` on, the 8 columns the
+7. **The revealed columns carry sprites** — with the reveal on, the 8 columns the
    PPU hides must differ from a `--margin-sprites 0` run on some frames (344 of
    1200, mean 74 px, max 627). Zero means the band is showing the reconstructed
    background only, i.e. the capture's PPUMASK branch is inverted again.
@@ -834,7 +835,7 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 | `tools/overclock/` | PPU-overclocking oracle harness behind research.md §23 (MesenCE sandbox + stock-vs-OC comparison). **Its self-check matters: if cycles/frame stays 29781 for a non-zero `Before NMI`, the setting never applied and the run is worthless** |
 | `mods/packages/super-dodgeball.character-flicker/` | Mod package — `manifest.toml` only (data-only by design; implementation is `src/sdb_host_extras.c`). Off by default, toggleable in the launcher's Mods screen; PolyForm NC, same as the project |
 | `mods/packages/super-dodgeball.ppu-overclock/` | Mod package for PPU overclocking (research.md §23). Manifest-only like the above; has an integer `[[option]]` so the launcher exposes the scanline count. **Needs `patches/006_ppu_overclock_mmc1`** or the backend refuses on mapper 1 |
-| `mods/packages/super-dodgeball.widescreen/` | Mod package for widescreen (research.md §25). Manifest-only; two features — `widescreen` (an `aspect` **choice**: stock/16:9/21:9/32:9/fit) and `overscan`. Needs **no patch**: the engine already ships the widths and the compositor API |
+| `mods/packages/super-dodgeball.widescreen/` | Mod package for widescreen (research.md §25). Manifest-only; ONE feature, `widescreen` (an `aspect` **choice**: stock/16:9/21:9/32:9/fit). Enabling it also enables the clipped-column reveal and the margin sprites — both are drawn by the same compositor and are not separable, see the manifest header. Needs **no patch**: the engine already ships the widths and the compositor API |
 | `external/nesrecomp/` | NESRecomp submodule (recompiler + runners) — pinned `origin/master`; **dirty tree is expected** when `patches/*.patch` is applied by `setup.sh` |
 | `external/mesence/` | MesenCE emulator source/binary |
 | `external/recomp-ui/` | recomp-ui submodule (launcher + in-game menu) — **pinned, never floated**; MIT, own license |

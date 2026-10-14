@@ -1,6 +1,8 @@
 # Super Dodgeball NES Recompilation — Project Plan
 
-> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). PPU overclocking **shipped** (opt-in mod; deliberately changes timing). Widescreen **shipped** (opt-in mod, 16:9 / 21:9 / 32:9), and its margins now carry sprites as well as court. Margin sprites found by a *played* session rather than a script — `--record-input` + `tools/play_record.sh` (item 4, research §26). The sprite judder while the camera pans is **resolved and it is the game's** — MesenCE reproduces the same two-frame offset, so nothing here is broken (item 12, research §27). **One** open question left unattributed: the Bean Ball sprite-list degeneration (item 14). Frontier: full-movie TAS vectors (level-switch screens).
+> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). PPU overclocking **shipped** (opt-in mod; deliberately changes timing). Widescreen **shipped** (opt-in mod, 16:9 / 21:9 / 32:9), and its margins now carry sprites as well as court. Margin sprites found by a *played* session rather than a script — `--record-input` + `tools/play_record.sh` (item 4, research §26). The sprite judder while the camera pans is **resolved and it is the game's** — MesenCE reproduces the same two-frame offset, so nothing here is broken (item 12, research §27). **Two** open questions left unattributed: the Bean Ball sprite-list degeneration (item 14) and
+the presented sprite layer being one build old, which puts the character 1-2 px from where OAM
+puts it (item 15). Frontier: full-movie TAS vectors (level-switch screens).
 
 ## Where Things Stand
 
@@ -14,7 +16,7 @@
 
 2. Propose 002 S-latch guard upstream (draft below), and 006 PPU-overclock MMC1 gate (see `patches/active-patches.md`).
 
-3. ~~Widescreen~~ — **DONE.** `super-dodgeball.widescreen`, opt-in, off by default. No engine patch: the cycle backend already ships the widths (`common/nes_video_geometry.h` — 426/560/854) and the compositor API. One compositor in `src/sdb_host_extras.c` fills the margins from the nametable, CHR, palette and the frame's own per-line scroll; the stock 256 columns are copied back over the centre so they stay pixel-identical to the unmodded game, and a per-frame seam check against `cyc_render_background()` pillarboxes anything that fails (so title screens and menus fall back for free). Reconstruction agrees with the machine to 1-2 px of 61440. Second feature `overscan` reveals the 8 blank left-hand columns the game hides with PPUMASK (blank in 2112/2112 measured frames); vertical is not offered because one wipe-transition frame uses those bands. Margins past the court's own 512-px world are backdrop. The four bugs the seam check caught, the wideNES comparison and the overscan measurement are in research.md §25.
+3. ~~Widescreen~~ — **DONE.** `super-dodgeball.widescreen`, opt-in, off by default. No engine patch: the cycle backend already ships the widths (`common/nes_video_geometry.h` — 426/560/854) and the compositor API. One compositor in `src/sdb_host_extras.c` fills the margins from the nametable, CHR, palette and the frame's own per-line scroll; the stock 256 columns are copied back over the centre so they stay pixel-identical to the unmodded game, and a per-frame seam check against `cyc_render_background()` pillarboxes anything that fails (so title screens and menus fall back for free). Reconstruction agrees with the machine to 1-2 px of 61440. Enabling it also reveals the 8 blank left-hand columns the game hides with PPUMASK (blank in 2112/2112 measured frames); vertical is not offered because one wipe-transition frame uses those bands. `overscan` was a second feature and was **folded in**: the same compositor draws all three parts, so the combination the toggle permitted — widescreen on, reveal off — is a wide frame with a black band at its edge, which is the artefact widescreen exists to remove. Same call already made for margin sprites (item 4). `SDB_OVERSCAN=0` in the environment still forces the clip back for the gate 5 measurement. Margins past the court's own 512-px world are backdrop. The four bugs the seam check caught, the wideNES comparison and the overscan measurement are in research.md §25.
 4. **Sprites in the margins** — **DONE** (was the one part of widescreen not done), and then **audited to destruction**: seven boundary/placement bugs, the last two found only by recording and replaying a played session (`--record-input`, research §26). Part of the `widescreen` feature itself, not a separate toggle: a margin with no players in it is not a wider game. The `$0618` records were the wrong place to look: the game places every sprite in a **16-bit** screen coordinate (`$04/$05`, `$06/$07`) and *then* hides anything outside `[4, 255]` by writing Y=$F8, so the tile, flips, palette and both halves of the position are all computed and only the byte truncation at `$84A1` discards it. Two hook sites (`$8483` the strip walk, `$8302` the three single-sprite emitters — same cull, different tile source), read at the game's own decision, plus `$8231` for the object index. **40% of objects are off-screen in every measured frame.** Presentation only, proven: a `--frame-log` with the feature on is byte-identical to it off (RAM/CIRAM/OAM/palette/picture) at an unchanged cycle count on all four vectors, with and without overscan, and the presented machine columns differ from a `--margin-sprites 0` run by **0 pixels** on every frame at 16:9, 21:9 and 32:9. No new `cycle_seed_file` line was needed — `$8483` is in the routine `$821E` already seeds.
 
    What took the work was not the capture but **placement**. Six artifacts, all
@@ -22,7 +24,7 @@
    off-screen objects are not on `$067C` at all, so nothing measured in emissions
    survives as a lifetime), a stripe missing through a sprite (the accumulator's
    bias of 4 applied twice), doubled players, a headless body at the edge (the PPU
-   hides eight columns the game never culls, and with `overscan` revealing them
+   hides eight columns the game never culls, and with the reveal drawing them
    the band has to draw them), a fragment instead of a character (one `$8231`
    visit emits four of a character's eight sprites), and an older animation frame
    pinned in the band. The basis is `cyc_render_line_scroll_x` and only that —
@@ -168,11 +170,17 @@
     route; it is a specific mode plus a specific run:
 
     ```bash
-    SDB_SCALE=2 SDB_FRAMES=1400 SDB_SHOT_EVERY=1 tools/play_record.sh bar-artifact-2
+    SDB_SCALE=2 SDB_UNLIMITED=1 tools/play_record.sh bar-artifact-2
     ```
 
-    `SDB_SCALE=2` because they read the artifact at that scale, `SDB_FRAMES=1400`
-    to cover the ~658–714 window with margin, `SDB_SHOT_EVERY=1` for every frame.
+    `SDB_SCALE=2` because they read the artifact at that scale, `SDB_UNLIMITED=1`
+    so there is no frame cap to land on (they stop when they have it — and closing
+    the window still flushes the vector's frame count, because that line is written
+    from the destructor; SIGKILL does not), `SDB_SHOT_EVERY=1` to present every
+    frame. **`SDB_SHOT_EVERY` is a PRESENT interval, not a screenshot interval** —
+    the compositor only runs on a presented frame, so any stride above 1 silently
+    skips it and every `drawn`/`composed` count drops. A capped alternative is
+    `SDB_FRAMES=1400`, chosen to cover the ~658–714 window with margin.
     **Make the request rather than re-deriving the state**: the symptom is
     *intermittent and order-random*, so a vector built by trial and error will not
     reproduce it, and a headless replay will not reproduce it either.
@@ -200,6 +208,12 @@
     was fixed by the backwards-`$0617` boundary plus the `SDB_LIST_LIMIT`
     backstop. If this bug turns out to be ours, start from that fix and ask what
     is different about a camera in constant motion.
+
+15. **The presented sprite layer is one build old** (research §26, **OPEN**). With the flicker mod on, the character renders 1-2 px from where OAM puts it, and 7-11 px on a build boundary: the captured list is published only once a sprite-list build completes. Pre-existing, and present with the mod alone at 256 — it only became visible when widescreen added a second source to disagree with (fixed in `20e286c`).
+
+    Fixing it means comparing each list entry against the OAM snapshot from the *same build*, not live OAM, so staleness can cause neither a false match nor a false miss. Both cheaper rules were tried and both fail (`tile+y+x` misses on build boundaries; `tile+y` misses on animation changes). It needs **playing**, not just gating.
+
+    Related: the trace's health counter `delta(oamn - pub)` compares **counts only** and reads `+0` while the two sources sit 2 px apart, so `json_trace.py flicker` needs a positional column before this is measurable from a trace at all.
 
 ## What Other Successful NESRecomp Projects Do Differently
 

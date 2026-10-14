@@ -4,7 +4,7 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 
 ![Super Dodge Ball title screen (recompiled build)](docs/assets/title.png)
 
-> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). The **widescreen mod is playable and has been played**: 16:9 / 21:9 / 32:9 with the court *and the players* in the margins, including the columns the game itself hides. It was found to be correct by recording and replaying real playthroughs, which is how its last two bugs were caught. Not yet tested on a full playthrough to completion, and two open questions remain (one Bean Ball bug, one unattributed judder). See `docs/plan.md` for the frontier.
+> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). The **widescreen mod is playable and has been played**: 16:9 / 21:9 / 32:9 with the court *and the players* in the margins, including the columns the game itself hides. It was found to be correct by recording and replaying real playthroughs, which is how its last two bugs were caught. Not yet tested on a full playthrough to completion, and one open question remains: the Bean Ball sprite-list bug (the pan judder that used to sit beside it is resolved — it is the game's own cadence, see `docs/research.md` §27). See `docs/plan.md` for the frontier.
 
 > *Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong here. This port is in development — expect rough edges.*
 
@@ -117,9 +117,11 @@ with it off the output is byte-identical to the unmodded game.
 
   It is **not** upscaled: the same chunky pixels on a wider canvas.
 
-  A second feature in the same package, **Remove overscan**, reveals the 8 blank
-  columns at the left that the game hides with PPUMASK — blank in every one of 2112
-  measured frames. Only takes effect together with widescreen.
+  Turning it on also reveals the 8 blank columns at the left that the game hides
+  with PPUMASK — blank in every one of 2112 measured frames. That is not a second
+  toggle: the same compositor draws both, so leaving them separately switchable
+  permits the combination this feature exists to prevent, a wide frame with a
+  black band at its edge.
 
   The extra columns carry **the players too**, not just the court. Super Dodge Ball
   places every sprite in a 16-bit screen coordinate and then hides anything
@@ -260,9 +262,9 @@ SDB_SCALE=2 SDB_SHOT_EVERY=1 tools/play_record.sh bar-artifact   # bigger window
 | | |
 |---|---|
 | `SDB_ASPECT` | `16:9` (default), `21:9`, `32:9`, `stock` |
-| `SDB_OVERSCAN` | `1` reveals the 8 hidden left columns (default) |
 | `SDB_FLICKER` | `1` runs the character-flicker mod (default) |
-| `SDB_SHOT_EVERY` | screenshot every N frames (default 1) |
+| `SDB_SHOT_EVERY` | **present** every N frames (default 1) — not a screenshot interval: the compositor only runs on a presented frame, so `N > 1` silently skips it and every `drawn`/`composed` count drops |
+| `SDB_UNLIMITED` | `1` runs until you close the window, ignoring `SDB_FRAMES` |
 | `SDB_SCALE` | window scale, `1` or `2` (default 1) |
 | `SDB_FRAMES` | frame cap (default 2000) |
 
@@ -363,7 +365,11 @@ mappers, via the upstream project integration. `./build_and_run.sh` and
 `--shot-every`, `--mem-frame`/`--mem-out`, `--miss-log`, `--align 0-3`,
 `--mods-root`, `--present-out`/`--present-every`/`--present-size`) plus the
 game's own (`--remove-character-flicker`, `--ppu-overclock N`,
-`--widescreen MODE`, `--overscan`).
+`--widescreen MODE`, `--margin-sprites 0`).
+
+`--present-every N` sets the **present** interval, not a screenshot interval. The
+compositor only runs on a presented frame, so a stride above 1 skips it and every
+`drawn`/`composed` count in this README and in AGENTS.md is a stride-1 figure.
 
 `--present-out` is the one that matters for mods: it writes what the *window*
 would show. `--screenshot` and `--frame-log` capture the machine's native frame
@@ -409,13 +415,20 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 - **Palette mirrors** — sprite entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`) read stale in cycle snapshots (upstream model keeps power-on bytes; hardware mirrors the backdrop). Masked in the TAS diff; rendering unaffected.
 - **Widescreen cannot show more world than the game has** — the court is a 512-pixel-wide loop, so at 21:9 and 32:9 the extra columns run off the end and are filled with the backdrop. Expect a black band at whichever end the camera has reached; 16:9 usually fits.
 - ~~**Widescreen margins are background only**~~ — **fixed, and it is part of the `widescreen` feature, not a toggle.** A margin with no players in it is not a wider game, so the players the game placed outside its own viewport (40% of them at any moment) are drawn there too. `--margin-sprites 0` still exists, but only as the headless A/B switch. Seven placement/boundary bugs were found and fixed while auditing this; see `docs/research.md` §26.
+- ~~**Sprites double when two mods are on**~~ — **fixed.** With character-flicker and
+  widescreen both enabled, every sprite was drawn twice: once by the compositor (whose native
+  256 columns are the machine's finished picture) and once by the flicker mod's captured list.
+  The two copies sat 1-2 px apart, because the captured list is published only once a sprite-list
+  build completes, and a character is two 8-wide halves. Found by playing on the game-mode menu;
+  no single-feature gate could have caught it. The wide path now presents exactly what the
+  flicker-only path presents, byte for byte. See `docs/research.md` §26.
 - **Bean Ball loses sprites while running across the full map** — **open, not fixed.** In that game mode (which lets you run the length of the map rather than a half-width court), running from one end of the screen to the other makes the character-flicker mod's presented sprite list shrink frame by frame — 53 sprites down to 10 — until one player sprite remains, cut in half. The background stays perfect, so it is not the widescreen compositor. It is **not yet known** whether the game emits fewer sprites in that mode or the mod drops them; the two need opposite fixes. Full write-up, measurements and the next step in `docs/plan.md` item 14.
 
 ## Developer Docs
 
 **[AGENTS.md](AGENTS.md)** — Developer reference with present-tense constraints, codegen notes, submodule workflow, MesenCE testrunner API, verification procedures, and current-known issues. The canonical document for AI coding agents.
 
-**[docs/research.md](docs/research.md)** — Deep research: ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map, MesenCE oracle, NMI survey, current build state, PPU overclocking (§23), VSync (§24), widescreen and overscan (§25).
+**[docs/research.md](docs/research.md)** — Deep research: ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map, MesenCE oracle, NMI survey, current build state, PPU overclocking (§23), VSync (§24), widescreen (§25), margin sprites (§26), the pan judder (§27).
 
 ## References
 
