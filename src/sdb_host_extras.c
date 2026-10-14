@@ -74,8 +74,12 @@
 
 /* The widest disagreement, in world columns, that still counts as a whole
  * object sitting beside the machine's copy of itself rather than as two
- * unrelated sprites. One camera step; see sdb_object_delta. */
-#define SDB_MATCH_SLOP 8
+ * unrelated sprites. A camera step plus one: the step itself, plus the frame of
+ * ball travel that separates a fresh margin capture from a 3-frame-stale OAM
+ * (edge replay f856: 9 against a step of 7). The n>=2 modal vote in
+ * sdb_object_delta is what keeps a wide window from matching a neighbouring
+ * player, not this number. */
+#define SDB_MATCH_SLOP 12
 
 #define SDB_CURSOR      0x0617u   /* OAM byte cursor into the $0200 page */
 #define SDB_OAM_BASE    0x0200u
@@ -100,6 +104,13 @@
 #define SDB_REC_PTR     0x0065u   /* $65/$66: this object's display record */
 #define SDB_REC_BASE    0x0618u
 #define SDB_REC_STRIDE  7u
+/* The bits of record byte 0 (`$43`) that section 2.1's culling gates read. They
+ * change while the object is still the same object -- the flicker mod exists to
+ * override them -- so they are not part of its identity. See the draw site. */
+#define SDB_CULL_BITS    0x70u
+/* How far a presented-list entry's row may sit from OAM's and still be called
+ * the same sprite. See sdb_reconcile; +-2 is measured, +-3 is not free. */
+#define SDB_RECONCILE_ROW 2
 #define SDB_STATE       0x0043u   /* the object's state byte, and the gate's input */
 #define SDB_STATE_MASK  0x70u     /* $E34C: the bits the gate looks at */
 #define SDB_STATE_HIDE  0x20u     /* $E34E: the one value that means "do not add" */
@@ -521,29 +532,42 @@ static int sdb_copy(uint16_t addr)
  * run, and $0617 is not touched (the culled path branches past the cursor bump
  * at $84B6), so the guest's OAM is exactly what it would have been without us.
  * That is what keeps this feature presentation-only. */
-/* How far a margin part's reconstructed world sits from the machine's copy of
- * it, or 0 if the machine does not hold it.
+/* If live OAM holds this exact part, the deltas to the machine's copy.
+ * Returns nonzero on a match, with the column delta in `*col` and the row
+ * delta in `*rowd`.
  *
  * `world` is the part's world column as the margin re-placed it (`rec_x + dx`);
  * the machine's is `oam_x + scroll + 4` -- the same quantity measured through the
  * guest's own `$84A1: SEC / SBC #$04`. Both carry the same OAM bias, so the
- * difference needs no correction.
+ * difference needs no correction. The row window is SDB_RECONCILE_ROW, the same
+ * measured +-2 the flicker reconcile uses: a re-emitted sprite that also moved
+ * has a new row as well as a new column.
  *
- * Matched on WORLD, never on tile. Every player shares tiles, so a tile-and-row
- * match is ambiguous by construction, and this project has been bitten by that
- * twice already: the `sdb_oam_has` filter (research 26) and the band anchor that
- * replaced it. Two objects are never at the same world column, so this names one
- * sprite and cannot name the wrong one. */
-static int sdb_world_delta(int world, int row, uint8_t tile, int scroll)
+ * Matched on WORLD, never on tile alone. Every player shares tiles, so a
+ * tile-and-row match is ambiguous by construction, and this project has been
+ * bitten by that twice already: the `sdb_oam_has` filter (research 26) and the
+ * band anchor that replaced it. Two objects are never at the same world column,
+ * so this names one sprite and cannot name the wrong one.
+ *
+ * An exact column agreement (delta 0) IS a match and is reported as one: it
+ * votes for 0 rather than abstaining, so a split object -- some parts agreeing
+ * with the machine, some a step away -- resolves toward leaving it alone
+ * instead of moving the agreeing parts off the machine. */
+static int sdb_world_match(int world, int row, uint8_t tile, int scroll,
+                           int *col, int *rowd)
 {
     const uint8_t *oam = cyc_render_oam();
     if (!oam) return 0;
     for (int j = 0; j < 64; j++) {
         if (oam[j * 4] >= 0xEF) continue;          /* the game's hidden slot */
         if (oam[j * 4 + 1] != tile) continue;
-        if (abs((int)oam[j * 4] + 1 - row) > 2) continue;
-        int d = (int)oam[j * 4 + 3] + scroll + 4 - world;
-        if (abs(d) <= SDB_MATCH_SLOP) return d;
+        int dr = (int)oam[j * 4] + 1 - row;
+        if (dr > SDB_RECONCILE_ROW || dr < -SDB_RECONCILE_ROW) continue;
+        int dc = (int)oam[j * 4 + 3] + scroll + 4 - world;
+        if (abs(dc) > SDB_MATCH_SLOP) continue;
+        *col = dc;
+        *rowd = dr;
+        return 1;
     }
     return 0;
 }
@@ -584,32 +608,58 @@ static int sdb_world_delta(int world, int row, uint8_t tile, int scroll)
  * sprites; moving one half onto the machine's column and leaving the other on
  * the record collapses the eight pixels between them to one, and `margin_track`
  * reads that as a `ghost`. Done per part it measured 22 of them on the sweep. */
-static int sdb_object_delta(int rec_x, const SdbMarginObj *ob)
+/* The one row correction to make to this object's parts this frame, or 0.
+ * Same vote as the columns, on the row deltas from the same matched slots:
+ * two parts must agree the machine's copy sits N rows away. The vote window
+ * itself bounds it (|N| <= SDB_RECONCILE_ROW), so a genuinely different
+ * animation cel -- rows further out than that -- is never touched. */
+static int sdb_object_delta(int rec_x, const SdbMarginObj *ob, int *row_corr)
 {
-    /* The camera difference, sampled at a mid-picture row. It is the same for
-     * every row of a frame: the PPU latches one horizontal scroll for the frame. */
-    int d = (int)(cyc_mod_peek(SDB_CAM_LO) | (cyc_mod_peek(SDB_CAM_HI) << 8))
-          - cyc_render_line_scroll_x(140);
-    if (!d) return 0;                   /* the camera is still: the bases agree */
-
+    /* Only objects the machine cannot be painting. The correction moves parts
+     * onto the machine's columns; for a part the machine already paints that
+     * risks trading a good join for a modal mismatch in a crowd (sweep 618:
+     * an 8-part character straddling band and viewport was moved -7 onto a
+     * neighbour, jogging head against body). A part outside [8,251] can never
+     * overlap anything the machine paints, so moving it can only fix a join or
+     * defer to the machine -- never double. This replaces the old basis-shape
+     * gate, which admitted that case and refused the d=0 intra-frame advance
+     * (flicker-2 f718: 4px with the camera still). */
     int seen[2 * SDB_MATCH_SLOP + 1];
+    int rseen[2 * SDB_RECONCILE_ROW + 1];
     memset(seen, 0, sizeof seen);
+    memset(rseen, 0, sizeof rseen);
     int parts = 0;
     for (int i = 0; i < ob->n; i++) {
         const SdbMargin *m = &ob->parts[i];
         int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
-        int dd = sdb_world_delta(rec_x + m->dx, m->y, m->tile,
-                                 cyc_render_line_scroll_x(prow));
-        if (dd) seen[dd + SDB_MATCH_SLOP]++;
+        int sx = rec_x + m->dx - cyc_render_line_scroll_x(prow) - 4;
+        if (sx >= 8 && sx <= 251) { *row_corr = 0; return 0; }
+        int dc, dr;
+        if (sdb_world_match(rec_x + m->dx, m->y, m->tile,
+                            cyc_render_line_scroll_x(prow), &dc, &dr)) {
+            seen[dc + SDB_MATCH_SLOP]++;
+            rseen[dr + SDB_RECONCILE_ROW]++;
+        }
         parts++;
     }
-    if (parts < 2) return 0;            /* one part is not a basis disagreement */
+    if (parts < 2) { *row_corr = 0; return 0; }   /* one part is not a disagreement */
 
     int best = 0, n = 0;
     for (int k = 0; k < 2 * SDB_MATCH_SLOP + 1; k++)
         if (seen[k] > n) { n = seen[k]; best = k - SDB_MATCH_SLOP; }
-    if (n < 2) return 0;                /* no two parts agree: not our object */
-    if (abs(best + d) > 1) return 0;    /* not a camera step: stale, not a basis */
+    if (n < 2) { *row_corr = 0; return 0; }   /* no two parts agree: not our object */
+    int best_r = 0, rn = 0;
+    for (int k = 0; k < 2 * SDB_RECONCILE_ROW + 1; k++)
+        if (rseen[k] > rn) { rn = rseen[k]; best_r = k - SDB_RECONCILE_ROW; }
+    *row_corr = (rn >= 2) ? best_r : 0;
+    /* No basis gate: any constant whole-object offset is acted on. The gate used
+     * to require the disagreement to be the camera step, but d=0 disagreements
+     * are real too (flicker-2 f718: margin 4px from the machine with the camera
+     * still -- intra-frame cam advance, not a basis), and leaving them draws a
+     * second copy of a sprite the machine is painting. Moving the margin onto
+     * the machine's columns can only ever put it where the machine paints, so
+     * the worst case is stock-faithful; the modal vote plus the slop bound keep
+     * a neighbouring player from ever supplying the offset. */
     return best;
 }
 
@@ -1045,30 +1095,47 @@ static const SdbSprite *sdb_reconcile(const SdbSprite *list, int count)
     const uint8_t *oam = cyc_render_oam();
     if (!oam || count <= 0) return list;
 
-    /* For each list entry: how many OAM slots hold that exact (y, tile, attr),
-     * and the x of the single one if there is exactly one. */
-    uint8_t nmatch[SDB_MAX_SPRITES];
-    uint8_t ox[SDB_MAX_SPRITES];
-    memset(nmatch, 0, sizeof nmatch);
+    /* For each list entry: which OAM slots could hold it, if exactly one.
+     *
+     * The row is matched within SDB_RECONCILE_ROW, not exactly. An entry whose
+     * sprite both MOVED and was re-emitted has a new y as well as a new x
+     * between builds, and an exact-y match cannot see that at all -- so the
+     * entry kept its stale x and the sprite was drawn twice, a couple of pixels
+     * apart. The ball straddling the viewport edge is what shows it: the margin
+     * completes the PPU-clipped half at the live column and the stale list paints
+     * the same half again two columns along, and the ball reads as split.
+     *
+     * The width is measured, not guessed. Over 23820 presented-list entries on
+     * the windowed edge replay, widening the row window from exact to +-2 turns
+     * 771 entries from "no candidate at all" into unique matches and adds
+     * **zero** ambiguous ones; at +-3 ambiguity starts (9 entries). So +-2 is the
+     * last width that is free, and it is a whole-pixel bound rather than a
+     * tolerance that "seemed reasonable". */
+    static uint8_t slot[SDB_MAX_SPRITES][64];
+    static uint8_t nslot[SDB_MAX_SPRITES];
     for (int p = 0; p < count; p++) {
+        nslot[p] = 0;
         for (unsigned j = 0; j < 64; j++) {
             if (oam[j * 4] >= 0xEF) continue;        /* the game's hidden slot */
-            if (list[p].y != oam[j * 4] || list[p].tile != oam[j * 4 + 1] ||
-                list[p].attr != oam[j * 4 + 2]) continue;
-            nmatch[p]++;
-            ox[p] = oam[j * 4 + 3];
+            if (list[p].tile != oam[j * 4 + 1] || list[p].attr != oam[j * 4 + 2]) continue;
+            int dy = (int)list[p].y - (int)oam[j * 4];
+            if (dy > SDB_RECONCILE_ROW || dy < -SDB_RECONCILE_ROW) continue;
+            slot[p][nslot[p]++] = (uint8_t)j;
         }
     }
-    /* Ambiguous in the LIST as well: two entries chasing one slot is not a match. */
+    /* Unique in the LIST as well: two entries chasing one slot is not a match.
+     * Tested against the slot itself rather than against the other entry's y,
+     * because with a row window two entries a row apart can chase the same slot. */
     for (int p = 0; p < count; p++) {
-        if (nmatch[p] != 1) continue;
-        for (int q = p + 1; q < count; q++)
-            if (list[q].y == list[p].y && list[q].tile == list[p].tile &&
-                list[q].attr == list[p].attr) { nmatch[p] = 2; break; }
+        if (nslot[p] != 1) continue;
+        for (int q = 0; q < count; q++) {
+            if (q == p || nslot[q] != 1) continue;
+            if (slot[q][0] == slot[p][0]) { nslot[p] = 2; break; }
+        }
     }
     for (int p = 0; p < count; p++) {
         buf[p] = list[p];
-        if (nmatch[p] == 1) buf[p].x = ox[p];
+        if (nslot[p] == 1) buf[p].x = oam[slot[p][0] * 4 + 3];
     }
     return buf;
 }
@@ -1369,7 +1436,8 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
                         | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
         /* Once per object, as at the draw site: the correction is a property of the
          * object, and recomputing it per part is a parts-squared OAM scan. */
-        int corr = sdb_object_delta(rec_x, ob);
+        int row_corr = 0;
+        int corr = sdb_object_delta(rec_x, ob, &row_corr);
         int placed = 0;
         /* Mirrors the draw site's decision EXACTLY, in the same order, and says
          * which branch each part took. Reporting a 0/1 "drawn" here instead
@@ -1384,7 +1452,8 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
         int left_limit = x0 + keep;
         for (int i = 0; i < ob->n; i++) {
             const SdbMargin *m = &ob->parts[i];
-            int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
+            int my = m->y + row_corr;
+            int prow = my < 0 ? 0 : (my >= 240 ? 239 : my);
             int sx = (rec_x + corr) + m->dx - cyc_render_line_scroll_x(prow) - 4;
             int completes = s_ws_reveal && sx >= 0 && sx < SDB_WS_CLIP;
             int px0 = sx + x0;
@@ -1405,7 +1474,7 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
                 st = (lo + hi < 8) ? "drawn" : "clip";
             }
             placed += st[0] == 'd';
-            fprintf(stderr, "%s[%d,%d,%d,\"%s\"]", i ? "," : "", sx, m->y, m->tile, st);
+            fprintf(stderr, "%s[%d,%d,%d,\"%s\"]", i ? "," : "", sx, my, m->tile, st);
         }
         fprintf(stderr, "],\"drawn\":%d}", placed);
     }
@@ -1917,24 +1986,57 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
             SdbMarginObj *ob = &s_margin_obj[o];
             if (!ob->n) continue;
             uint16_t rec = (uint16_t)(SDB_REC_BASE + SDB_REC_STRIDE * o);
+            if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+                fprintf(stderr, " [o%dn=%d id=%02X/%02X rec=%02X/%02X/%02X/%02X]", o, ob->n,
+                        ob->id0, ob->id1, cyc_mod_peek(rec),
+                        cyc_mod_peek((uint16_t)(rec + 1)),
+                        cyc_mod_peek((uint16_t)(rec + 2)),
+                        cyc_mod_peek((uint16_t)(rec + 3)));
             /* Unused slot, or a slot the match has handed to a different object:
-             * either way these tiles are not this object's any more. */
-            if (!cyc_mod_peek(rec) ||
-                cyc_mod_peek(rec) != ob->id0 || cyc_mod_peek((uint16_t)(rec + 1)) != ob->id1)
+             * either way these tiles are not this object's any more.
+             *
+             * Byte 0 is the object's STATE byte `$43`, and the culling bits in it
+             * are not part of its identity: section 2.1's gates read exactly
+             * `($43 & $70) == $20` and `& $20`, and the flicker mod overrides all
+             * three precisely so the object keeps being emitted. So the game flips
+             * those bits, byte 0 goes from `$02` to `$22`, and this test read that
+             * as "a different object took the slot" and dropped the whole
+             * character -- a full-body blink at the margin edge, for exactly as
+             * long as the game held the flag. A played session showed it at frames
+             * 910-912 and 925-926, reproduced headlessly at 919-921.
+             *
+             * Masking `$70` is the whole fix and nothing more: the remaining bits
+             * and byte 1 still have to match, so a genuinely recycled slot is
+             * still caught. Byte 1 is `$41` and does not move with the culling
+             * state. */
+            uint8_t r0 = cyc_mod_peek(rec);
+            if (!r0 || (r0 & ~SDB_CULL_BITS) != (ob->id0 & ~SDB_CULL_BITS) ||
+                cyc_mod_peek((uint16_t)(rec + 1)) != ob->id1)
                 continue;
             /* The anchor, read live. */
             int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
                             | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
             /* The anchor, corrected only on a whole-object basis disagreement. */
-            int corr = sdb_object_delta(rec_x, ob);
+            int row_corr = 0;
+            int corr = sdb_object_delta(rec_x, ob, &row_corr);
             /* Only when it acted. Printing the zeroes too would fill the trace with
              * `[corr+0]` per object per frame, which reads as a column of data and
              * is none -- the same "a green line that measured nothing" shape this
              * file keeps having to undo. */
             if (corr && s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
                 fprintf(stderr, " [corr%+d]", corr);
+            if (row_corr && s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+                fprintf(stderr, " [corry%+d]", row_corr);
             for (int i = 0; i < ob->n; i++) {
                 const SdbMargin *m = &ob->parts[i];
+                /* The row, corrected like the anchor. See sdb_object_delta: the
+                 * machine's copy of this sprite sits N rows from the captured
+                 * one (vertical leapfrog, same staleness class as the columns),
+                 * and painting the captured row puts a 1-2px doubled edge on a
+                 * sprite the machine is drawing right beside it. */
+                SdbMargin pm = *m;
+                pm.y = (int16_t)(m->y + row_corr);
+                m = &pm;
                 /* Current screen column: the record's world column plus this
                  * part's offset, minus the game's own camera.
                  *
