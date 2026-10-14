@@ -204,8 +204,10 @@ on `2:` while the guest saw nothing.
 **Widescreen is `--widescreen 16:9` and is independent of `WindowScale`.**
 Scale 1 is still 16:9 at 426×240; the scale only decides how big the window is.
 
-Use `tools/play_record.sh` (`SDB_SCALE`, `SDB_SHOT_EVERY`) rather than assembling
-this by hand. Never pass `--present-out` at fullscreen scale.
+Use `tools/play_record.sh` (`SDB_SCALE`, `SDB_SHOT_EVERY`, `SDB_UNLIMITED`) rather
+than assembling this by hand. Never pass `--present-out` at fullscreen scale.
+`SDB_UNLIMITED=1` omits `--exit-after` and runs until the window is closed — for
+when you do not know the frame count in advance.
 
 **`--present-every` is NOT a screenshot-density knob — it throttles
 *presenting*.** It decides how often the frame is presented at all, and the
@@ -828,7 +830,7 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 | `tas/vectors/sdb_probe.input` | Diagnostic, not a test vector: LEFT in 4-frame pulses from frame 600, which is how **594** was measured as the frame the court starts accepting input (research §27 timings above). Keep it — it is the reproduction for the timing facts, and the facts cost three failed repros to establish |
 | `tools/flicker/` | Analysis scripts behind the research.md §2/§2.1 claims (OAM/record dumps, ref-finder, memdiff) + toolkit README |
 | `tools/widescreen/` | Analysis behind research.md §25-26 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge; `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite; **`json_trace.py` — reads the `SDB_TRACE_JSON=<from>-<to>` stream, one JSON object per line, which is what plan item 14 needs (`flicker` puts live OAM and the mod's published list side by side in one frame)**; **`cycframe.py` — the shared `--frame-log` reader the other four sit on, since four copies of the header parser meant a format change would break three tools silently**. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame) |
-| `tools/play_record.sh` | Play the game in a window and record the session as a replayable `--input` vector plus `SDB_TRACE=1` and per-frame screenshots, into `tmp/<name>/`. Pins `WindowScale`/Fullscreen/VSync, or the screenshots make the game run in slow motion. The only way to find the band bugs — see the recorded-playback section above |
+| `tools/play_record.sh` | Play the game in a window and record the session as a replayable `--input` vector plus `SDB_TRACE=1` and per-frame screenshots, into `tmp/<name>/`. Pins `WindowScale`/Fullscreen/VSync, or the screenshots make the game run in slow motion. `SDB_UNLIMITED=1` drops `--exit-after` and runs until you close the window; closing it normally still flushes the vector's frame count (it is written from the destructor), but SIGKILL does not. The only way to find the band bugs — see the recorded-playback section above |
 | `tools/overclock/` | PPU-overclocking oracle harness behind research.md §23 (MesenCE sandbox + stock-vs-OC comparison). **Its self-check matters: if cycles/frame stays 29781 for a non-zero `Before NMI`, the setting never applied and the run is worthless** |
 | `mods/packages/super-dodgeball.character-flicker/` | Mod package — `manifest.toml` only (data-only by design; implementation is `src/sdb_host_extras.c`). Off by default, toggleable in the launcher's Mods screen; PolyForm NC, same as the project |
 | `mods/packages/super-dodgeball.ppu-overclock/` | Mod package for PPU overclocking (research.md §23). Manifest-only like the above; has an integer `[[option]]` so the launcher exposes the scanline count. **Needs `patches/006_ppu_overclock_mmc1`** or the backend refuses on mapper 1 |

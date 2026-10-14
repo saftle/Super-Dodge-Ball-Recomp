@@ -26,12 +26,17 @@
 #   SDB_ASPECT      16:9 | 21:9 | 32:9 | stock        (default 16:9)
 #   SDB_OVERSCAN    1 reveals the 8 hidden left columns (default 1)
 #   SDB_FLICKER     1 runs the character-flicker mod    (default 1)
-#   SDB_SHOT_EVERY  screenshot every N frames           (default 1, which is only
+#   SDB_SHOT_EVERY  PRESENT every N frames               (default 1, which is only
 #                   affordable because the scale is pinned -- see the measured
-#                   note on the config below before raising WindowScale)
+#                   note on the config below before raising WindowScale).
+#                   This is a PRESENT interval, not a screenshot interval: the
+#                   compositor only runs on a presented frame, so N > 1 silently
+#                   skips it and every `drawn`/`composed` count drops. Measure at 1.
 #   SDB_SCALE       window scale for the capture        (default 1; raise to 2 if
 #                   426x240 is awkward to play, PNGs go 300 KB -> 1.2 MB)
 #   SDB_FRAMES      default frame count, overridable by the second argument   (2000)
+#   SDB_UNLIMITED   1 runs until you CLOSE THE WINDOW, ignoring SDB_FRAMES and
+#                   omitting --exit-after            (default 0)
 #   SDB_LAUNCHER    1 keeps the recomp-ui launcher; 0 skips it  (default 0)
 #   SDB_UNCAPPED    1 runs as fast as the machine can    (default 0, frame-paced)
 #
@@ -51,6 +56,7 @@ if [ -z "$NAME" ]; then
     exit 2
 fi
 FRAMES="${2:-${SDB_FRAMES:-2000}}"
+UNLIMITED="${SDB_UNLIMITED:-0}"
 ASPECT="${SDB_ASPECT:-16:9}"
 OVERSCAN="${SDB_OVERSCAN:-1}"
 FLICKER="${SDB_FLICKER:-1}"
@@ -58,6 +64,15 @@ SHOT_EVERY="${SDB_SHOT_EVERY:-1}"
 SCALE="${SDB_SCALE:-1}"
 LAUNCHER="${SDB_LAUNCHER:-0}"
 UNCAPPED="${SDB_UNCAPPED:-0}"
+
+# --uncapped is rejected by the engine unless --exit-after is positive
+# (cyc_sdl.c:1238), so the two are mutually exclusive. Fail here rather than let
+# the run die with a message the player is unlikely to connect to their inputs.
+if [ "$UNCAPPED" = "1" ] && [ "$UNLIMITED" = "1" ]; then
+    echo "play_record: SDB_UNCAPPED=1 needs SDB_UNLIMITED=0 (--uncapped requires" >&2
+    echo "             a positive --exit-after limit; cyc_sdl.c:1238)" >&2
+    exit 2
+fi
 
 ROM="roms/Super Dodge Ball (USA).nes"
 GAME="./build-cycle/nes_game"
@@ -154,13 +169,31 @@ enabled = true
 aspect = "$ASPECT"
 EOF
 
-echo "=== $NAME: $FRAMES frames, $ASPECT, overscan=$OVERSCAN, flicker=$FLICKER ==="
+if [ "$UNLIMITED" = "1" ]; then
+    echo "=== $NAME: UNLIMITED (no --exit-after), $ASPECT, overscan=$OVERSCAN, flicker=$FLICKER ==="
+else
+    echo "=== $NAME: $FRAMES frames, $ASPECT, overscan=$OVERSCAN, flicker=$FLICKER ==="
+fi
 echo "    vector  -> $OUT/repro.input"
 echo "    trace   -> $OUT/trace.log"
 echo "    shots   -> $OUT/w_<frame>.png (every $SHOT_EVERY)"
 echo
 echo "Play. Close the window (or let --exit-after stop it) when you have it."
 echo
+if [ "$UNLIMITED" = "1" ]; then
+    # Dropping --exit-after is safe for the vector: sdb_rec_write fflushes every
+    # line, and the "# N frames, M input steps" trailer a replay needs is written
+    # by sdb_rec_close(), which runs from the DESTRUCTOR -- the one place that
+    # fires on a window close as well as on --exit-after
+    # (src/sdb_host_extras.c:1363, :1378-1382). So close the window normally and
+    # the vector is complete. What must NOT happen is SIGKILL, which skips the
+    # destructor and leaves a vector with no frame count, which then replays too
+    # little or too much and reads as "the artifact did not reproduce".
+    echo "No frame limit: close the window when you have it. Close it with the"
+    echo "window button or a quit key -- do NOT SIGKILL it, or the vector loses"
+    echo "its frame count and the replay covers the wrong number of frames."
+    echo
+fi
 
 # The windowed --present-out captures the RENDERER, so these PNGs are at window
 # size, not at the presented width. They are for seeing it happen; the replay
@@ -181,7 +214,7 @@ SDB_TRACE=1 NESRECOMP_NO_LAUNCHER=$( [ "$LAUNCHER" = "1" ] && echo 0 || echo 1 )
   --overscan \
   --record-input "$OUT/repro.input" \
   --present-out "$OUT/w_" --present-every "$SHOT_EVERY" \
-  --exit-after "$FRAMES" \
+  $( [ "$UNLIMITED" = "1" ] || echo --exit-after "$FRAMES" ) \
   $( [ "$UNCAPPED" = "1" ] && echo --uncapped ) \
   > "$OUT/trace.log" 2>&1
 RC=$?
