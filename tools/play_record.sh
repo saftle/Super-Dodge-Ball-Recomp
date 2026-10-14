@@ -23,8 +23,33 @@
 #
 # Environment knobs, all optional:
 #
-#   SDB_ASPECT      16:9 | 21:9 | 32:9 | stock        (default 16:9)
-#   SDB_FLICKER     1 runs the character-flicker mod    (default 1)
+#   SDB_MODS        which mods are on: a list of feature ids, any of the three,
+#                   in any combination. Comma- or space-separated, or repeated
+#                   as SDB_MODS_FLAG.
+#
+#                     remove-character-flicker  the sprite fix on its own
+#                     widescreen                the wide canvas, SDB_ASPECT
+#                     ppu-overclock             extra CPU time; CHANGES TIMING,
+#                                               so a capture with it on does
+#                                               not compare against any stock
+#                                               figure in the docs
+#
+#                   default  remove-character-flicker,widescreen   (the shipped
+#                            configuration: both presentation mods, no timing
+#                            change)
+#                   SDB_MODS_FLAG=1          repeatable, ORs the names together
+#
+#                     none     SDB_MODS=                      -> stock
+#                     one      SDB_MODS=remove-character-flicker
+#                     two      SDB_MODS=remove-character-flicker,widescreen
+#                     three    SDB_MODS=remove-character-flicker,widescreen,ppu-overclock
+#
+#                   A name this script does not know is a typo, refused here with
+#                   the valid list -- the catalog's own refusal ("does not
+#                   provide this trusted plugin") names a PACKAGE, which leaves
+#                   you guessing which of the three features you got wrong.
+#   SDB_ASPECT      aspect for widescreen: 16:9 | 21:9 | 32:9 | stock  (16:9)
+#   SDB_SCANLINES   ppu-overclock scanlines, 0..262   (default 262, the manifest's)
 #   SDB_SHOT_EVERY  PRESENT every N frames               (default 1, which is only
 #                   affordable because the scale is pinned -- see the measured
 #                   note on the config below before raising WindowScale).
@@ -57,7 +82,53 @@ fi
 FRAMES="${2:-${SDB_FRAMES:-2000}}"
 UNLIMITED="${SDB_UNLIMITED:-0}"
 ASPECT="${SDB_ASPECT:-16:9}"
-FLICKER="${SDB_FLICKER:-1}"
+SCANLINES="${SDB_SCANLINES:-262}"
+
+# Every feature the catalog ships, in catalog order. Written out rather than
+# scraped from the manifests so a typo in SDB_MODS fails here with a usable
+# message. Packages map one-to-one onto features here; if a package ever grows a
+# second feature this list is the place that has to learn about it.
+FEATURES=(remove-character-flicker ppu-overclock widescreen)
+feat_pkg() {
+    case "$1" in
+        remove-character-flicker) echo super-dodgeball.character-flicker ;;
+        ppu-overclock)           echo super-dodgeball.ppu-overclock ;;
+        widescreen)              echo super-dodgeball.widescreen ;;
+        *) return 1 ;;
+    esac
+}
+
+# SDB_MODS is the whole of "which mods are on": a list of feature ids, so one, two
+# or three all work and nothing is positional. Comma- or space-separated. The
+# default is the shipped configuration: both presentation mods, no timing change.
+# SDB_MODS_FLAG is the repeatable form, ORed on top, for callers that build the
+# list up one name at a time.
+# NOTE the `-` and not `:-`. `${VAR:-default}` fires when VAR is empty as well as
+# unset, so `SDB_MODS=` would silently fall back to the default and you could
+# never turn every mod off -- which is exactly what the "mod off = stock" gate
+# needs, so the gate would have been measuring a mod-on run and calling it stock.
+WANT="${SDB_MODS-remove-character-flicker,widescreen}"
+if [ -n "${SDB_MODS_FLAG:-}" ]; then WANT="$WANT,$SDB_MODS_FLAG"; fi
+declare -A ON=()
+for tok in ${WANT//,/ }; do
+    [ -n "$tok" ] || continue
+    if ! feat_pkg "$tok" >/dev/null; then
+        echo "play_record: SDB_MODS names no feature '$tok'." >&2
+        echo "             valid: ${FEATURES[*]}" >&2
+        exit 2
+    fi
+    ON[$tok]=true
+done
+
+case "$SCANLINES" in
+    ''|*[!0-9]*)
+        echo "play_record: SDB_SCANLINES must be 0..262, got '$SCANLINES'" >&2
+        exit 2 ;;
+esac
+if [ "$SCANLINES" -gt 262 ]; then
+    echo "play_record: SDB_SCANLINES must be 0..262, got $SCANLINES" >&2
+    exit 2
+fi
 SHOT_EVERY="${SDB_SHOT_EVERY:-1}"
 SCALE="${SDB_SCALE:-1}"
 LAUNCHER="${SDB_LAUNCHER:-0}"
@@ -124,48 +195,67 @@ cp -r build-cycle/mods "$OUT/mods"
 
 # [feature.values] binds to the [[feature]] declared IMMEDIATELY above it, so a
 # values table in the wrong place is silently dropped and the feature falls back
-# to its manifest default with no warning anywhere (research.md 25). The
-# widescreen values table therefore comes last, directly after widescreen.
-fl=$( [ "$FLICKER" = "1" ] && echo true || echo false )
-cat > "$OUT/mods/state.toml" <<EOF
-format_version = 1
+# to its manifest default with no warning anywhere (research.md 25). Two
+# consequences here:
+#   - each values table is emitted directly beneath its own feature, and
+#   - a DISABLED feature gets no values table at all, because a stray one would
+#     bind to the NEXT feature instead and be dropped against the wrong one.
+# That is the bug that made `widescreen` fall back to `fit` once already.
+{
+    echo "format_version = 1"
+    echo
+    for f in "${FEATURES[@]}"; do
+        echo "[[package]]"
+        echo "id = \"$(feat_pkg "$f")\""
+        echo "version = \"1.0.0\""
+        echo
+    done
+    for f in "${FEATURES[@]}"; do
+        echo "[[feature]]"
+        echo "package_id = \"$(feat_pkg "$f")\""
+        echo "id = \"$f\""
+        echo "enabled = ${ON[$f]:-false}"
+        case "$f" in
+            widescreen)
+                if [ -n "${ON[$f]:-}" ]; then
+                    echo
+                    echo "[feature.values]"
+                    echo "aspect = \"$ASPECT\""
+                fi ;;
+            ppu-overclock)
+                if [ -n "${ON[$f]:-}" ]; then
+                    echo
+                    echo "[feature.values]"
+                    echo "scanlines = $SCANLINES"
+                fi ;;
+        esac
+        echo
+    done
+} > "$OUT/mods/state.toml"
 
-[[package]]
-id = "super-dodgeball.character-flicker"
-version = "1.0.0"
-
-[[package]]
-id = "super-dodgeball.ppu-overclock"
-version = "1.0.0"
-
-[[package]]
-id = "super-dodgeball.widescreen"
-version = "1.0.0"
-
-[[feature]]
-package_id = "super-dodgeball.character-flicker"
-id = "remove-character-flicker"
-enabled = $fl
-
-[[feature]]
-package_id = "super-dodgeball.ppu-overclock"
-id = "ppu-overclock"
-enabled = false
-
-[[feature]]
-package_id = "super-dodgeball.widescreen"
-id = "widescreen"
-enabled = true
-
-[feature.values]
-aspect = "$ASPECT"
-EOF
+# --widescreen is NOT the same thing as the widescreen feature. The flag is
+# handled in our own option parser and calls sdb_ws_set_aspect() directly, so it
+# installs the compositor whether or not the feature is in state.toml. Passing it
+# for a flicker-only capture would quietly turn widescreen on anyway -- which is
+# exactly the class of bug this knob exists to stop, so it follows SDB_MODS.
+WS_ON=${ON[widescreen]:-false}
+# In catalog order, not hash order: this line is printed at the top of the run and
+# appended to the vector, and a list that reshuffles between runs makes two
+# captures hard to tell apart at a glance.
+MODS_ON=""
+for f in "${FEATURES[@]}"; do
+    if [ -n "${ON[$f]:-}" ]; then MODS_ON="$MODS_ON${MODS_ON:+, }$f"; fi
+done
+[ -n "$MODS_ON" ] || MODS_ON="(none -- stock)"
 
 if [ "$UNLIMITED" = "1" ]; then
-    echo "=== $NAME: UNLIMITED (no --exit-after), $ASPECT, flicker=$FLICKER ==="
+    echo "=== $NAME: UNLIMITED (no --exit-after), mods: $MODS_ON ==="
 else
-    echo "=== $NAME: $FRAMES frames, $ASPECT, flicker=$FLICKER ==="
+    echo "=== $NAME: $FRAMES frames, mods: $MODS_ON ==="
 fi
+# An `&&` on its own line would abort the script under `set -e` when false, so
+# this is an `if`.
+if [ "$WS_ON" = "true" ]; then echo "    aspect: $ASPECT"; fi
 echo "    vector  -> $OUT/repro.input"
 echo "    trace   -> $OUT/trace.log"
 echo "    shots   -> $OUT/w_<frame>.png (every $SHOT_EVERY)"
@@ -196,18 +286,19 @@ fi
 # (/usr/bin/xvfb-run:184) and so overrides a plain `2> file` -- the trace goes
 # to the terminal and the log comes out empty, which is a trace that silently
 # measured nothing.
+ARGS=( "$ROM"
+  --config "$OUT/config.ini"
+  --ram-init zeros
+  --mods-root "$OUT/mods"
+  --record-input "$OUT/repro.input"
+  --present-out "$OUT/w_" --present-every "$SHOT_EVERY" )
+if [ "$WS_ON" = "true" ]; then ARGS+=( --widescreen "$ASPECT" ); fi
+if [ "$UNLIMITED" != "1" ]; then ARGS+=( --exit-after "$FRAMES" ); fi
+if [ "$UNCAPPED" = "1" ]; then ARGS+=( --uncapped ); fi
+
 set +e
 SDB_TRACE=1 NESRECOMP_NO_LAUNCHER=$( [ "$LAUNCHER" = "1" ] && echo 0 || echo 1 ) \
-"$GAME" "$ROM" \
-  --config "$OUT/config.ini" \
-  --ram-init zeros \
-  --mods-root "$OUT/mods" \
-  --widescreen "$ASPECT" \
-  --record-input "$OUT/repro.input" \
-  --present-out "$OUT/w_" --present-every "$SHOT_EVERY" \
-  $( [ "$UNLIMITED" = "1" ] || echo --exit-after "$FRAMES" ) \
-  $( [ "$UNCAPPED" = "1" ] && echo --uncapped ) \
-  > "$OUT/trace.log" 2>&1
+"$GAME" "${ARGS[@]}" > "$OUT/trace.log" 2>&1
 RC=$?
 set -e
 
@@ -234,13 +325,21 @@ REC_STEPS=$(grep -oE '^# [0-9]+ frames, [0-9]+ input steps' "$OUT/repro.input" |
 : "${REC_STEPS:=?}"
 
 # Append the exact command, so the vector documents itself next to whatever else
-# was on for this capture.
+# was on for this capture. WS_FLAG is empty when widescreen was off, and the
+# replay then must NOT pass --widescreen -- the flag installs the compositor by
+# itself, so a replay that "helpfully" added it would be measuring a different
+# picture than the capture it came from.
+WS_FLAG=""
+if [ "$WS_ON" = "true" ]; then WS_FLAG="--widescreen $ASPECT"; fi
+
 cat >> "$OUT/repro.input" <<EOF
 #
 # --- replay (what this capture was) ---
+#   mods on: $MODS_ON
+#
 #   cd "$PWD" && SDB_TRACE=1 ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" \\
 #       --frames $REC_FRAMES --input $OUT/repro.input --ram-init zeros \\
-#       --mods-root $OUT/mods --widescreen $ASPECT \\
+#       --mods-root $OUT/mods $WS_FLAG \\
 #       --present-out $OUT/r_ --present-every 1
 #
 # MEASURED 2026-10-13, and do not assume it: this replay is NOT byte-faithful to
@@ -266,5 +365,5 @@ echo
 echo "Replay it with:"
 echo "  SDB_TRACE=1 ./build-cycle/nes_game \"$ROM\" \\"
 echo "      --frames $REC_FRAMES --input $OUT/repro.input --ram-init zeros \\"
-echo "      --mods-root $OUT/mods --widescreen $ASPECT \\"
+echo "      --mods-root $OUT/mods $WS_FLAG \\"
 echo "      --present-out $OUT/r_ --present-every 1 2> $OUT/replay.log"
