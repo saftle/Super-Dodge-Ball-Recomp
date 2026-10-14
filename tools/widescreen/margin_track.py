@@ -70,6 +70,7 @@ CAMERA = 0x00C3
 
 LINE = re.compile(r'^sdbw f=(\d+) x0=(\d+):(.*) n=(\d+)$')
 ENTRY = re.compile(r'\[o(\d+):(-?\d+),(\d+),t([0-9A-F]{2})\]')
+CORR = re.compile(r'\[corr([+-]\d+)\]')
 
 # The PPU clips its leftmost 8 screen columns; with overscan revealing them they
 # belong to the margin, so a part at 0..7 is one only this feature can draw.
@@ -78,17 +79,44 @@ VIEW_LO, VIEW_HI = 0, 251
 
 
 def read_trace(path):
-    """{frame: {object: [(screen column, row, tile), ...]}}"""
-    out = {}
+    """({frame: {object: [(screen column, row, tile), ...]}},
+        {frame: {object: correction}}) -- the correction is the compositor's
+    `[corr+N]` token, in object order on the line, matched to objects in the
+    order their `[oNn=..]` identity headers appear."""
+    out, corrs = {}, {}
     for line in open(path):
         m = LINE.match(line.strip())
         if not m:
             continue
-        per = collections.defaultdict(list)
-        for o, x, y, t in ENTRY.findall(m.group(3)):
-            per[int(o)].append((int(x), int(y), t))
+        per, cid = collections.defaultdict(list), {}
+        # Split the line's payload at each identity header; a [corr+N] token
+        # belongs to the object whose header precedes it. Logs from builds
+        # before the identity header existed have none: parse those the old
+        # way (no corrections attributed) rather than passing vacuous, which
+        # reads as a green audit over zero examined objects.
+        if '[o' in m.group(3) and re.search(r'\[o\d+n=', m.group(3)):
+            chunks = re.split(r'(\[o\d+n=\d+ [^\]]*\])', m.group(3))
+            cur = None
+            for ch in chunks:
+                h = re.match(r'\[o(\d+)n=', ch)
+                if h:
+                    cur = int(h.group(1))
+                    continue
+                if cur is None:
+                    continue
+                for o, x, y, t in ENTRY.findall(ch):
+                    assert int(o) == cur, (o, cur)
+                    per[cur].append((int(x), int(y), t))
+                cm = CORR.search(ch)
+                if cm:
+                    cid[cur] = int(cm.group(1))
+        else:
+            for o, x, y, t in ENTRY.findall(m.group(3)):
+                per[int(o)].append((int(x), int(y), t))
         out[int(m.group(1))] = dict(per)
-    return out
+        if cid:
+            corrs[int(m.group(1))] = cid
+    return out, corrs
 
 
 def read_records(path, lo, hi):
@@ -123,7 +151,7 @@ def main():
                          "character's width)")
     args = ap.parse_args()
 
-    drawn = read_trace(args.trace)
+    drawn, corrs = read_trace(args.trace)
     if not drawn:
         raise SystemExit("no `sdbw` lines in that log")
     lo, hi = min(drawn), max(drawn)
@@ -197,9 +225,20 @@ def main():
                 if a and b:
                     want = prev[1] + (b[2] - a[2])
                     if abs(left - want) > args.walk:
-                        anomalies.append(("shift", f, o,
-                                           f"leftmost column {left}, expected {want} "
-                                           f"(anchor moved {b[2] - a[2]})"))
+                        # The move is exactly the compositor's printed
+                        # correction: explained, but recorded -- a wrong
+                        # correction lands here too, so each one wants
+                        # eyes once (research section 26).
+                        cf = corrs.get(f, {}).get(o)
+                        if cf is not None and \
+                                abs(left - (want + cf - corrs.get(prev[0], {}).get(o, 0))) <= args.walk:
+                            anomalies.append(("cshift", f, o,
+                                               f"leftmost column {left}, expected {want} "
+                                               f"(anchor moved {b[2] - a[2]}, corr {cf:+d})"))
+                        else:
+                            anomalies.append(("shift", f, o,
+                                               f"leftmost column {left}, expected {want} "
+                                               f"(anchor moved {b[2] - a[2]})"))
             elif prev is not None and abs(left - prev[1]) > args.walk:
                 anomalies.append(("shift", f, o,
                                    f"leftmost column moved {abs(left - prev[1])} px "
@@ -220,13 +259,17 @@ def main():
         print("no anomalies")
         return 0
     by_kind = collections.Counter(a[0] for a in anomalies)
+    hard = [a for a in anomalies if a[0] != "cshift"]
     print(f"{len(anomalies)} anomalies: " +
           ", ".join(f"{k} {v}" for k, v in sorted(by_kind.items())))
     for kind, f, o, msg in anomalies[:80]:
         print(f"  {kind:6s} frame {f:5d} obj {o:2d}  {msg}")
     if len(anomalies) > 80:
         print(f"  ... {len(anomalies) - 80} more")
-    return 1
+    # A `cshift` is a shift the compositor's own printed correction explains:
+    # it does not fail the gate, but each one wants eyes once, because a wrong
+    # correction lands here too.
+    return 1 if hard else 0
 
 
 if __name__ == "__main__":
