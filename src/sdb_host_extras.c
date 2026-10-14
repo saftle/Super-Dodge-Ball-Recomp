@@ -1098,7 +1098,7 @@ blit:
 
 /* SDB_TRACE=1 prints one line per frame:
  *
- *     sdb <frame> <peak-list> <overflow> <done-list>
+ *     sdb <frame> <peak-list> <build-list> <overflow> <done-list> <reset> <lost>
  *
  * `peak-list` is the largest number of sprites assembled for one list that
  * frame. A healthy frame is tens (OAM holds 64, and the cursor pin lets the
@@ -1106,7 +1106,21 @@ blit:
  * capture: the game never returns the cursor to $04, so no new list starts and
  * the list being assembled grows without bound. That is what smears a trail of
  * stale sprites across the picture, so it is worth being able to see in a
- * headless run rather than only in the window. */
+ * headless run rather than only in the window.
+ *
+ * `build-list` is the size of the list that will be PRESENTED, and it is NOT
+ * reset per frame: the game's build legitimately spans two frames, so the list
+ * has to survive the boundary and nothing clears it until a capture detects a new
+ * one. The pair belongs on one line because
+ *
+ *     peak-list == 0 && build-list > 0
+ *
+ * is a frame that is about to paint a list it captured on an EARLIER frame --
+ * which is the shape of both the ghost-of-the-previous-screen bug and the
+ * half-built-list bug (research 26). Most such frames are ordinary build
+ * cadence, so the count alone proves nothing; it is what tells the two apart,
+ * and it is the first number to look at when the presented sprite layer is
+ * wrong. Read-only: it changes no presentation decision. */
 
 /* ------------------------------------------------------------------ *
  * 5b. Structured trace: SDB_TRACE_JSON=<from>-<to>
@@ -1261,8 +1275,9 @@ static void sdb_frame_begin(void *ctx)
     if (sdb_json_want(s_frame))
         sdb_json_frame();
     if (s_trace) {
-        fprintf(stderr, "sdb %ld %d %d %d %d %d\n", s_frame, s_build_peak, s_overflow,
-                    s_done_count, s_saw_reset, s_list_lost);
+        fprintf(stderr, "sdb %ld %d %d %d %d %d %d\n", s_frame, s_build_peak,
+                    s_build_count, s_overflow, s_done_count, s_saw_reset,
+                    s_list_lost);
         /* The two candidates for "where is this frame's column zero", printed
          * from the frame-begin hook so it does not depend on the margin sprites
          * being on. `cam` is `$C3/$C4`, the camera the game places sprites with;
