@@ -153,8 +153,8 @@ with it off the output is byte-identical to the unmodded game.
   overscan measurement are in `docs/research.md` §25. The margin-sprite half —
   and the **eight** placement/boundary bugs found while auditing it — are in §26.
 
-  **To play it and record what you see**, use `tools/play_record.sh` below. Seven
-  of those eight bugs were found by playing the game and replaying the session
+  **To play it and record what you see**, use `tools/play_record.sh` below. Ten
+  of those eleven bugs were found by playing the game and replaying the session
   rather than by running a script, because no hand-written vector reached the
   states they needed. **The eighth was not**: a duplicated sprite at the seam that
   flickered while the camera panned turned out to sit on a committed vector the
@@ -426,7 +426,7 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 - ~~**Sprite flickering**~~ — **fixed, all causes.** Not emulator sprite-limit removal: the game (1) stops emitting once OAM's 64 slots fill, (2) deliberately culls one object off its own display list each frame, rotating which, so a character blinks out 4 frames in 9, and (3) draws its damage numbers and menu digits through emitters no bump hook could see. Characters now stay whole with the opt-in `super-dodgeball.character-flicker` mod — toggleable in the launcher's **Mods** screen. See `docs/research.md` §2 and §2.1.
 - **Palette mirrors** — sprite entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`) read stale in cycle snapshots (upstream model keeps power-on bytes; hardware mirrors the backdrop). Masked in the TAS diff; rendering unaffected.
 - **Widescreen cannot show more world than the game has** — the court is a 512-pixel-wide loop, so at 21:9 and 32:9 the extra columns run off the end and are filled with the backdrop. Expect a black band at whichever end the camera has reached; 16:9 usually fits.
-- ~~**Widescreen margins are background only**~~ — **fixed, and it is part of the `widescreen` feature, not a toggle.** A margin with no players in it is not a wider game, so the players the game placed outside its own viewport (40% of them at any moment) are drawn there too. `--margin-sprites 0` still exists, but only as the headless A/B switch. **Eight** placement/boundary bugs were found and fixed while auditing this; see `docs/research.md` §26.
+- ~~**Widescreen margins are background only**~~ — **fixed, and it is part of the `widescreen` feature, not a toggle.** A margin with no players in it is not a wider game, so the players the game placed outside its own viewport (40% of them at any moment) are drawn there too. `--margin-sprites 0` still exists, but only as the headless A/B switch. **Eleven** placement/boundary bugs were found and fixed while auditing this — the last three a whole character blinking on the culling flag, a 4 px seam join with the camera still, and a 1 px row leapfrog; see `docs/research.md` §26.
 - ~~**Sprites double when two mods are on**~~ — **fixed.** With character-flicker and
   widescreen both enabled, every sprite was drawn twice: once by the compositor (whose native
   256 columns are the machine's finished picture) and once by the flicker mod's captured list.

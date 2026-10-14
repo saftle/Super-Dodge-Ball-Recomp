@@ -2067,8 +2067,11 @@ report. `margin_track.py`'s `ghost` check exists to catch exactly it.
   cannot make it (see below).
 - **No blink, no ghost, no jump — audited per sprite, per frame.**
   `tools/widescreen/margin_track.py` over frames 500-1200 of the sweep, **eleven
-  objects, 701 frames, no anomalies**, at 16:9 and 32:9, with and without
-  the reveal, and with the character-flicker feature on. Objects 2 and 8 — the two
+  objects, 701 frames, one `cshift` and nothing else**, at 16:9 and 32:9, with and
+  without the reveal, and with the character-flicker feature on. A `cshift` is a
+  shift the compositor's own printed correction explains (frame 760, corr+3,
+  visually verified whole); it exits 0 but each one wants eyes once, because a
+  wrong correction lands there too. Objects 2 and 8 — the two
   the game's display list almost never contains — are drawn on **701/701** frames.
 - **Glued to the court.** World-aligning the presented frame by
   `cyc_render_line_scroll_x` and stepping through the fastest pan in the sweep
@@ -2091,7 +2094,7 @@ report. `margin_track.py`'s `ghost` check exists to catch exactly it.
   byte-identical to no `--mods-root` at all, **1200/1200 frames** on both the
   sweep and the pan vector.
 - **Stress vector** (`sdb_throw`, 3000 frames, 16:9 with the reveal, flicker on):
-  **104615 margin sprites drawn, peak 64, 0 backstop trips**, 0 part-limit
+  **104769 margin sprites drawn, peak 64, 0 backstop trips**, 0 part-limit
   warnings (re-baselined 2026-10-14; the chain of figures is in "The `drawn`
   re-baseline" at the end of this section). Re-baselined 2026-10-13: the previously recorded 104240 does not
   reproduce on this binary and is **not explained** — see below. `SDB_MARGIN_PARTS`
@@ -2255,7 +2258,7 @@ OAM as of the *same* build, which is the open item in **plan.md 15**.
 
 At the time of that fix, sweep 1200 / throw 3000 both mods on: `drawn` 33726 /
 104519, `off-edge` 3951 / 3237, peak 64, backstop 0, with 3952 sprites still
-restored. Both figures have since moved (current: **33874 / 104615**); the
+restored. Both figures have since moved (current: **33885 / 104769**); the
 one-build staleness was the last open half of it and is fixed by `sdb_reconcile`
 above — plan.md 15.
 
@@ -2387,7 +2390,7 @@ reading is "the machine did not emit it this frame". Re-baselined: sweep 1200
 `drawn` 33726 -> **33855** (off-edge 3951, peak 64, backstop 0 unchanged); throw
 3000 104519 -> **104612** (off-edge 3237, peak 64, backstop 0 unchanged). Two
 further steps followed — the band anchor and then the basis correction, current
-**33874 / 104615** — and both are set out in "The `drawn` re-baseline" at the end
+**33885 / 104769** — and both are set out in "The `drawn` re-baseline" at the end
 of this section. Read this pair as what the filter removal did, not as current.
 
 Same lesson as the menu ghost one section down, approached from the opposite
@@ -2429,79 +2432,170 @@ nothing in that file compares the two.
 object sits a constant distance from the machine's copy of itself. Require two
 parts to agree on the distance, so a coincidental match with a neighbouring
 player — every player shares tiles — cannot produce one. Then tabulate that
-distance (`delta = oam_x - margin_x`) against `d = $C3/$C4 - scroll`:
+distance (`delta = oam_x - margin_x`) against `d = $C3/$C4 - scroll`, counting
+only parts the compositor actually paints (a `machine`-skipped part is never
+drawn, so its disagreement is invisible by construction):
 
 | | `d = −7` | `d = −6` | `d = 0` | `d = +6` | `d = +7` |
 |---|---|---|---|---|---|
 | **before** | 0 (143), **+7 (31)** | 0 (140), **+6 (25)** | **0 (790)** | 0 (136), **−6 (56)** | 0 (150), **−7 (57)** |
-| **after** | **0 (174)** | **0 (165)** | **0 (784)** | **0 (192)** | **0 (206)** |
+| **after** | **0 (69)** | **0 (58/60)** | **0 (341/342)** | **0 (50/53)** | **0 (48/51)** |
 
-1581 whole-object comparisons on the pan vector. The disagreement is **0 or exactly
-one camera step, and never anything between** — which is what identifies it as the
-same sprite placed on two cameras rather than as staleness, and it is also why
-this was findable at all once the detector was built to ask the right question.
+575 painted whole-object pairs on the pan vector (566 at exactly 0; the 9
+stragglers sit 1-5 px out, inside a step). Before the fix the disagreement is 0
+or exactly one camera step, and never anything between — which is what identifies
+it as the same sprite placed on two cameras rather than as staleness, and it is
+also why this was findable at all once the detector was built to ask the right
+question. After it, every painted part agrees with the machine's copy.
 
-**The fix is gated on that signature**, which is the whole of it:
+**The fix**, which is the whole of it:
 
     sdb_object_delta()  ->  move this object onto the machine's columns
 
-Before drawing an object, if it sits a constant one-camera-step distance from the
-machine's copy of itself, move it there. Three conditions, and each is load-bearing:
+Before drawing an object, if two or more of its parts agree the machine holds
+the same sprite a constant distance away, move the whole object there. Three
+conditions, and each is load-bearing:
 
 1. **Whole object, never per part.** A character is sixteen columns of two
    eight-wide sprites; moving one half onto the machine's column and leaving the
    other on the record collapses the eight pixels between them to one.
    `margin_track.py` reads that as a `ghost`, and it measured **22** of them on the
    sweep when this was first done per part.
-2. **The distance must be the camera step.** This is what makes it safe, and it is
-   the opposite polarity to `sdb_oam_has` — this *acts* on OAM, that one acted on
-   its absence. Live OAM is stale for 3-6 frames, so placing parts by it
-   unconditionally cuts characters in half: on the sweep at 759-761 OAM was three
-   columns out, following it moved a player's head off its body, and the audit
-   reported **32** spurious `shift`s. Three is no multiple of anything; the gate
-   rejects it. Conversely a stale OAM cannot accidentally produce a constant
-   one-step offset across an object's parts.
-3. **Two parts must agree on it**, which (1) already needs.
+2. **Only objects the machine cannot be painting.** Every part must sit outside
+   the machine's columns (screen column < 8 or > 251) *before* the move. This is
+   what makes it safe, and it replaced an earlier gate that required the
+   disagreement to be exactly the camera step: that gate admitted a crowd
+   mismatch at sweep 618 (an 8-part character straddling band and viewport,
+   moved -7 onto a neighbour, jogging head against body) and refused the real
+   d=0 case below. A part outside the machine's columns can never overlap
+   anything the machine paints, so moving it can only fix a join or defer to
+   the machine -- never double. It is the opposite polarity to `sdb_oam_has` --
+   this *acts* on OAM, that one acted on its absence -- but where that one asked
+   tile-and-row and matched strangers, this one matches world columns.
+3. **Two parts must agree on it**, which (1) already needs. A coincidental match
+   with a neighbouring player cannot hold one offset across an object's parts;
+   live OAM being stale for 3-6 frames is exactly what the vote is for -- the
+   sweep's 759-761 reads 3 columns out, which is no multiple of anything, and a
+   lone part agreeing on it is ignored.
 
 Matched on **world column**, never on tile: `oam_x + scroll + 4` against
 `record_x + dx`, both carrying the guest's own `$84A1` OAM bias of 4. Two objects
 are never at the same world column, so this names one sprite and cannot name the
-wrong one — which is the failure that killed `sdb_oam_has` and then the
-`sdb_band_anchor` that briefly replaced it.
+wrong one -- which is the failure that killed `sdb_oam_has` and then the
+`sdb_band_anchor` that briefly replaced it. The window is a camera step plus one
+(`SDB_MATCH_SLOP` 12): the step itself, plus the frame of ball travel separating
+a fresh margin capture from a 3-frame-stale OAM. An exact agreement (delta 0) is
+a match and votes for 0 rather than abstaining, so a split object resolves
+toward leaving it alone.
 
 **What is still not established, and the fix does not depend on it:** *why* the two
 sides disagree. The margin's `record_x` is read live and the record is rewritten
 every frame, so the margin's world column is current; OAM answers for a build up
-to six frames old. A disagreement of an arbitrary size would be that staleness —
-but the measurement says the size is always exactly one camera step, which
-staleness does not predict. Whether the guest switches bases per object or the
-record lags by a frame is open. The gate does not need the answer, because it only
-acts on the one shape it can recognise, and every frame that is not that shape is
-left exactly as it was.
+to six frames old. The gate does not need the answer, because it only acts where
+the machine holds the sprite and the margin sits outside the machine's columns,
+and every frame that is not that shape is left exactly as it was.
 
 **Reading it off the trace.** `SDB_TRACE_CAPTURES=<from>-<to>` prints `[corr+N]`
-next to an object on the `sdbw` line whenever the correction fires, and nothing
-when it does not. Over the 701-frame pan audit window that is **154 corrections** —
-`-7` ×45, `-6` ×45, `+7` ×34, `+6` ×27 — which is the ~22% the delta table predicts.
+next to an object on the `sdbw` line whenever the correction fires (and
+`[corry+N]` for the row correction below), and nothing when it does not. Over the
+701-frame sweep audit window that is **56 column corrections** (mostly ±6/±7, tail
++3/+4/+5) plus **3 row corrections**; over the pan window **52**, all columns.
 Printing the zeroes as well fills the line with one `[corr+0]` per object per
 frame, which reads as a column of data and is none: the same "a green line that
 measured nothing" shape this file keeps having to undo.
 
-**Re-baselined:** sweep 1200 `drawn` 33816 -> **33874**, throw 3000 104595 ->
-**104615** (`off-edge` 3951 / 3237, peak 64, backstop 0 unchanged in both). The
-increase is the opposite of the anchor's and it is the gate closing: a corrected
-part moves into the machine's own columns, where the draw site correctly skips it
-because the machine paints it. Per-part outcomes over the sweep are now
-**drawn 32429 / machine 6897 / oob 1405**, with no `ghost` outcome — the
+**Re-baselined:** sweep 1200 `drawn` 33874 -> **33885**, throw 3000 104615 ->
+**104769** (`off-edge` 3951 / 3237, peak 64, backstop 0 unchanged in both). The
+increase is parts the cull-bit mask below puts back (objects the game flagged
+but kept emitting) net of parts the correction moves into the machine's own
+columns, where the draw site correctly skips them because the machine paints
+them. Per-part outcomes over the sweep are now
+**drawn 32341 / machine 6985 / oob 1405**, with no `ghost` outcome -- the
 `ghost` classification was removed with the filter that invented it.
 
 Gates, all re-run on this build: margin off vs on byte-identical over 900 frames;
 mod off vs stock 0/400; the machine's own 256 columns untouched 0/600;
-`margin_track.py` **no anomalies on the sweep *and* on the pan vector**; the
+`margin_track.py` reports **one `cshift` on the sweep** (frame 760, corr+3,
+visually verified whole) **and none on the pan vector**; the
 doubling invariant unchanged at **479/900** (below). Against `HEAD` over 800 sweep
 frames the picture moves on **17 frames, 3932 pixels, none of them confined to the
-machine's columns** — all of them at the band or margin boundary, which is where
+machine's columns** -- all of them at the band or margin boundary, which is where
 the doubling was.
+
+### The identity check knew the object by its culling bits
+
+A whole character blinking out at the margin edge for exactly as long as the
+game holds a flag: object 3 draws 8 parts, then nothing for three frames, then 8
+again at identical columns -- no placement problem, the slot is simply empty.
+The margin keeps `id0/id1` (record bytes 0-1 at capture) and refuses to draw a
+slot that no longer matches. Byte 0 is the object's state byte `$43`, and
+section 2.1's three culling gates read exactly `($43 & $70) == $20` and `& $20`
+-- bits the flicker mod overrides on purpose, so the object keeps being emitted
+while the game insists it is hidden. Byte 0 goes `$02` -> `$22`, the test reads
+that as "a different object took the slot", and the whole character drops. That
+is also why it happens with the flicker mod on and never without it: with the
+mod off the object genuinely does vanish.
+
+Measured on a played capture at frames 910-912 (and 925-926), reproduced
+headlessly at 919-921 with the identical signature (56 -> 48 -> 56 parts, a drop
+of exactly 8). The fix masks `$70` out of the byte-0 comparison and nothing
+else: byte 1 (`$41`, which does not move with the culling state) and the
+remaining bits still have to match, so a genuinely recycled slot is still
+caught -- which is the reason the check exists at all. Purely additive on the
+same vector: 89 more parts painted over 1000 frames, **zero** painting less, and
+`off-edge` unchanged, so the capture side is untouched.
+
+### The join the basis gate refused
+
+A character straddling the seam with its halves 4 px apart and the camera
+**still** (`scr == cam`, so no basis is involved at all): the margin draws the
+band half at columns 1-3 while the machine draws the rest at 5-13. The old
+basis-shape gate refused it -- 4 is not a camera step -- and the picture showed
+a jog down the body. The mechanism is intra-frame, not inter-frame: the game
+advances its camera partway through the frame, so sprites emitted before the
+advance and captures taken after it disagree by less than a step with neither
+side "stale". `corr+4` moves the band half onto the machine's columns and the
+character reads whole; verified frame by frame, 716-720.
+
+This is the case that replaced the gate rather than widening it. Widening the
+shape to admit a 4 px disagreement also admits the sweep-618 crowd mismatch (a
+full character moved -7 onto a neighbour, jogging head against body -- measured,
+with pictures, before the widening was reverted). The reach check admits the
+real one and refuses that one for a structural reason instead of a numerical
+one: f718's object sits wholly outside the machine's columns, 618's straddles
+them. What the audit sees of this: nothing -- `margin_track.py` compares the
+margin against itself and both frames are internally consistent, which is the
+standing blind spot below, now with a `cshift` outcome for the cases the
+compositor acted on (exit 0, each one still wanting eyes once).
+
+### Rows leapfrog the same way columns do
+
+A split ball with the columns in full agreement: margin and machine both put the
+ball's left half at column 4, but the margin's rows read 138/146 against the
+machine's 137/145. One pixel of vertical disagreement between two copies of an
+8 px sprite, blinking as the two sides update on different frames -- the row
+axis of the same staleness the column correction handles, and nothing corrected
+it. The conversion itself is exact (`$EC - Y16`, verified: the frames either
+side agree to the pixel), so a 1 px difference is motion between the capture
+and the emission, not arithmetic.
+
+The fix votes rows the same way it votes columns -- two parts must agree the
+machine's copy sits N rows away, with the vote window itself bounding N to ±2,
+so a genuinely different animation cel is never touched -- and paints the
+corrected row (`[corry+N]` on the trace, mirrored in the JSON twin).
+`corr+9 corry-1` on the reported frame; one ball on every frame either side,
+verified 783-787.
+
+The flicker side needed the same widening for the same reason: `sdb_reconcile`
+matched list entries to OAM on exact `(y, tile, attr)`, so an entry whose sprite
+both moved and was re-emitted -- new row as well as new column -- never matched
+and kept its stale x while the margin completed the same sprite at the live
+column. Rows now match within ±2 there too: over 23820 presented-list entries,
+**771 move from "no candidate at all" to unique matches with zero new
+ambiguity**; at ±3 ambiguity starts (9 entries), so ±2 is the last free width.
+The list-side ambiguity guard moved with it -- uniqueness is now tested against
+the matched OAM slot itself rather than pairwise between entries, because with
+a row window two entries a row apart can chase the same slot.
 
 ### The doubling invariant does not hold on a match
 
@@ -2526,8 +2620,8 @@ it reports the *outcome of every part* rather than only a total. Over the
 
 | outcome | count |
 |---|---|
-| drawn | 32429 |
-| machine (the machine owns those columns) | 6897 |
+| drawn | 32341 |
+| machine (the machine owns those columns) | 6985 |
 | ghost | **gone — the outcome was removed with the filter that invented it** |
 | clip | 0 |
 | oob | 1405 |
@@ -2542,12 +2636,13 @@ It is the other way round. **33855 was the correct figure and 33726 was the
 broken one**, because the filter asks live OAM whether the machine holds a sprite
 and acts on the answer. See "The revealed band had holes in it" immediately
 below. With the filter removed this run's counter reported 33855 again; the band
-anchor moved it to 33816 and the basis correction to the current **33874**. Every
+anchor moved it to 33816, the basis correction to 33874, and the cull-bit mask
+plus the row/reach corrections to the current **33885**. Every
 step is in this file, and the two that went the wrong way are the ones worth
 keeping.
 
 **The throw figure is still not explained.** The previously documented `104240`
-is *below* what this binary produces (104519 at the time, **104615** now) while
+is *below* what this binary produces (104519 at the time, **104769** now) while
 that vector's ghost count was only 93, so the ghost filter cannot account for it
 in that direction. Every configuration axis available was ruled out:
 
@@ -2569,9 +2664,12 @@ Every `drawn` figure here is a `--present-every 1` figure. That flag sets the
 meaningfully rather than slightly (at stride 200, 167 instead of 33726). AGENTS.md
 has the full note.
 
-**Current, for the next person to re-baseline from:** sweep 1200 `drawn` **33874**,
-throw 3000 **104615**, `off-edge` 3951 / 3237, peak 64, backstop 0, seam diff 2 /
-0 px, `composed` 1152 / 2952.
+**Current, for the next person to re-baseline from:** sweep 1200 `drawn` **33885**,
+throw 3000 **104769**, `off-edge` 3951 / 3237, peak 64, backstop 0, seam diff 2 /
+0 px, `composed` 1152 / 2952. The step from 33874 / 104615 is the cull-bit mask
+putting culled objects' parts back, net of the row/reach corrections moving
+parts into the machine's columns (correct skipping, as before). Every
+`drawn` figure here is a `--present-every 1` figure.
 
 ### Recording a playthrough: `--record-input`, and why it is not optional
 

@@ -213,7 +213,7 @@ when you do not know the frame count in advance.
 *presenting*.** It decides how often the frame is presented at all, and the
 compositor only runs when something presents. So a large stride skips the
 compositor entirely: at `--present-every 200` over 1200 frames the compositor ran
-~6 times and `margin sprites:` read **167 drawn** instead of 33874. Verified
+~6 times and `margin sprites:` read **167 drawn** instead of 33885. Verified
 2026-10-13. Consequences:
 
 - **Every `drawn` / `margin sprites:` figure is stride-dependent and only
@@ -587,9 +587,12 @@ line means the capture is off, not that there is nothing to capture.**
    drawn), `ghost` (two parts of one object within a pixel of each other on a row),
    `shift` (the object moved further than its record and the camera did), `part`
    (a wholly off-screen object holding fewer parts than it did). Current baseline:
-   **701 sweep frames, eleven objects, no anomalies**, at 16:9 and 32:9, with and
-   without the reveal, and with the character-flicker feature on — **and no anomalies
-   on `sdb_pan`**, which is the vector to add whenever this gate is re-run. Objects 2
+   **701 sweep frames, eleven objects, one `cshift` and nothing else**, at 16:9 and
+   32:9, with and without the reveal, and with the character-flicker feature on —
+   **and no anomalies on `sdb_pan`**, which is the vector to add whenever this gate
+   is re-run. A `cshift` is a shift the compositor's own printed correction
+   explains (`[corr+N]`/`[corry+N]` on the `sdbw` line); it exits 0, but each one
+   wants eyes once, because a wrong correction lands there too. Objects 2
    and 8 — the two the game's display list almost never contains — must read
    **701/701**. **A `ghost` is the one to take seriously**: a character is sixteen
    columns of two eight-wide sprites, so two halves placed on different bases come
@@ -609,20 +612,21 @@ line means the capture is off, not that there is nothing to capture.**
    committed baseline exactly (cycles *and* native cycles, 0 callbacks). Extra
    `[[mod_function_hook]]` sites must cost nothing when disabled.
 5. **They actually fire** — `off-edge` must be non-zero (3951 over 1200 sweep frames
-   with the flicker mod on) and `drawn` must follow it (**33874**; **104615** over 3000
+   with the flicker mod on) and `drawn` must follow it (**33885**; **104769** over 3000
    `sdb_throw` frames). **All four figures are `--present-every 1` figures** — see
    the stride warning above; at any other stride they read far lower and mean
    nothing. A callback count of 4150 with `off-edge` at 0 means the CRC
-   key is wrong. **33874** and **104615** (re-baselined 2026-10-14).
-   History, because the numbers moved three times and two of the moves were
+   key is wrong. **33885** and **104769** (re-baselined 2026-10-14).
+   History, because the numbers moved four times and two of the moves were
    mistakes: the sweep figure was **33855 before research §26's `sdb_oam_has()`
    ghost filter and 33726 after it**, a difference of exactly **129** parts — and
    that ordering was the wrong way round. The filter was the bug, so 33855 was
    restored when it was removed. A band anchor then moved it to **33816** and was
-   itself removed (tile matching is ambiguous); the current basis correction moves
-   it to **33874**. Both later moves go the *other* way because both put parts back
-   in the machine's hands, which is correct skipping, not loss. Research §26 keeps
-   the full chain. The
+   itself removed (tile matching is ambiguous); the basis correction moved it to
+   **33874**, then the cull-bit mask plus the row/reach corrections to **33885**.
+   The later moves go the *other* way because they put parts back in the
+   machine's hands (correct skipping, not loss) or restore culled objects' parts.
+   Research §26 keeps the full chain. The
    previous throw figure of 104240 is **not** explained: it is 279 *below* what
    this binary produces while that vector's ghost count is only 93, and no
    configuration reproduces it (aspect, reveal, flicker mod and vector length
@@ -670,9 +674,9 @@ line means the capture is off, not that there is nothing to capture.**
    match frame; but the *interesting* states are the culls at the very edge of the
    512-pixel world, where a sprite legitimately lands over backdrop.
 
-### Three traps in the margin placement, each producing a *different* artefact
+### Four traps in the margin placement, each producing a *different* artefact
 
-All three are the same mistake wearing different clothes, and all three were made
+All four are the same mistake wearing different clothes, and all four were made
 here before they were measured. Read this before touching the draw site.
 
 1. **`cyc_render_line_scroll_x` is the basis — but not the only one, and
@@ -687,10 +691,12 @@ here before they were measured. Read this before touching the draw site.
    **But on roughly a quarter of the stepping frames a whole object sits exactly
    one camera step from the machine's copy of it**, and that is the seam doubling:
    a duplicated sprite at the band that flickered with the pan. `sdb_object_delta`
-   moves such an object onto the machine's columns, and the gate is what makes it
-   safe — the disagreement must be *exactly* the camera step, so a stale OAM (three
-   columns out on the sweep at 759-761, which is no multiple of anything) is
-   ignored. Never relax that gate: live OAM is unreliable in exactly the way this
+   moves such an object onto the machine's columns, and the reach check is what
+   makes it safe — every part must sit where the machine cannot paint (outside
+   [8,251]) *before* the move. An earlier gate required the disagreement to be
+   exactly the camera step; that admitted a crowd mismatch (sweep 618, head jogged
+   against body) and refused the real d=0 case, so it was replaced. Never relax
+   the reach check: live OAM is unreliable in exactly the way this
    mod exists to fix, and acting on it unconditionally cuts characters in half.
 2. **Never split parts across the two bases.** It reads like a refinement — "use the
    machine's basis for the part it holds, the scroll's for the part it does not" —
@@ -704,6 +710,13 @@ here before they were measured. Read this before touching the draw site.
    from it, so the screen column is that minus 4. Leaving the 4 in moves every part
    across the boundary test below, which both *drops* parts the margin owns (a stripe
    missing through a sprite) and *draws* parts the machine owns (a doubled player).
+4. **Rows leapfrog the same way columns do.** The margin's row comes from the
+   capture, the machine's from the latest emission, and the two sample different
+   frames — so they sit 1-2 px apart while the columns agree exactly, and the
+   sprite reads as split anyway. Same modal vote as the columns (two parts must
+   agree, window ±2 so a different animation cel is never touched), painted as
+   `corry`. The flicker-side matcher needed the same widening for the same reason:
+   exact-row matching left 771 moved-and-re-emitted entries unmatched.
 
 One more, about the data rather than the arithmetic: **do not try to prove
 "no doubling" by matching sprites against OAM.** Every player shares the same tiles,
@@ -879,7 +892,7 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 | `tas/vectors/sdb_beanball.input` | **Recorded**, not written: a played Bean Ball run across the full map, the repro for the open flicker-mod list degeneration (research §26, plan item 14). Replay in a window, not headless |
 | `tas/vectors/sdb_probe.input` | Diagnostic, not a test vector: LEFT in 4-frame pulses from frame 600, which is how **594** was measured as the frame the court starts accepting input (research §27 timings above). Keep it — it is the reproduction for the timing facts, and the facts cost three failed repros to establish |
 | `tools/flicker/` | Analysis scripts behind the research.md §2/§2.1 claims (OAM/record dumps, ref-finder, memdiff) + toolkit README |
-| `tools/widescreen/` | Analysis behind research.md §25-26 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge; `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite; **`json_trace.py` — reads the `SDB_TRACE_JSON=<from>-<to>` stream, one JSON object per line, which is what plan item 14 needs (`flicker` puts live OAM and the mod's published list side by side in one frame)**; **`cycframe.py` — the shared `--frame-log` reader the other four sit on, since four copies of the header parser meant a format change would break three tools silently**. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame) |
+| `tools/widescreen/` | Analysis behind research.md §25-26 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge (corr-explained shifts report as `cshift`, exit 0); `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite; **`json_trace.py` — reads the `SDB_TRACE_JSON=<from>-<to>` stream, one JSON object per line, which is what plan item 14 needs (`flicker` puts live OAM and the mod's published list side by side in one frame)**; **`cycframe.py` — the shared `--frame-log` reader the other four sit on, since four copies of the header parser meant a format change would break three tools silently**. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame) |
 | `tools/play_record.sh` | Play the game in a window and record the session as a replayable `--input` vector plus `SDB_TRACE=1` and per-frame screenshots, into `tmp/<name>/`. Pins `WindowScale`/Fullscreen/VSync, or the screenshots make the game run in slow motion. `SDB_UNLIMITED=1` drops `--exit-after` and runs until you close the window; closing it normally still flushes the vector's frame count (it is written from the destructor), but SIGKILL does not. The only way to find the band bugs — see the recorded-playback section above |
 | `tools/overclock/` | PPU-overclocking oracle harness behind research.md §23 (MesenCE sandbox + stock-vs-OC comparison). **Its self-check matters: if cycles/frame stays 29781 for a non-zero `Before NMI`, the setting never applied and the run is worthless** |
 | `mods/packages/super-dodgeball.character-flicker/` | Mod package — `manifest.toml` only (data-only by design; implementation is `src/sdb_host_extras.c`). Off by default, toggleable in the launcher's Mods screen; PolyForm NC, same as the project |
