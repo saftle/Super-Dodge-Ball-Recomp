@@ -4,7 +4,7 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 
 ![Super Dodge Ball title screen (recompiled build)](docs/assets/title.png)
 
-> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). The **widescreen mod is playable and has been played**: 16:9 / 21:9 / 32:9 with the court *and the players* in the margins, including the columns the game itself hides. It was found to be correct by recording and replaying real playthroughs, which is how its last two bugs were caught. Not yet tested on a full playthrough to completion, and one open question remains: the Bean Ball sprite-list bug (the pan judder that used to sit beside it is resolved — it is the game's own cadence, see `docs/research.md` §27). See `docs/plan.md` for the frontier.
+> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). The **widescreen mod is playable and has been played**: 16:9 / 21:9 / 32:9 with the court *and the players* in the margins, including the columns the game itself hides. It was found to be correct by recording and replaying real playthroughs, which is how its last two bugs were caught. Not yet tested on a full playthrough to completion. Three open questions remain, all in the flicker mod's presentation layer: the Bean Ball sprite-list bug, the presented sprite layer being one build old, and a one-frame "ghost" of a menu character on screen transitions — four fixes were built and measured for that last one and each cost more than it fixed (`docs/research.md` §26, `docs/plan.md` 16). The pan judder that used to sit beside them is resolved — it is the game's own cadence, see `docs/research.md` §27. See `docs/plan.md` for the frontier.
 
 > *Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong here. This port is in development — expect rough edges.*
 
@@ -261,12 +261,15 @@ SDB_SCALE=2 SDB_SHOT_EVERY=1 tools/play_record.sh bar-artifact   # bigger window
 
 | | |
 |---|---|
-| `SDB_ASPECT` | `16:9` (default), `21:9`, `32:9`, `stock` |
-| `SDB_FLICKER` | `1` runs the character-flicker mod (default) |
+| `SDB_MODS` | which mods are on — any combination of `remove-character-flicker`, `widescreen`, `ppu-overclock`. Default `remove-character-flicker,widescreen`. An unknown name is refused with the valid list rather than being passed to the catalog, whose own refusal names a *package* and leaves you guessing which feature you mistyped |
+| `SDB_ASPECT` | `16:9` (default), `21:9`, `32:9`, `stock` — used only when `widescreen` is on |
+| `SDB_SCANLINES` | `ppu-overclock` scanlines, `0..262` (default 262). **Changes guest timing**, so a capture with it on compares against no stock figure in the docs |
 | `SDB_SHOT_EVERY` | **present** every N frames (default 1) — not a screenshot interval: the compositor only runs on a presented frame, so `N > 1` silently skips it and every `drawn`/`composed` count drops |
-| `SDB_UNLIMITED` | `1` runs until you close the window, ignoring `SDB_FRAMES` |
+| `SDB_UNLIMITED` | `1` runs until you close the window, ignoring `SDB_FRAMES`. Close it normally — SIGKILL skips the destructor and the vector loses its frame count |
 | `SDB_SCALE` | window scale, `1` or `2` (default 1) |
 | `SDB_FRAMES` | frame cap (default 2000) |
+
+The mod set is written into `state.toml` and echoed in the run header *and* appended to `repro.input`, because the replay command has to be the one that reproduces the capture. `--widescreen` follows the mod set rather than being passed unconditionally: the flag is handled in our own option parser and installs the compositor by itself, so passing it for a flicker-only capture would quietly turn widescreen on.
 
 **The scale is not optional.** `WindowScale = 3` + `Fullscreen = 1` makes each
 screenshot a 14.87 MB 1080p encode, which drops the run to ~41 fps and the game

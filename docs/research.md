@@ -2230,6 +2230,51 @@ Not regressed, sweep 1200 / throw 3000 both mods on: `drawn` 33726 / 104519,
 `off-edge` 3951 / 3237, peak 64, backstop 0, with 3952 sprites still restored. The
 one-build staleness is pre-existing and **open** — plan.md 15.
 
+### The menu ghost: a stale sprite list outliving the screen it belongs to — OPEN
+
+Found by playing, twice, and **not fixed**. From two captures in `tmp/`: the
+GAME MODE menu ends with an 8-sprite character in OAM slots 1-8; the next screen
+retires it by writing `y=$F0` over the y byte and leaves tile/attr/x intact; the
+game then emits nothing for 14 frames. `s_build_count` is deliberately never reset
+per frame — the build spans two frames — so the mod repaints those 8 sprites for
+14 frames onto a screen with no character on it. It is a jumble, because it is a
+character's parts drawn where nothing is.
+
+The retirement value is `y=$F0` and the cursor pin writes `$F0` to the same byte
+for the same reason, so `$F0` cannot distinguish "stopped here" from "hid this
+one". Three rules were built and measured; **all three trade this one artifact
+for a worse one**, which is why none shipped:
+
+| rule | what it fixed | what it broke |
+|---|---|---|
+| reject the list when any entry disagrees with OAM | the ghost | **87 of 128 disagreements are the attribute byte alone** — the game flipping a sprite's palette mid-build. Suppressed the mod through a whole super-throw capture: a character lost body parts on 8 frames |
+| reject when OAM is entirely empty | the ghost | correct, but only catches the case where the machine has drawn *nothing*; it misses the frame the machine has already started the new screen (1 live sprite, 8 stale) |
+| reject when the presented list exceeds the machine's live sprite count | the ghost | **structurally impossible**: the mod presents up to 77 sprites and OAM holds 64, so exceeding it is the truncation fix working. Fired on 34 sweep frames |
+| `sdb_publish` stamps the frame the list was CAPTURED, not handed over | the ghost | correct in isolation, and it fixes the blob — but it also refuses the stale fallback on ordinary build transitions, where the published list is the right thing to show |
+
+Measured footprint of that last one, against the pre-change build: **132 of 1200
+sweep frames (11%) differ, 128 of them drawing LESS sprite ink**, on a regular
+every-6-frames cadence. Frame 430 is the clearest single picture: 8 players
+before, 4 after. The fallback it suppresses is not a nicety — it is what stops a
+half-built list from blanking the pitch, and 64 sprites is simply more correct
+than the 32 half of it that remains.
+
+So the two cases are **not separable by any signal tried**: the ghost's published
+list is 14 frames old and the healthy fallback's is 5, and a sweep also publishes
+at ages 4-8, so no age threshold separates them either. What the ghost needs is to
+know *the screen changed*, and the mod has no notion of a screen. Until something
+does, the ghost stays: one frame on a menu transition, and no worse than stock.
+
+What did ship is the `build-list` column on the `sdb` trace line, because
+`peak-list == 0 && build-list > 0` is the fingerprint of every frame in this
+family — the mod is about to paint a list it captured on an earlier frame. It is
+read-only and changed no presentation decision (verified: 0 of 1200 sweep frames
+differ from the pre-change build).
+
+Also measured here, and worth keeping: **`--present-out` indexes one frame ahead
+of the trace's frame counter.** Replay frame *f* is capture frame *f+1*. Both of
+the captures above were misread for several passes because of it.
+
 ### The `drawn` re-baseline: one figure explained, one not
 
 `SDB_TRACE_JSON` makes this decidable rather than a matter of opinion, because
