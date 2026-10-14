@@ -1044,11 +1044,26 @@ static const uint32_t *sdb_present(void *ctx, int *width, int *height)
          * exactly as it already is with the flicker mod alone at cw == 256. That
          * is pre-existing, not introduced here. What must not happen is two
          * disagreeing copies of it. */
-        if (x0 >= 0 && x0 + 256 <= cw && ch >= 240)
-            for (int y = 0; y < 240; y++)
-                memcpy(s_canvas + (size_t)y * cw + x0,
-                       s_picture + (size_t)y * 256,
-                       256 * sizeof(uint32_t));
+        /* Copy AROUND the columns the compositor reconstructed. With overscan
+         * on, columns [0, SDB_WS_CLIP) are the revealed ones: the machine paints
+         * backdrop there (PPUMASK hides them) and the compositor refilled them
+         * from the nametable. Stamping all 256 columns with s_picture puts that
+         * backdrop back and the black band returns even with overscan on -- the
+         * same `first` the compositor uses for its own seam check at
+         * sdb_ws_composite, so the two agree by construction rather than by two
+         * copies of the same constant.
+         *
+         * With overscan off there is nothing reconstructed: all 256 columns are
+         * the machine's, including the clip the game asked for, so the band is
+         * correct and must be kept. */
+        {
+            int first = s_ws_reveal ? SDB_WS_CLIP : 0;
+            if (x0 >= 0 && x0 + 256 <= cw && ch >= 240 && first < 256)
+                for (int y = 0; y < 240; y++)
+                    memcpy(s_canvas + (size_t)y * cw + x0 + first,
+                           s_picture + (size_t)y * 256 + first,
+                           (size_t)(256 - first) * sizeof(uint32_t));
+        }
 
         for (int i = count - 1; i >= 0; i--)
             sdb_blit(&list[i], s_canvas, cw, *height, x0);
@@ -2074,13 +2089,20 @@ static void sdb_ms_disable(void);
 static void sdb_ws_enable(void)
 {
     sdb_ws_set_aspect(sdb_ws_aspect_from(getenv("SDB_WIDE"), "aspect"));
-    if (!s_ws_margin_only) sdb_ms_enable();
-}
-
-static void sdb_ov_enable(void)
-{
-    const char *e = getenv("SDB_OVERSCAN");     /* headless A/B */
+    /* Widescreen implies revealing the 8 clipped left-hand columns, same as it
+     * implies margin sprites: they are only drawn by the compositor, so with
+     * overscan left off the widest part of the new picture is a black gutter the
+     * game asked for. Not a separate feature on purpose -- it was one, and the
+     * two are not separable in practice: an overscan feature that is off while
+     * widescreen is on produces the same frame with a black band at the margin
+     * boundary, which is the thing widescreen exists to stop doing.
+     *
+     * SDB_OVERSCAN still forces the clip back ON, for the headless A/B in
+     * research 26 gate 5 (the "no black gutter" measurement needs the band to be
+     * measurable in the first place). The launcher cannot turn it off. */
+    const char *e = getenv("SDB_OVERSCAN");     /* headless A/B only */
     sdb_ws_set_overscan(e && e[0] ? atoi(e) != 0 : 1);
+    if (!s_ws_margin_only) sdb_ms_enable();
 }
 
 /* Margin sprites: enable the two capture sites. Called by widescreen, because
@@ -2280,7 +2302,6 @@ static void register_sdb_mods(void)
     if (!nes_mod_register_activation_plugin("super-dodgeball.character-flicker", sdb_enable) ||
         !nes_mod_register_activation_plugin("super-dodgeball.ppu-overclock", sdb_oc_enable) ||
         !nes_mod_register_activation_plugin("super-dodgeball.widescreen", sdb_ws_enable) ||
-        !nes_mod_register_activation_plugin("super-dodgeball.overscan", sdb_ov_enable) ||
         !nes_mod_register_reset_callback(sdb_disable) ||
         !nes_mod_register_reset_callback(sdb_oc_disable) ||
         !nes_mod_register_reset_callback(sdb_ws_disable))

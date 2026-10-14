@@ -24,7 +24,6 @@
 # Environment knobs, all optional:
 #
 #   SDB_ASPECT      16:9 | 21:9 | 32:9 | stock        (default 16:9)
-#   SDB_OVERSCAN    1 reveals the 8 hidden left columns (default 1)
 #   SDB_FLICKER     1 runs the character-flicker mod    (default 1)
 #   SDB_SHOT_EVERY  PRESENT every N frames               (default 1, which is only
 #                   affordable because the scale is pinned -- see the measured
@@ -58,7 +57,6 @@ fi
 FRAMES="${2:-${SDB_FRAMES:-2000}}"
 UNLIMITED="${SDB_UNLIMITED:-0}"
 ASPECT="${SDB_ASPECT:-16:9}"
-OVERSCAN="${SDB_OVERSCAN:-1}"
 FLICKER="${SDB_FLICKER:-1}"
 SHOT_EVERY="${SDB_SHOT_EVERY:-1}"
 SCALE="${SDB_SCALE:-1}"
@@ -128,7 +126,6 @@ cp -r build-cycle/mods "$OUT/mods"
 # values table in the wrong place is silently dropped and the feature falls back
 # to its manifest default with no warning anywhere (research.md 25). The
 # widescreen values table therefore comes last, directly after widescreen.
-ov=$( [ "$OVERSCAN" = "1" ] && echo true || echo false )
 fl=$( [ "$FLICKER" = "1" ] && echo true || echo false )
 cat > "$OUT/mods/state.toml" <<EOF
 format_version = 1
@@ -157,11 +154,6 @@ enabled = false
 
 [[feature]]
 package_id = "super-dodgeball.widescreen"
-id = "overscan"
-enabled = $ov
-
-[[feature]]
-package_id = "super-dodgeball.widescreen"
 id = "widescreen"
 enabled = true
 
@@ -170,9 +162,9 @@ aspect = "$ASPECT"
 EOF
 
 if [ "$UNLIMITED" = "1" ]; then
-    echo "=== $NAME: UNLIMITED (no --exit-after), $ASPECT, overscan=$OVERSCAN, flicker=$FLICKER ==="
+    echo "=== $NAME: UNLIMITED (no --exit-after), $ASPECT, flicker=$FLICKER ==="
 else
-    echo "=== $NAME: $FRAMES frames, $ASPECT, overscan=$OVERSCAN, flicker=$FLICKER ==="
+    echo "=== $NAME: $FRAMES frames, $ASPECT, flicker=$FLICKER ==="
 fi
 echo "    vector  -> $OUT/repro.input"
 echo "    trace   -> $OUT/trace.log"
@@ -211,7 +203,6 @@ SDB_TRACE=1 NESRECOMP_NO_LAUNCHER=$( [ "$LAUNCHER" = "1" ] && echo 0 || echo 1 )
   --ram-init zeros \
   --mods-root "$OUT/mods" \
   --widescreen "$ASPECT" \
-  --overscan \
   --record-input "$OUT/repro.input" \
   --present-out "$OUT/w_" --present-every "$SHOT_EVERY" \
   $( [ "$UNLIMITED" = "1" ] || echo --exit-after "$FRAMES" ) \
@@ -249,7 +240,7 @@ cat >> "$OUT/repro.input" <<EOF
 # --- replay (what this capture was) ---
 #   cd "$PWD" && SDB_TRACE=1 ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" \\
 #       --frames $REC_FRAMES --input $OUT/repro.input --ram-init zeros \\
-#       --mods-root $OUT/mods --widescreen $ASPECT --overscan \\
+#       --mods-root $OUT/mods --widescreen $ASPECT \\
 #       --present-out $OUT/r_ --present-every 1
 #
 # MEASURED 2026-10-13, and do not assume it: this replay is NOT byte-faithful to
@@ -275,5 +266,5 @@ echo
 echo "Replay it with:"
 echo "  SDB_TRACE=1 ./build-cycle/nes_game \"$ROM\" \\"
 echo "      --frames $REC_FRAMES --input $OUT/repro.input --ram-init zeros \\"
-echo "      --mods-root $OUT/mods --widescreen $ASPECT --overscan \\"
+echo "      --mods-root $OUT/mods --widescreen $ASPECT \\"
 echo "      --present-out $OUT/r_ --present-every 1 2> $OUT/replay.log"
