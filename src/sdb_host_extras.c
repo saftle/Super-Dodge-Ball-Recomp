@@ -921,6 +921,61 @@ static void sdb_margin_blit(const SdbMargin *m, int px0, uint32_t *out, int widt
  *
  * Returns NULL (the host presents the native frame) whenever the flicker mod
  * has nothing to draw and nothing about the picture needs repacking. */
+/* Take the machine's X for any list entry that is UNAMBIGUOUSLY the same sprite
+ * in OAM; leave the rest alone.
+ *
+ * The presented layer is a build old by construction (plan.md 15), so an entry
+ * the game has since moved is drawn where it WAS. Measured with json_trace.py's
+ * positional lag: over the 1200-frame sweep, 42514 of 54479 unambiguous
+ * (y, tile, attr) matches agree exactly and 11965 are off -- and every one of
+ * those sits on a frame that saw NO build reset, i.e. mid-build, with OAM already
+ * carrying the next list. 640 of 1201 frames carry at least one.
+ *
+ * REJECTING those entries instead is what four previous attempts did, and each
+ * cost more than it fixed (research 26): a stale entry and an absent one look the
+ * same to a player, and dropping it removes a body. MOVING it is a different
+ * decision -- the sprite is still drawn, and it is drawn where the machine has
+ * that exact sprite, which is the only position that is not a guess.
+ *
+ * Unique on BOTH sides or nothing. Every player in a match shares tiles, so a
+ * content match with two candidates says nothing about position, and research 26
+ * records that tile-and-row matching reports thousands of false hits. An entry
+ * that cannot be told apart keeps its captured X, so this can only move a sprite
+ * toward the machine, never invent one. */
+static const SdbSprite *sdb_reconcile(const SdbSprite *list, int count)
+{
+    static SdbSprite buf[SDB_MAX_SPRITES];
+    const uint8_t *oam = cyc_render_oam();
+    if (!oam || count <= 0) return list;
+
+    /* For each list entry: how many OAM slots hold that exact (y, tile, attr),
+     * and the x of the single one if there is exactly one. */
+    uint8_t nmatch[SDB_MAX_SPRITES];
+    uint8_t ox[SDB_MAX_SPRITES];
+    memset(nmatch, 0, sizeof nmatch);
+    for (int p = 0; p < count; p++) {
+        for (unsigned j = 0; j < 64; j++) {
+            if (oam[j * 4] >= 0xEF) continue;        /* the game's hidden slot */
+            if (list[p].y != oam[j * 4] || list[p].tile != oam[j * 4 + 1] ||
+                list[p].attr != oam[j * 4 + 2]) continue;
+            nmatch[p]++;
+            ox[p] = oam[j * 4 + 3];
+        }
+    }
+    /* Ambiguous in the LIST as well: two entries chasing one slot is not a match. */
+    for (int p = 0; p < count; p++) {
+        if (nmatch[p] != 1) continue;
+        for (int q = p + 1; q < count; q++)
+            if (list[q].y == list[p].y && list[q].tile == list[p].tile &&
+                list[q].attr == list[p].attr) { nmatch[p] = 2; break; }
+    }
+    for (int p = 0; p < count; p++) {
+        buf[p] = list[p];
+        if (nmatch[p] == 1) buf[p].x = ox[p];
+    }
+    return buf;
+}
+
 static const uint32_t *sdb_present(void *ctx, int *width, int *height)
 {
     (void)ctx;
@@ -958,6 +1013,11 @@ static const uint32_t *sdb_present(void *ctx, int *width, int *height)
     int stale = run == 1 && fresh && s_done_count;
     const SdbSprite *list = stale ? s_done : s_build;
     int count = stale ? s_done_count : s_build_count;
+
+    /* Put every entry that can be matched to a sprite the machine is holding
+     * at that sprite's X. See sdb_reconcile for why moving it beats dropping
+     * it, and for the measurement behind it. */
+    list = sdb_reconcile(list, count);
 
     if (cw == 256) {
         if (!redraw) return NULL;
@@ -1146,7 +1206,26 @@ static void sdb_json_frame(void)
         fprintf(stderr, "%s[%d,%d,%d,%d,%d]", live++ ? "," : "", j, oam[j * 4],
                 oam[j * 4 + 1], oam[j * 4 + 2], oam[j * 4 + 3]);
     }
-    fprintf(stderr, "],\"oamn\":%d}\n", live);
+    /* The PUBLISHED list's entries, so the two sprite sources can be compared by
+     * POSITION and not only by count. `pub` above is how many; `pl` is which,
+     * as [y, tile, attr, x]. This is the pairing that makes plan.md 15 measurable
+     * at all: `delta(oamn - pub)` reads +0 while the machine's copy of a sprite
+     * sits one camera step from ours, because both are the same COUNT. Emitted
+     * at frame begin, so it pairs the list that was published with the OAM of
+     * the frame being entered -- which is the comparison the seam actually makes,
+     * one side being a build old. */
+    fprintf(stderr, "],\"oamn\":%d,\"pl\":[", live);
+    for (int i = 0; i < s_done_count; i++)
+        fprintf(stderr, "%s[%d,%d,%d,%d]", i ? "," : "", s_done[i].y,
+                s_done[i].tile, s_done[i].attr, s_done[i].x);
+    fprintf(stderr, "],\"pr\":[");
+    {
+        const SdbSprite *rec = sdb_reconcile(s_done, s_done_count);
+        for (int i = 0; i < s_done_count; i++)
+            fprintf(stderr, "%s[%d,%d,%d,%d]", i ? "," : "", rec[i].y,
+                    rec[i].tile, rec[i].attr, rec[i].x);
+    }
+    fprintf(stderr, "]}\n");
 }
 
 /* What this presented frame painted, per object.
