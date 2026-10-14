@@ -903,41 +903,6 @@ static void sdb_margin_blit(const SdbMargin *m, int px0, uint32_t *out, int widt
     }
 }
 
-/* Did the game actually emit this part?
- *
- * The overscan band exists to show what the PPU's own left clip hid -- and the
- * PPU only hides a sprite the game WROTE. So the one thing the margin may
- * complete in columns 0-7 is a sprite that is sitting in OAM, and the margin is
- * supplying the pixels the hardware suppressed. A part with no OAM entry behind
- * it is not a hidden sprite; it is one the game threw away, and drawing it puts
- * a ghost in the band with nothing on the other side of the seam.
- *
- * Measured on a played match (windowed capture, SDB_TRACE_CAPTURES): object 10's
- * parts land at columns 6/4/3/3 and OAM holds them at slots 17-20, tiles
- * $B0/$10/$20/$30, the same rows -- so it is completed and drawn. Object 11's
- * parts land at column 5, rows 137 and 145, and OAM holds NO entry for them at
- * any column: tiles $C4/$C6 appear nowhere. It was clipped at col 8 anyway and
- * what survived was a two-column black-and-grey sliver standing alone against
- * bare court, appearing and vanishing with the object's emission rather than
- * with the camera (scr == cam == 184 throughout, so it is not the basis).
- *
- * Matching is on (column, row) rather than tile alone, because every player in
- * this game shares tiles -- and tile alone would also match the wrong object.
- * The column is compared with a sprite's width of slack because a part and its
- * OAM entry are the same part only when the two placements agree; when they do
- * not, the machine owns a different sprite and this one is still a ghost. */
-static int sdb_oam_has(int sx, int row)
-{
-    const uint8_t *oam = cyc_render_oam();
-    for (int j = 0; j < 64; j++) {
-        uint8_t y = oam[j * 4];
-        if (y >= 0xEF) continue;                 /* the game's hidden slot */
-        if (oam[j * 4 + 3] < sx || oam[j * 4 + 3] > sx + 7) continue;
-        if (y + 1 < row || y + 1 >= row + 8) continue;
-        return 1;
-    }
-    return 0;
-}
 
 /* Section 4's compositor state, needed before it is defined. */
 /* The picture the window shows.
@@ -1231,9 +1196,11 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
          * which branch each part took. Reporting a 0/1 "drawn" here instead
          * would be a lie for every part that is not in the revealed band:
          * `sdb_oam_has` is only consulted there, so using it as a general test
-         * answers a question the compositor never asked. The outcomes a reader
-         * actually wants are: painted by us, left to the machine, rejected as
-         * a ghost, clipped into columns we do not own, or off the canvas. */
+         * answers a question the compositor never asked. And since the band
+         * filter was removed (research 26) the compositor does not consult it at
+         * all, so neither does this. The outcomes a reader actually wants are:
+         * painted by us, left to the machine, clipped into columns we do not own,
+         * or off the canvas. */
         int keep = s_ws_reveal ? SDB_WS_CLIP : 0;
         int left_limit = x0 + keep;
         for (int i = 0; i < ob->n; i++) {
@@ -1243,8 +1210,12 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
             int completes = s_ws_reveal && sx >= 0 && sx < SDB_WS_CLIP;
             int px0 = sx + x0;
             const char *st;
-            if (completes && !sdb_oam_has(sx, m->y))      st = "ghost";
-            else if (!completes && sx >= 0 && sx <= 251) st = "machine";
+            /* No "ghost" outcome any more, and it must not be reintroduced to
+             * keep the counter populated: the compositor no longer asks OAM
+             * whether the machine holds a band sprite, so classifying one here
+             * would report parts that are in fact DRAWN. The outcome it used to
+             * count is now just `drawn`. */
+            if (!completes && sx >= 0 && sx <= 251)      st = "machine";
             else if (px0 + 8 <= 0 || px0 >= width)        st = "oob";
             else {
                 int lo, hi;
@@ -1856,18 +1827,30 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                 /* Completing a sprite the PPU clipped is the one case the margin
                  * owns rather than the machine -- but only for a sprite the game
                  * actually emitted. See sdb_oam_has. */
-                if (completes && !sdb_oam_has(sx, m->y)) {
-                    if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
-                        fprintf(stderr, " [o%d:%d,%d,t%02X GHOST]", o, sx, m->y, m->tile);
-                    continue;
-                }
-                /* Did the MACHINE draw this part? This must be the exact
-                 * complement of the test sdb_margin_capture used, because a part
-                 * captured but not drawn is a player with a piece missing. The
-                 * game's cull is on the accumulator, so on screen columns it is
-                 * [0, 251]; the PPU's own left clip takes screen columns 0-7,
-                 * which the game does not cull at all, and `completes` is exactly
-                 * that case. */
+                /* NOTE there is deliberately NO `sdb_oam_has` test here.
+                 *
+                 * One was added to avoid drawing a band sprite the machine also
+                 * shows, and it suppressed the pixels the margin exists to paint.
+                 * The band is screen columns 0-7, which PPUMASK clips: the PPU
+                 * never paints them, so the machine's copy of a sprite standing
+                 * there is INVISIBLE, and a part skipped on the grounds that OAM
+                 * holds it is a hole nobody else fills. That is the reported
+                 * artefact: not a truncated body, but a column or two of pixels
+                 * blinking out of a sprite as the viewport edge sweeps across it,
+                 * head to toe.
+                 *
+                 * It flickered because `sdb_oam_has` is a live scan of a list the
+                 * game rebuilds over four frames and truncates at 64 sprites, so
+                 * whether it answers yes changes frame to frame. Asking it was
+                 * asking "did the machine manage to emit this" -- which is the
+                 * truncation this whole mod exists to undo, consulted at the one
+                 * place where the machine cannot draw anyway.
+                 *
+                 * The doubling it was guarding against cannot happen: the blit
+                 * below clips a band part to `px0 + 8 - left_limit` columns, and
+                 * `left_limit` is `native_x0 + SDB_WS_CLIP`, so a part that reaches
+                 * here paints ONLY inside the clipped band and cannot touch a
+                 * column the machine owns. */
                 int machine_drew = !completes && (sx >= 0 && sx <= 251);
                 if (machine_drew) continue;
                 int px0 = sx + native_x0;
