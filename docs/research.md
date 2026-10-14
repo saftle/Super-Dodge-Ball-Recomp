@@ -2275,6 +2275,52 @@ Also measured here, and worth keeping: **`--present-out` indexes one frame ahead
 of the trace's frame counter.** Replay frame *f* is capture frame *f+1*. Both of
 the captures above were misread for several passes because of it.
 
+### The seam doubling, measured and fixed by MOVING a stale entry, not dropping it
+
+The band holes above used to sit on top of this. A character straddling the edge
+of the 4:3 viewport is drawn by **two** sources at once: the machine paints the
+half inside its own picture from current OAM, the margin paints the band half from
+the captured list. Those are a build apart, so the halves registered 1-2 px out of
+line and the character read as doubled with a jog down it — reported as "the
+partial person from stock isn't lined up with the widescreen drawing of the rest of
+the body". Every camera step re-registered the halves, which is why it read as
+worse the more the view panned.
+
+**Measured for the first time**, which is what made it fixable. `SDB_TRACE_JSON`
+now emits the published list (`pl`) alongside live OAM, and `json_trace.py flicker`
+matches them on (y, tile, attr) and reports the histogram of `oam.x - published.x`.
+Only **unique** matches count, on both sides: every player in a match shares tiles,
+so a content match with two candidates says nothing, and this file already records
+that tile-and-row matching reports thousands of false hits.
+
+    over the 1200-frame sweep, 54479 unambiguous matches:
+      captured (what the list says):  42514 agree, 11965 off-position  (22.0%)
+      presented (what gets drawn):     54479 agree,     0 off-position  ( 0.0%)
+
+and the location of the disagreement is the whole diagnosis: **every one of the
+11965 sits on a frame that saw no build reset**. Zero mismatches on reset frames,
+29.8% on the rest. So it is not "the list is old", it is "the list is old *while*
+OAM is mid-next-build" — which is the ordinary state of the machine, not an
+exceptional one.
+
+**The fix is to move the entry, not to drop it.** If a list entry is the unique
+(y, tile, attr) match of a live OAM sprite, draw it at that sprite's x. The
+sprite is still drawn; it is drawn where the machine has that exact sprite, which
+is the only position that is not a guess. Ambiguous entries keep their captured x,
+so the change can only move a sprite toward the machine, never invent one.
+
+This is the fifth attempt at this artifact and the first one that did not trade.
+The four that were rejected all **rejected** the stale entry, and that is the
+distinction: a stale entry and an absent one look the same to a player, and
+dropping it removes a body. Measured effect on a played capture: **33 of 830
+frames change, every one inside canvas columns 93-150** — the seam and nothing
+else.
+
+What remains is not this. A straddling character is still drawn by two sources,
+now agreeing on position; and the list is still a build old for every entry that
+cannot be matched unambiguously, which is most of them once several players share
+a tile.
+
 ### The revealed band had holes in it: `sdb_oam_has` was the bug it claimed to fix
 
 Reported as *not* truncation — light pixels blinking out of a sprite, head to
