@@ -104,7 +104,7 @@ Three options (setup.sh uses Option C by default):
 - **VSync**: the launcher's Graphics section (needs `patches/007` or the row is absent). Off by default; persisted as `[Display] VSync` in `build-cycle/config.ini`. Presentation only — guest timing untouched.
 - **Widescreen**: `--widescreen stock|16:9|21:9|32:9|fit` (or the Mods screen). Widths come from the engine's `common/nes_video_geometry.h` — 426/560/854 — never hardcode them. Needs no patch.
 - **Overscan**: `--overscan` or the Mods screen; only has an effect together with widescreen, because at width 256 the engine never calls the compositor.
-- **Presentation**: `--present-out` saves what the *window* would show — the only path that exercises the character-flicker mod. `--screenshot`/`--frame-log` capture the machine's native frame and ignore it.
+- **Presentation**: `--present-out` saves what the *window* would show — the only path that exercises the character-flicker mod. `--screenshot`/`--frame-log` capture the machine's native frame and ignore it. `--present-every N` sets the **present** interval, not a screenshot interval: the compositor only runs on a presented frame, so `N > 1` skips it and every `drawn`/`composed` count drops accordingly. Measure at `N = 1` (see the stride warning under Known Issues).
 
 ## Critical Rules
 
@@ -206,6 +206,26 @@ Scale 1 is still 16:9 at 426×240; the scale only decides how big the window is.
 
 Use `tools/play_record.sh` (`SDB_SCALE`, `SDB_SHOT_EVERY`) rather than assembling
 this by hand. Never pass `--present-out` at fullscreen scale.
+
+**`--present-every` is NOT a screenshot-density knob — it throttles
+*presenting*.** It decides how often the frame is presented at all, and the
+compositor only runs when something presents. So a large stride skips the
+compositor entirely: at `--present-every 200` over 1200 frames the compositor ran
+~6 times and `margin sprites:` read **167 drawn** instead of 33726. Verified
+2026-10-13. Consequences:
+
+- **Every `drawn` / `margin sprites:` figure is stride-dependent and only
+  comparable at stride 1.** One taken at another stride is not "different", it is
+  meaningless — it reads as a real regression in the feature.
+- **Never widen the stride to save disk or time while measuring anything.** Halve
+  the frame count, or write the PNGs somewhere you can delete them.
+- The table above lists `--present-every 4` next to `WindowScale` because both
+  affect fps. They are not interchangeable: scale changes the **size** of each
+  readback, stride changes **how many** there are, and only the first is a
+  fidelity concern.
+- This is also the second half of "the compositor only runs when something
+  presents" further down — that note covers *not passing `--present-out` at all*,
+  this one covers passing it at a stride that skips frames.
 
 ### Windowed and headless run different guest state — analyse captures in place
 
@@ -554,7 +574,9 @@ line means the capture is off, not that there is nothing to capture.**
    `[[mod_function_hook]]` sites must cost nothing when disabled.
 5. **They actually fire** — `off-edge` must be non-zero (3951 over 1200 sweep frames
    with the flicker mod on) and `drawn` must follow it (**33726**; **104519** over 3000
-   `sdb_throw` frames). A callback count of 4150 with `off-edge` at 0 means the CRC
+   `sdb_throw` frames). **All four figures are `--present-every 1` figures** — see
+   the stride warning above; at any other stride they read far lower and mean
+   nothing. A callback count of 4150 with `off-edge` at 0 means the CRC
    key is wrong. **33726** and **104519**, re-baselined 2026-10-13.
    The previous sweep figure of 33855 is *explained*: it is what `drawn` was
    before research §26's `sdb_oam_has()` ghost fix, and that fix rejects exactly
@@ -643,7 +665,9 @@ columns differ by 0 px.
 window. A headless run with neither prints no `widescreen:` line and no `margin sprites:`
 line, which looks like the feature did nothing and is not. Always pass `--present-out` when
 testing this. Note this bit twice: it is the same class of mistake as the off-by-default
-feature — a green run that was measuring nothing.
+feature — a green run that was measuring nothing. **Passing `--present-out` is not on its
+own sufficient:** `--present-every N` with `N > 1` also skips the compositor, silently and
+with no warning. Use `--present-every 1` (see the stride warning under Known Issues).
 
 Reproduce the off-screen population: `python3 tools/widescreen/objects.py LOG --cull`.
 
