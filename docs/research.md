@@ -1755,12 +1755,164 @@ the output: the world's outer band holds the scoreboard and the Statue of Libert
 skyline, so **mirroring renders the text backwards** and **wrapping shows the
 same skyline two or three times**. Both invent picture the game never had, and at
 32:9 the margin is 299 columns — most of the screen. The margin is filled with
-the backdrop, which for this game is black and is already the colour of the
-world's own outermost columns (`C0`), so the bar continues the court's real edge
-rather than stopping at it. At 21:9 and 32:9, on camera positions that put the
-world's edge inside the view, this leaves a black band at that end. That is the
-honest limit: the stadium is 512 pixels wide and a 854-column frame does not fit
-inside it.
+the backdrop, which for this game is black. At 21:9 and 32:9, on camera positions
+that put the world's edge inside the view, this leaves a black band at that end.
+That is the honest limit: the stadium is 512 pixels wide and a 854-column frame
+does not fit inside it.
+
+### The world's own bounds are the game's camera window (`$E6AB`)
+
+This section used to say the margin past the world is filled with backdrop
+"which is already the colour of the world's own outermost columns (`C0`)".
+**That was wrong, and it is the cause of a visible artefact.**
+
+Tile `$C0` is not a blank tile. Read out of this ROM's CHR it is 70 set bits
+across its two planes and renders an arch:
+
+```
+$C00  plane0 fa 7d fa ff ff ff ff ff   plane1 87 87 87 00 00 00 00 00
+      row 0: 31111232   row 1: 21111323   row 2: 31111232   rows 3-7: 11111111
+```
+
+The nametable's outer four tiles at **each** end hold `$C0` for rows 6–28 — the
+stadium's end wall — and `$00` above and below it, and `$00` really is blank (0
+set bits), which is why only the `C0` band showed. The attribute byte over
+those columns is `$C0`, which selects palette 0, whose entries 1–3 are `$31` /
+`$12` / `$06` — not the backdrop. So reconstructing the world's outer columns
+paints **a row of blue arches on black, at both ends, cut off from the court and
+in a different palette from it**. Measured on `sdb_throw` at 32:9, frame 430
+(`scr=128`, `x0=299`): left margin arches at canvas 174–201 = world 3–29, right
+margin at 654–680 = world 483–509, exactly four tiles each side. Reproduced
+headlessly from a played report; it is present with margin sprites on **and**
+off, and with the flicker mod on and off — it is the reconstruction, nothing
+else.
+
+#### The bound, and where it comes from
+
+**It is the game's camera window, and the game states it in code.** `$C3/$C4`
+is the camera — `$823E/$8246: SEC / SBC $C3 / SBC $C4` is how OAM X is made, and
+the SDB trace's `cam=` column reads exactly those two bytes. It is clamped at
+`$E6AB`, reached from both directions of `$E5D8`:
+
+```
+$E5D8: LDA $61 / CMP #$28 / BCC $E5E8        <- moving left
+$E5E8: LDA #$28 / STA $61 / LDA #$00 / STA $62       40  = $28
+$E5FF: JMP $E6AB
+$E644: LDA $61 / CMP #$E4 / BCC $E652        <- moving right
+$E64A: LDA #$D8 / STA $61 / ...                       216 = $D8
+$E661: JMP $E6AB
+$E6AB: LDA #$00 / STA $C2
+$E6AF: LDA #$28 / CMP $61 / BCC $E6B9 / STA $61      lower clamp, 40
+$E6B9: LDA #$E0 / CMP $61 / BCS $E6C1 / STA $61      upper clamp, 224
+$E6C1: LDA $61 / STA $C3 / LDA $62 / STA $C4          -> the camera
+```
+
+So the window is `[$28, $E0]` = `[40, 224]`, and the world the machine can
+display is the camera plus the viewport:
+
+```
+[ 40, 224 + 256 ) = [40, 480)
+```
+
+**There is no per-level table.** The bounds are two immediate operands, and both
+ends of the evidence agree with the code rather than being fitted to it: on two
+completely different courses — the stadium and the London one — the camera stays
+inside `[40, 224]`, resting at 40 with an observed maximum of 216 (the target
+path caps at `$D8` before `$E6AB`'s 224 can bite). On the stadium the court's
+own drawn extent is `[32, 480)`, so the game's window sits 8 columns inside its
+own art at one end and flush at the other — which is what a hand-tuned clamp
+looks like, and is the cross-check that the disassembly has been read correctly.
+
+#### What this replaced, and why the replacement was necessary
+
+The first version of this fix did **not** read the camera. It measured the
+nametable — "how many tiles in from the world's edge repeat that edge column",
+capped at 32 px — because the band is level data and a hardcoded 32 would crop
+real court on a stage without end walls. That reasoning was sound and the
+mechanism was wrong. It gave the right answer on the stadium *by luck*, because
+the end wall happens to be a uniform band, and it failed everywhere else: a
+level whose edge column varied immediately fell to a floor of one tile and
+received **no bound at all**. The London course did exactly that, measured
+`0/0`, and kept drawing past its own edge for a whole 4355-frame played
+session. The art of an end wall is not a fact about the game's limits; the
+camera is.
+
+Two further measurements, both from that played session, are what settled it:
+
+- The London course's left margin at `scr=70` shows world 0–69, and at `scr=0`
+  the machine's own native columns 0–7 (world 0–7) are inked **480/480 rows**. It
+  looked like the margin was inventing that; it was not — for 204 frames from
+  level start the machine displays it too, because `$DBBB` (called once, from
+  `$F3A0`) initialises the camera to **0** and the clamp only governs movement
+  after that. Those 204 frames are one contiguous run, frames 3675–3878.
+- Nothing is drawn past world `[0,512)` anywhere in that session. An earlier
+  claim that it was, was an analysis error: the capture is 2× scaled with one
+  extra column that carries a constant artefact, and the backdrop is **not
+  always black** — the London course's is `(0,62,122)`, so a scan for
+  "not black" reports a full backdrop as content on 635 frames.
+
+#### Where it is applied, and what it costs
+
+Applied to **margin columns and margin sprites only**. Inside the native 256 the
+machine's own picture is what is shown, and the seam check compares the
+reconstruction against the machine's background over exactly those columns;
+bounding them would report a reconstruction failure for a camera position that
+legitimately shows the end wall and pillarbox a correct frame. Margin sprites get
+the same bound, clipped rather than dropped so a character straddling it is
+still whole up to it.
+
+The cost is the 204-frame London intro, where the margin is bounded 40 columns
+tighter than the native picture beside it. That is the right way round: the
+alternative is inventing columns the game chose not to show.
+
+#### Measured
+
+Stadium `sdb_sweep`, 1200 frames, **every counter identical to the pre-fix
+baseline**: `1169 composed, 1 pillarboxed, seam diff 0 px`, `1200 captured
+(3353 off-edge), 48359 drawn, peak 67, backstop 8`. `margin_track.py`: 701
+frames, eleven objects, `no anomalies`. The frame-log A/B is byte-identical with
+the capture on and off at an unchanged cycle count.
+
+The gate is `tools/widescreen/bounds_gate.py`, which asserts the property on the
+presented frames rather than a counter. Each capture judged at the bounds that
+were actually in force for it, and at the new ones:
+
+| capture | build | frames | judged at | result |
+|---|---|---|---|---|
+| stadium `sdb_sweep` | new | 770 court | `[40,480)` | **0 fail** |
+| `tmp/level-2-boundary-try2` | new | 2617 | `[40,480)` | **0 fail** |
+| `tmp/level-2-boundary` (try1) | old | 681 | `[0,512)` | 0 fail |
+| `tmp/level-2-boundary` (try1) | old | 681 | `[40,480)` | **275 fail**, top hits 4176–4183 |
+
+The last row is the control: the same capture and the same gate, judged at the
+new bounds, and the failures bracket the reported frame 4172. The try2 session is
+also the first to reach camera **224** — the clamp's upper bound, which try1 never
+hit (max 216) — so the right-hand end of the window is exercised too.
+
+Three instrument bugs had to be fixed for those numbers to mean anything, all in
+`bounds_gate.py`, and all found by believing its output:
+
+- **the backdrop is not always black.** `cyc_render_color(0)` is palette entry 0
+  and therefore a per-screen value; the London course's is `(0,62,122)`. The gate
+  measures it per frame from the margin it judges. Hardcoding black reported 635
+  of 4355 frames as overrun when the margin was entirely backdrop.
+- **the scroll alignment was assumed, not measured.** The gate took frame n+1's
+  scroll for capture n. On frame 5080 that substituted a camera of 40 for one of
+  216, moved the margin 176 columns, and reported 20550 px of overrun on a frame
+  that is **exactly clean** — 0 px at the right alignment. Both alignments are now
+  scanned and the one that fits the capture as a whole wins; one decision per
+  capture, printed with the result, not a per-frame guess.
+- **`native_x0` is in image pixels and 256 is in canvas columns.** The right margin
+  started 128 columns early at scale 2 and swept the machine's own picture into
+  the check, reporting 61440 px — exactly `256 × 240`, the viewport's size — on a
+  frame whose margins are black on both sides.
+
+Two more, from writing it: the output prefix has three observed forms depending on
+how the capture was invoked, so the gate **globs** rather than formats (it had
+twice reported a clean pass on a capture it never opened), and `--present-out`
+captures the **window**, so a `play_record.sh` session at `WindowScale 2` writes
+853×480 PNGs for a 426×240 canvas. It exits **2** on "no frames examined" for the
+same reason.
 
 ### One more trap, in the mod state file
 
@@ -2760,9 +2912,13 @@ next measurement, and how to get a fresh capture.
 - **Only the two culled emitters.** The damage-number pair (`$966D`) and the
   block copier (`$A36C`) have no position accumulator and no such cull; they
   are HUD-ish and never strayed off-screen in any measured frame.
-- **Past the stadium's end there is nothing.** §25's limit stands: the world is
-  512 pixels wide, so at 32:9 an object far enough out lands on backdrop. The
-  sprite is drawn where the game put it, which may be over black.
+- **Past the stadium's end there is nothing.** §25's limit stands, and it is now
+  enforced rather than accepted: the world's own bounds are `[32,480)` — the
+  512-pixel address space with the 32-pixel `$C0` end wall at each end, which the
+  camera never reaches — and a margin sprite wholly outside them is not drawn
+  while one straddling them is clipped at them. The earlier note here that "the
+  sprite is drawn where the game put it, which may be over black" described the
+  same bound applied to nothing; see §25 for the measurement and the gate.
 - **The 8-per-scanline limit is still not modelled** in the margin (nor in the
   flicker mod — research §2 open item 11).
 - **A margin sprite's part set is the last list's, not this frame's.** The game

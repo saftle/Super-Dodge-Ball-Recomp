@@ -115,10 +115,12 @@ with it off the output is byte-identical to the unmodded game.
   frame that fails falls back to the ordinary centred picture, which is why title
   screens and menus just work.
 
-  Past the court's own 512-pixel world the margin is the backdrop colour: the
-  stadium is 512 pixels wide and an 854-column frame does not fit inside it, so at
-  21:9 and 32:9 there can be a black band at one end. That is deliberate — mirroring
-  or repeating the world was tried and renders the scoreboard backwards.
+  Past the court's own bounds the margin is the backdrop colour. Those bounds are
+  the game's own camera window: the camera is clamped to `[40, 224]`, so the
+  machine can only ever display world columns 40 to 480, and an 854-column
+  frame does not fit inside that. At 21:9 and 32:9 there can be a black band at
+  either end. That is deliberate — mirroring or repeating the world was tried
+  and renders the scoreboard backwards.
 
   It is **not** upscaled: the same chunky pixels on a wider canvas.
 

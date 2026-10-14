@@ -1,9 +1,11 @@
 # tools/widescreen — analysis behind research.md §25 and §26
 
-Six scripts, and one of them is shared rather than run. Five read a
+Eight scripts, and one of them is shared rather than run. Five read a
 `--frame-log` binary or a trace and back a specific claim in
 `docs/research.md` §25-26; `json_trace.py` reads the `SDB_TRACE_JSON` stream
-instead. `cycframe.py` is the `--frame-log` reader the other four sit on.
+instead, and `bounds_gate.py` reads the `--present-out` PNGs rather than a log, and
+`zp_writers.py` is a ROM byte scan rather than either.
+`cycframe.py` is the `--frame-log` reader the other four sit on.
 Nothing here runs the emulator; make the log first.
 
 ## Make the logs
@@ -288,6 +290,66 @@ you the per-frame truth without a regex; that script gives you the trend.
 Verified inert: with `SDB_TRACE_JSON` unset, 1937 human trace lines and 661
 presented PNGs are byte-identical to a run with it set, and the JSON stream is
 simply absent (0 records vs 123).
+
+## `bounds_gate.py` — nothing is drawn past the court's own bounds
+
+The bounds are **`[40,480)`**, and they come out of the game rather than off the
+art: `$C3/$C4` is the camera, clamped at `$E6AB` to `[$28,$E0]` = `[40,224]`, so
+the machine can only ever display `[40, 224+256)`. There is no per-level table.
+See research.md §25 for the disassembly and for why an earlier nametable-based
+version was wrong.
+
+This asserts the property on the **presented frames**, not on a counter:
+
+```bash
+mkdir -p tmp/bg
+SDB_TRACE=1 ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 1200 \
+  --input tas/vectors/sdb_sweep.input --ram-init zeros \
+  --mods-root build-cycle/mods --widescreen 16:9 \
+  --present-out tmp/bg/s_%05d.png --present-every 1 2>tmp/bg/trace.log
+python3 tools/widescreen/bounds_gate.py tmp/bg 16:9 s 40 480 tmp/bg/trace.log 430
+```
+
+Every margin column whose world column falls outside the bounds must be the
+frame's own backdrop. Results:
+
+| capture | frames | judged at | result |
+|---|---|---|---|
+| stadium sweep | 770 court | `[40,480)` | **0 fail** |
+| `tmp/level-2-boundary-try2` | 2617 | `[40,480)` | **0 fail** |
+| `tmp/level-2-boundary` (old build) | 681 | `[0,512)` | 0 fail |
+| `tmp/level-2-boundary` (old build) | 681 | `[40,480)` | **275 fail** |
+
+The last row is the control: same capture, same gate, new bounds — and the
+failures bracket the reported frame 4172.
+
+**It was wrong five times, and every error was a false POSITIVE**, which is the
+safer direction to be wrong in and still not a reason to believe it. In order:
+the backdrop is not always black (it is palette entry 0, a per-screen value —
+hardcoding it reported 635 of 4355 frames as overrun when the margin was entirely
+backdrop); the scroll alignment was assumed rather than measured (substituting a
+camera of 40 for one of 216 reported 20550 px on a frame that is exactly clean);
+`native_x0` is in image pixels while 256 is in canvas columns, so the right margin
+started 128 columns early at scale 2 and swept the machine's own picture into the
+check; the output prefix has three observed forms so it globs rather than formats;
+and it exits **2** rather than 0 when it examined nothing.
+
+`from_frame` skips boot/title/menu, where there is no court to bound.
+
+## `zp_writers.py` — every instruction that writes a zero-page byte
+
+A raw byte scan for `STA`/`STX`/`STY`/`INC`/`DEC`/`ASL`… against a zero-page
+address. It is how `$C3/$C4` was found to be written by seven separate
+routines, one of which (`$E6AB`) turned out to be the camera clamp:
+
+```bash
+python3 tools/widescreen/zp_writers.py C3 C4
+python3 tools/dis65.py "roms/Super Dodge Ball (USA).nes" E5D8 20 $((16 + 7*16384 + 0x25D8))
+```
+
+It reports **data that looks like an opcode as well as code** — a linear sweep
+cannot tell them apart, and the output is a list of candidates to disassemble,
+not a list of answers. Confirm every hit with `dis65.py`.
 
 ## Attribution
 

@@ -527,7 +527,32 @@ Gates:
    lacks it: that reads "the machine did not emit it this frame", which is the truncation
    this mod exists to undo, and it punches background-coloured holes through sprites that
    flicker as the camera pans (research §26).
-6. **Play it** — a scripted run never reaches team-select, the roster screens or the
+6. **Nothing drawn past the court's own bounds** — the bounds are **`[40,480)`, read out of the
+   game, not measured off the art**. `$C3/$C4` is the camera (`$823E/$8246: SEC / SBC $C3 / SBC
+   $C4` is how OAM X is made, and the trace's `cam=` reads exactly those bytes); it is clamped at
+   `$E6AB` to `[$28,$E0]` = `[40,224]`, so the machine can only ever display `[40, 224+256)`.
+   Two immediate operands — **there is no per-level table**, and both courses agree: the camera
+   stays inside `[40,224]`, resting at 40, max observed 216. `SDB_TRACE=1` prints the bounds in
+   force on the `widescreen:` line. **Do not re-derive this from the nametable**: an earlier
+   version measured how many tiles repeat the edge column and was right on the stadium *by luck*,
+   while the London course's edge column varies immediately, hit a one-tile floor and got **no
+   bound at all** for a whole 4355-frame played session. The end wall's tiles are also not the
+   backdrop — `$C0` is 70 set bits in CHR and renders an arch, which is what painted a row of
+   blue arches on black at both ends. **The bound applies to margin columns and margin sprites
+   only**; inside the native 256 it would trip the seam check on a camera position that
+   legitimately shows the end wall and pillarbox a correct frame. Gate it on the output with
+   `tools/widescreen/bounds_gate.py`, which reads the PNGs: every margin column whose world
+   column is outside the bounds must be the frame's **own backdrop**, which is palette entry 0
+   and therefore not always black. Results: stadium `sdb_sweep` 770 court frames **0 fail**;
+   `tmp/level-2-boundary-try2` (new build, first session to reach camera 224) 2617 frames **0
+   fail**. The control is `tmp/level-2-boundary` (old build) judged at the new bounds: **275 of
+   681 fail**, top hits 4176–4183, bracketing the reported 4172 — judged at the bounds it
+   actually ran with (`[0,512)`) it is 0 fail, which is what "no bound was in force" looks like.
+   **This gate was wrong five times and every error produced a false POSITIVE**, so treat a new
+   failure as suspect until the capture is re-derived: the backdrop is per-screen, the scroll
+   alignment is measured rather than assumed, and `native_x0` is in image pixels while 256 is in
+   canvas columns.
+7. **Play it** — a scripted run never reaches team-select, the roster screens or the
    innings changes, which are exactly the states the seam gate has to hold through.
 
 ### Verifying the margin sprites (part of `widescreen`, not a separate feature)
@@ -892,7 +917,7 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 | `tas/vectors/sdb_beanball.input` | **Recorded**, not written: a played Bean Ball run across the full map, the repro for the open flicker-mod list degeneration (research §26, plan item 14). Replay in a window, not headless |
 | `tas/vectors/sdb_probe.input` | Diagnostic, not a test vector: LEFT in 4-frame pulses from frame 600, which is how **594** was measured as the frame the court starts accepting input (research §27 timings above). Keep it — it is the reproduction for the timing facts, and the facts cost three failed repros to establish |
 | `tools/flicker/` | Analysis scripts behind the research.md §2/§2.1 claims (OAM/record dumps, ref-finder, memdiff) + toolkit README |
-| `tools/widescreen/` | Analysis behind research.md §25-26 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge (corr-explained shifts report as `cshift`, exit 0); `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite; **`json_trace.py` — reads the `SDB_TRACE_JSON=<from>-<to>` stream, one JSON object per line, which is what plan item 14 needs (`flicker` puts live OAM and the mod's published list side by side in one frame)**; **`cycframe.py` — the shared `--frame-log` reader the other four sit on, since four copies of the header parser meant a format change would break three tools silently**. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame) |
+| `tools/widescreen/` | Analysis behind research.md §25-26 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge (corr-explained shifts report as `cshift`, exit 0); `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite; **`json_trace.py` — reads the `SDB_TRACE_JSON=<from>-<to>` stream, one JSON object per line, which is what plan item 14 needs (`flicker` puts live OAM and the mod's published list side by side in one frame)**; **`bounds_gate.py` — asserts nothing is drawn past the court's own bounds `[32,480)` on the presented PNGs; it exits 2 when it examined no frames, because the host's literal `%05d` output prefix makes a naive filename format read zero files and report a clean pass**; **`cycframe.py` — the shared `--frame-log` reader the other four sit on, since four copies of the header parser meant a format change would break three tools silently**. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame) |
 | `tools/play_record.sh` | Play the game in a window and record the session as a replayable `--input` vector plus `SDB_TRACE=1` and per-frame screenshots, into `tmp/<name>/`. Pins `WindowScale`/Fullscreen/VSync, or the screenshots make the game run in slow motion. `SDB_UNLIMITED=1` drops `--exit-after` and runs until you close the window; closing it normally still flushes the vector's frame count (it is written from the destructor), but SIGKILL does not. The only way to find the band bugs — see the recorded-playback section above |
 | `tools/overclock/` | PPU-overclocking oracle harness behind research.md §23 (MesenCE sandbox + stock-vs-OC comparison). **Its self-check matters: if cycles/frame stays 29781 for a non-zero `Before NMI`, the setting never applied and the run is worthless** |
 | `mods/packages/super-dodgeball.character-flicker/` | Mod package — `manifest.toml` only (data-only by design; implementation is `src/sdb_host_extras.c`). Off by default, toggleable in the launcher's Mods screen; PolyForm NC, same as the project |

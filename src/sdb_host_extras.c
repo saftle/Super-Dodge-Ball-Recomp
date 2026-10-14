@@ -1792,10 +1792,69 @@ static int s_ws_margin_only;    /* headless A/B: suppress the above */
 static long s_ws_composed, s_ws_pillarboxed, s_ws_last_diff;
 static int s_ws_sx_lo = 9999, s_ws_sx_hi = -1;   /* camera scroll seen, SDB_TRACE=3 */
 
-/* Past the edge of the 512-pixel world the canvas is filled with the backdrop,
- * which for this game is black -- the same colour the world's own outermost 32
- * columns already are (the blank tile C0), so the margin continues the
- * court's real edge instead of stopping at it.
+/* The world's own bounds, in world pixels -- and they are the GAME'S, not ours.
+ *
+ * The margin may show world columns the machine's own 256 do not, but only the
+ * ones the game can ever display. That limit is the camera window, and the game
+ * states it in code rather than in data:
+ *
+ *     $E5D8: LDA $61 / CMP #$28 / BCC $E5E8      <- moving left
+ *     $E5E8: LDA #$28 / STA $61 / LDA #$00 / STA $62      40  = $28
+ *     $E5FF: JMP $E6AB
+ *     $E644: LDA $61 / CMP #$E4 / BCC $E652      <- moving right
+ *     $E64A: LDA #$D8 / STA $61 / ...                      216 = $D8
+ *     $E661: JMP $E6AB
+ *     $E6AB: LDA #$00 / STA $C2
+ *     $E6AF: LDA #$28 / CMP $61 / BCC $E6B9 / STA $61     lower clamp, 40
+ *     $E6B9: LDA #$E0 / CMP $61 / BCS $E6C1 / STA $61     upper clamp, 224
+ *     $E6C1: LDA $61 / STA $C3 / LDA $62 / STA $C4         -> the camera
+ *
+ * `$C3/$C4` is the camera the rest of the game uses -- `$823E/$8246: SEC /
+ * SBC $C3 / SBC $C4` is how OAM X is made, and the SDB trace's `cam=` column
+ * reads exactly these two bytes. So the window is [$28, $E0] = [40, 224] and
+ * the world the machine can display is the camera plus the viewport:
+ *
+ *     [ 40, 224 + 256 ) = [40, 480)
+ *
+ * WHICH IS WHY THERE IS NO PER-LEVEL DETECTION. The bounds are two immediate
+ * operands; there is no table, no index and no per-course variant, and both
+ * ends of the measured evidence agree with the code rather than being fitted to
+ * it: on two completely different courses -- the stadium and the London one --
+ * the camera stays inside [40, 224] (resting at 40, observed maximum 216,
+ * because the target path caps at $D8 before $E6AB's 224 can bite). On the
+ * stadium the court's own drawn extent is [32, 480), so the game's window sits
+ * 8 columns inside its art at one end and flush at the other, which is what a
+ * hand-tuned clamp looks like.
+ *
+ * An earlier version of this measured the nametable instead: "how many tiles
+ * in from the world's edge repeat that edge column", capped at 32 px. It gave
+ * the right answer on the stadium by luck and the wrong one everywhere else,
+ * because the end wall's art is not a fact about the game's limits. A level
+ * whose edge column varied immediately fell to a floor of one tile and got NO
+ * bound at all, which is exactly how the London course kept drawing past its
+ * own edge. The camera is the signal; the nametable never was.
+ *
+ * The one wrinkle, measured: `$DBBB` (called once, from $F3A0) initialises the
+ * camera to **0**, and the London course sits there for 204 frames at level
+ * start -- during which the machine really does display world columns 0..39.
+ * The clamp only governs movement after that. So for the first few seconds of
+ * that level the margin is bounded 40 columns tighter than the native picture
+ * beside it, which is a cosmetic cost for a locked intro camera and is the
+ * right way round: everything outside the window is content the game chose not
+ * to show, and the alternative is inventing it. */
+#define SDB_WS_CAM_MIN 40          /* $E6AF: LDA #$28 */
+#define SDB_WS_CAM_MAX 224         /* $E6B9: LDA #$E0 */
+#define SDB_WS_VIEW_W  256         /* the viewport's width, in world columns */
+#define SDB_WS_LO (SDB_WS_CAM_MIN)
+#define SDB_WS_HI (SDB_WS_CAM_MAX + SDB_WS_VIEW_W)
+
+/* Is this world column one the game can ever display? */
+static int sdb_ws_in_bounds(int wx) { return wx >= SDB_WS_LO && wx < SDB_WS_HI; }
+
+/* Past the edge of the 512-pixel ADDRESS space there is nothing to read, so the
+ * canvas is filled with the backdrop. Inside that space but outside the game's
+ * camera window is SDB_WS_LO/SDB_WS_HI's business, above: those columns are
+ * perfectly readable, and reading them is what produced the artefact.
  *
  * Wrapping or mirroring was tried and rejected: the world's outer band holds
  * the scoreboard and the Statue of Liberty skyline, so mirroring renders the
@@ -1907,6 +1966,18 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
              * so a canvas column's world column is that line's scroll plus its
              * own offset from native column 0. */
             int wx = sx + off;
+            /* Past the stadium's end there is nothing, so the margin stops
+             * there -- but ONLY in the margin. The native 256 are the machine's
+             * own picture (copied back below) and the seam check below compares
+             * this reconstruction against the machine's background over exactly
+             * those columns, so bounding them would report a reconstruction
+             * failure for a camera position that legitimately shows the end wall
+             * -- measured at 225..240 -- and pillarbox a frame that is correct.
+             * The margin is ours alone, so bounding it is free of that. */
+            if ((off < 0 || off >= 256) && !sdb_ws_in_bounds(wx)) {
+                row[x] = cyc_render_color(0);
+                continue;
+            }
             row[x] = sdb_ws_pixel(wx, y);
         }
     }
@@ -2109,7 +2180,8 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * pixel" and "slightly the wrong size" artifact, and it is the
                  * basis split, not a stale part. */
                 int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
-                int sx = (rec_x + corr) + m->dx - cyc_render_line_scroll_x(prow) - 4;
+                int scroll = cyc_render_line_scroll_x(prow);
+                int sx = (rec_x + corr) + m->dx - scroll - 4;
                 /* Completing a sprite the PPU clipped is the one case the margin
                  * owns rather than the machine. */
                 int completes = s_ws_reveal && sx >= 0 && sx < SDB_WS_CLIP;
@@ -2156,12 +2228,20 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * The blit draws columns [clip_lo, 8-clip_hi), so the two
                  * straddles clip opposite ends: a left-edge straddle keeps
                  * c < left_limit-px0, a right-edge straddle keeps
-                 * c >= native_x0+256-px0. (An earlier version rejected the
-                 * straddle whole instead of clipping it, which is why the
-                 * white-shirt player vanished while standing at column -4; and
-                 * the first clip written here had lo/hi backwards, which drew
-                 * the native half and dropped the margin half. Both produced a
-                 * plausible picture with the player missing.) */
+                 * c >= native_x0+256-px0.
+                 * (An earlier version rejected the straddle whole instead of
+                 * clipping it, which is why the white-shirt player vanished while
+                 * standing at column -4; and the first clip written here had lo/hi
+                 * backwards, which drew the native half and dropped the margin
+                 * half. Both produced a plausible picture with the player
+                 * missing.)
+                 *
+                 * The same window also carries the world's own bounds, which is a
+                 * bound on the MARGIN exactly as the machine's run is: a sprite
+                 * standing past the stadium's end is drawn where the game put it,
+                 * which is over backdrop. Clipped
+                 * rather than dropped, so a character straddling the bound is
+                 * still drawn up to it. */
                 int clip_lo, clip_hi;
                 if (px0 + 8 <= left_limit) {
                     clip_lo = 0; clip_hi = 0;                    /* fully left: all */
@@ -2172,7 +2252,20 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                 } else {
                     clip_lo = native_x0 + 256 - px0; clip_hi = 0; /* right straddle */
                 }
-                if (clip_lo + clip_hi < 8) {
+                /* The world's own bounds, on the same terms as the machine's
+                 * run above: the two clip the same ends of the same 8 columns,
+                 * so they add. A part wholly past the stadium's end is not
+                 * drawn at all, and one that straddles it is cut at it rather
+                 * than dropped, so a character standing at the bound is still
+                 * whole up to it. Research 26 recorded the looser behaviour --
+                 * "the sprite is drawn where the game put it, which may be over
+                 * black" -- as an accepted limit; it is no longer one. */
+                int wl = native_x0 + (SDB_WS_LO - scroll);
+                int wh = native_x0 + (SDB_WS_HI - scroll);
+                int in_world = px0 + 8 > wl && px0 < wh;
+                if (in_world && px0 < wl)         clip_hi += px0 + 8 - wl;
+                else if (in_world && px0 + 8 > wh) clip_lo += wh - px0;
+                if (in_world && clip_lo + clip_hi < 8) {
                     sdb_margin_blit(m, px0, out, width, height, s_ws_native_bg,
                                     clip_lo, clip_hi);
                     s_margin_drawn++;
@@ -2318,8 +2411,10 @@ static void sdb_ws_disable(void)
 static void sdb_ws_report(void)
 {
     if (s_trace && s_ws_composed + s_ws_pillarboxed)
-        fprintf(stderr, "widescreen: %ld composed, %ld pillarboxed, seam diff %ld px\n",
-                s_ws_composed, s_ws_pillarboxed, s_ws_last_diff);
+        fprintf(stderr, "widescreen: %ld composed, %ld pillarboxed, seam diff %ld px, "
+                        "world bounds [%d,%d)\n",
+                s_ws_composed, s_ws_pillarboxed, s_ws_last_diff,
+                SDB_WS_LO, SDB_WS_HI);
     if (s_trace && s_margin_on)
         fprintf(stderr, "margin sprites: %ld captured (%ld off-edge), %ld drawn, "
                         "peak %d, backstop %ld\n",
