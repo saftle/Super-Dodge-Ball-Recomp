@@ -130,9 +130,21 @@
     diverges — research §26). An OAM dump from a headless run describes a
     different game.
 
-    **So: log OAM from the flicker path in a windowed run**, exactly as the
-    `oam-band:` line added for the compositor already does. The decision rule,
-    both branches spelled out so the next agent cannot rationalise either way:
+    **The instrument now exists: `SDB_TRACE_JSON`.** `src/sdb_host_extras.c`
+    emits one JSON object per line in two kinds — `f` at frame begin, carrying
+    the flicker counters *and every live OAM entry for that frame*, and `m` at
+    composite. `python3 tools/widescreen/json_trace.py flicker LOG` prints live
+    OAM against the mod's published list in the same frame, which is exactly
+    this question, and only offers the interpretation on a ≥30% collapse so it
+    does not cry wolf on a normal run's jitter. It exists because the *human*
+    trace had twice lied to `margin_track.py` — a missing newline and then a
+    misplaced line closer, each leaving the audit reporting "no lines" on a
+    healthy run — so this is plan item 14's instrument reading a structured
+    stream instead of a regex. See `tools/widescreen/README.md`.
+
+    **So: replay the vector in a WINDOW with that flag on**, and read
+    `flicker`. The decision rule, both branches spelled out so the next agent
+    cannot rationalise either way:
 
     - **OAM holds ~50 sprites while the mod's list holds 10 → it is ours.** The
       game emitted them and the mod lost them. Go to the list bookkeeping: the

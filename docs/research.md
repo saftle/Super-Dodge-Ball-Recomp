@@ -2009,8 +2009,12 @@ report. `margin_track.py`'s `ghost` check exists to catch exactly it.
 - **Mod off = stock**: the catalog present with every feature disabled is
   byte-identical to no `--mods-root` at all, **1200/1200 frames** on both the
   sweep and the pan vector.
-- **Stress vector** (`sdb_throw`, 3000 frames, 16:9 + overscan): **104240 margin
-  sprites drawn, peak 64, 0 backstop trips**, 0 part-limit warnings. `SDB_MARGIN_PARTS`
+- **Stress vector** (`sdb_throw`, 3000 frames, 16:9 + overscan, flicker on):
+  **104519 margin sprites drawn, peak 64, 0 backstop trips**, 0 part-limit
+  warnings. Re-baselined 2026-10-13: the previously recorded 104240 did not
+  reproduce on this binary, and the sweep figure moved the other way (33855 →
+  33726) while `off-edge` reproduced exactly at 3951 — so the drift is in the
+  presentation count, not the capture. `SDB_MARGIN_PARTS`
   is 24, not 8: objects 9 and 11 legitimately emit more than a character's eight,
   and at 8 they were losing sprites on 15 frames per 3000.
 - Arms from the manifest (`state.toml`, `widescreen` ticked; margin sprites are
@@ -2144,16 +2148,48 @@ stress vector.
 Two windowed runs of one schedule are byte-identical to each other (same recorded
 vector, same trace), which is what makes a played session reproducible.
 
-### Two bugs in the instrumentation, both found by using it
+### Three bugs in the instrumentation, all found by using it
 
 1. **The `sdbw` trace line had no newline before `sdbm`**, so the per-sprite
    entries were glued onto the summary line and `margin_track.py`'s regex matched
    nothing — it reported `no sdbw lines in that log` on exactly the runs where
    you turn the trace on to run it. Fixed by printing the line closer first.
-2. **`margin_track.py`'s `part` check only fires for wholly off-screen objects.**
+2. **…which then hit the mirror image of the same fault.** The commit that fixed
+   (1) also added the `oam-band:` line, and that block ends with its own `\n` — so
+   the closer, moved above the entries, ended up *below* that block and printed
+   on a line of its own. The regex wants `… n=NN` at the end of the `sdbw` line,
+   so **0 of 701** lines matched and the audit was inoperable: a healthy run
+   reported "no sdbw lines in that log". Measured 2026-10-13 while running the
+   §26 gates, which is the third time this class has cost an audit. The closer
+   now prints *before* the `oam-band:` block; the order of the two blocks is the
+   entire fix.
+3. **`margin_track.py`'s `part` check only fires for wholly off-screen objects.**
    An object straddling the band at column 5, holding 2 parts instead of 8,
    passes clean. That is how the seventh bug survived an audit that was otherwise
    green.
+
+Two of the three produced a **clean-looking pass over zero examined frames**,
+which is the failure mode worth naming: an instrument that cannot fire is
+indistinguishable from an instrument reporting nothing wrong. Check that a gate
+*ran* — `margin_track.py` should print a per-object table — before believing it.
+
+**The structural answer to that class, added afterwards: `SDB_TRACE_JSON`.**
+Both of the above are parsing and ordering faults in a hand-formatted trace, not
+places where a reader looked in the wrong place — and a missing newline took out
+the whole audit on exactly the runs you enabled it for. So the mod now emits one
+JSON object per line, two kinds: `f` at frame begin (the flicker counters plus
+**every live OAM entry for that frame**) and `m` at composite (each margin part
+with the branch the draw site took for it — `drawn` / `machine` / `ghost` /
+`clip` / `oob`; a recycled record as `"stale": n` with no parts, because the
+draw site skips that object before any placement decision exists). Read with
+`tools/widescreen/json_trace.py`. `json.loads` per line cannot care where a
+closer was printed.
+
+Its `flicker` command is the instrument **plan item 14** has been waiting on:
+live OAM against the mod's published list in the same frame, which is the whole
+question that bug turns on. Verified inert — with the variable unset, the human
+trace and every presented PNG are byte-identical to a run with it set
+(1937 trace lines, 661 frames, 0 differing).
 
 ### Open, shelved: Bean Ball loses sprites while running across the full map
 

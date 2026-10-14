@@ -186,6 +186,10 @@ static int s_ws_reveal;         /* overscan: the clip is being revealed */
 static long s_frame;                     /* frame counter, for the trace */
 static long s_cap_from = -1, s_cap_to;   /* SDB_TRACE_CAPTURES=<from>-<to> */
 static int s_ws_aspect = NES_VIDEO_STOCK;  /* moved up: sdb_frame_begin's trace reads it */
+/* SDB_TRACE_JSON=<from>-<to>: one JSON object per line, two kinds. See
+ * sdb_json_frame / sdb_json_margin for why it is a separate stream and not a
+ * reformatting of the sdb/sdbc/sdbw/sdbm lines. */
+static long s_json_from = -1, s_json_to;
 
 /* Trace counters. With per-object slots there is no single list to measure, so
  * these are per-frame tallies and the SDB_TRACE=1 line reports the totals. */
@@ -1055,9 +1059,159 @@ blit:
  * the list being assembled grows without bound. That is what smears a trail of
  * stale sprites across the picture, so it is worth being able to see in a
  * headless run rather than only in the window. */
+
+/* ------------------------------------------------------------------ *
+ * 5b. Structured trace: SDB_TRACE_JSON=<from>-<to>
+ * ------------------------------------------------------------------ */
+
+/* ONE JSON object per line, two kinds, discriminated by "k".
+ *
+ * This exists because the human trace is a bad machine interface, and the
+ * project has already been bitten by that twice in a row rather than in the
+ * abstract:
+ *
+ *   - the `sdbw` line opened with no newline, so `margin_track.py`'s regex
+ *     matched nothing and the audit reported "no sdbw lines in that log" on
+ *     exactly the runs where you turned the trace on to run it;
+ *   - and the `part` check it ran then under-fired (wholly off-screen objects
+ *     only), so an object straddling the band passed clean while the seventh
+ *     margin bug was on screen.
+ *
+ * Both are ordering and parsing faults, and JSON removes the whole class:
+ * `json.loads` per line cannot care whether a closer was printed before an
+ * entry, and a field that is absent is absent rather than silently wrong.
+ *
+ * It is a SEPARATE stream, not a reformatting. The four existing lines print
+ * at four different points in the frame -- `sdb`/`sdbc` at frame begin, `sdbw`
+ * and `oam-band:` at composite, the run totals only at exit -- and folding
+ * them into one object would either move a quantity away from the instant it
+ * describes or invent an ordering between two frames that do not share one.
+ * So: "f" is emitted at frame begin and says what the flicker mod and the
+ * machine hold THAT frame; "m" is emitted at composite and says what this
+ * presented frame painted. A reader that wants both joins them on "f".
+ *
+ * Nothing here changes guest state: these are stderr writes behind an env var,
+ * on the same path the existing trace already takes. */
+static int sdb_json_want(long f)
+{
+    return s_json_from >= 0 && f >= s_json_from && f <= s_json_to;
+}
+
+/* Every live OAM entry, so "does the game emit fewer sprites or does the mod
+ * drop them" is one comparison rather than a manual count. This is the exact
+ * question plan item 14 is blocked on, and it needs OAM and the mod's list
+ * from the SAME frame in the SAME run -- which is why it cannot be answered
+ * from a --frame-log dump (headless, and a different guest state; research
+ * section 26). */
+static void sdb_json_frame(void)
+{
+    const uint8_t *oam = cyc_render_oam();
+    fprintf(stderr, "{\"k\":\"f\",\"f\":%ld,\"scr\":%d,\"cam\":%d,"
+                    "\"cur\":\"$%02X\",\"peak\":%d,\"ovf\":%d,\"pub\":%d,"
+                    "\"reset\":%d,\"lost\":%d,\"mcap\":%d,\"moff\":%ld,\"oam\":[",
+            s_frame, cyc_render_line_scroll_x(160),
+            (int)(cyc_mod_peek(SDB_CAM_LO) | (cyc_mod_peek(SDB_CAM_HI) << 8)),
+            cyc_mod_peek(SDB_CURSOR), s_build_peak, s_overflow, s_done_count,
+            s_saw_reset, s_list_lost, s_margin_captured, s_margin_off_edge);
+    int live = 0;
+    for (int j = 0; j < 64; j++) {
+        if (oam[j * 4] >= 0xEF) continue;          /* the game's hidden slot */
+        fprintf(stderr, "%s[%d,%d,%d,%d,%d]", live++ ? "," : "", j, oam[j * 4],
+                oam[j * 4 + 1], oam[j * 4 + 2], oam[j * 4 + 3]);
+    }
+    fprintf(stderr, "],\"oamn\":%d}\n", live);
+}
+
+/* What this presented frame painted, per object.
+ *
+ * Each part carries the branch the draw site took for it -- "drawn", "machine",
+ * "ghost", "clip", "oob" -- so "ghost" (a part in the revealed band with no OAM
+ * entry behind it, the shape of research section 26's seventh bug) is a value
+ * in the record rather than something a reader has to infer from the absence of
+ * a neighbouring line.
+ *
+ * `live` is the object's identity still matching its display record. A
+ * non-live object is emitted with `"stale": <n>` and an EMPTY parts array,
+ * because the draw site skips a recycled slot outright -- before any placement
+ * decision exists for its parts. Emitting one would invent a branch the
+ * compositor never took.
+ *
+ * `band` is OAM restricted to the eight columns the PPU hides. */
+static void sdb_json_margin(int x0, int width, long diff, int n)
+{
+    const uint8_t *oam = cyc_render_oam();
+    fprintf(stderr, "{\"k\":\"m\",\"f\":%ld,\"x0\":%d,\"cw\":%d,\"diff\":%ld,\"n\":%d,\"obj\":[",
+            s_frame, x0, width, diff, n);
+    int first = 0;
+    for (int o = 0; o < SDB_MARGIN_OBJECTS; o++) {
+        SdbMarginObj *ob = &s_margin_obj[o];
+        if (!ob->n) continue;
+        uint16_t rec = (uint16_t)(SDB_REC_BASE + SDB_REC_STRIDE * o);
+        int live = cyc_mod_peek(rec) &&
+                   cyc_mod_peek(rec) == ob->id0 &&
+                   cyc_mod_peek((uint16_t)(rec + 1)) == ob->id1;
+        fprintf(stderr, "%s\"i\":%d,\"live\":%d,\"parts\":[", first++ ? ",{" : "{", o, live);
+        /* A recycled slot is skipped OUTRIGHT by the draw site -- it `continue`s
+         * on the object, before any placement decision -- so there is no branch
+         * to report for its parts. Emitting one invents a decision the
+         * compositor never took: before this guard, dead slots accounted for
+         * 54 of 63 "ghost"s in a 61-frame window, which reads as a guard
+         * misfiring when it is really a record the draw site never looked at.
+         * Count them and leave the array empty instead. */
+        if (!live) {
+            fprintf(stderr, "],\"stale\":%d}", ob->n);
+            continue;
+        }
+        int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
+                        | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
+        int placed = 0;
+        /* Mirrors the draw site's decision EXACTLY, in the same order, and says
+         * which branch each part took. Reporting a 0/1 "drawn" here instead
+         * would be a lie for every part that is not in the revealed band:
+         * `sdb_oam_has` is only consulted there, so using it as a general test
+         * answers a question the compositor never asked. The outcomes a reader
+         * actually wants are: painted by us, left to the machine, rejected as
+         * a ghost, clipped into columns we do not own, or off the canvas. */
+        int keep = s_ws_reveal ? SDB_WS_CLIP : 0;
+        int left_limit = x0 + keep;
+        for (int i = 0; i < ob->n; i++) {
+            const SdbMargin *m = &ob->parts[i];
+            int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
+            int sx = rec_x + m->dx - cyc_render_line_scroll_x(prow) - 4;
+            int completes = s_ws_reveal && sx >= 0 && sx < SDB_WS_CLIP;
+            int px0 = sx + x0;
+            const char *st;
+            if (completes && !sdb_oam_has(sx, m->y))      st = "ghost";
+            else if (!completes && sx >= 0 && sx <= 251) st = "machine";
+            else if (px0 + 8 <= 0 || px0 >= width)        st = "oob";
+            else {
+                int lo, hi;
+                if (px0 + 8 <= left_limit)      { lo = 0; hi = 0; }
+                else if (px0 >= x0 + 256)      { lo = 0; hi = 0; }
+                else if (px0 < left_limit)      { lo = 0; hi = px0 + 8 - left_limit; }
+                else                            { lo = x0 + 256 - px0; hi = 0; }
+                st = (lo + hi < 8) ? "drawn" : "clip";
+            }
+            placed += st[0] == 'd';
+            fprintf(stderr, "%s[%d,%d,%d,\"%s\"]", i ? "," : "", sx, m->y, m->tile, st);
+        }
+        fprintf(stderr, "],\"drawn\":%d}", placed);
+    }
+    fprintf(stderr, "],\"band\":[");
+    first = 0;
+    for (int j = 0; j < 64; j++) {
+        if (oam[j * 4] >= 0xEF || oam[j * 4 + 3] >= SDB_WS_CLIP) continue;
+        fprintf(stderr, "%s[%d,%d,%d,%d,%d]", first++ ? "," : "", j, oam[j * 4],
+                oam[j * 4 + 1], oam[j * 4 + 2], oam[j * 4 + 3]);
+    }
+    fprintf(stderr, "]}\n");
+}
+
 static void sdb_frame_begin(void *ctx)
 {
     (void)ctx;
+    if (sdb_json_want(s_frame))
+        sdb_json_frame();
     if (s_trace) {
         fprintf(stderr, "sdb %ld %d %d %d %d %d\n", s_frame, s_build_peak, s_overflow,
                     s_done_count, s_saw_reset, s_list_lost);
@@ -1107,6 +1261,12 @@ static void sdb_power_on(void *ctx)
     if (c && c[0]) {
         long a = 0, b = 0;
         if (sscanf(c, "%ld-%ld", &a, &b) == 2) { s_cap_from = a; s_cap_to = b; }
+    }
+    const char *j = getenv("SDB_TRACE_JSON");
+    if (j && j[0]) {
+        long a = 0, b = 0;
+        if (sscanf(j, "%ld-%ld", &a, &b) == 2) { s_json_from = a; s_json_to = b; }
+        else fprintf(stderr, "sdb: SDB_TRACE_JSON wants <from>-<to>, got %s\n", j);
     }
 }
 
@@ -1687,7 +1847,6 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                 }
             }
         }
-        s_margin_count = n;
         /* What the game put in the hidden band, straight from OAM.
          *
          * This is the one question a --frame-log cannot answer here: --frame-log
@@ -1700,10 +1859,25 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
          * It decides whether a margin sprite standing in columns 0-7 is
          * completing something the machine drew from column 8, or standing alone
          * with columns 8-12 that nobody will ever paint. PPUMASK bit 1 is clear
-         * for this game so the PPU never paints those eight columns at all. */
+         * for this game so the PPU never paints those eight columns at all.
+         *
+         * NOTE this block ends the `sdbw` line with its own newline, which is
+         * why the `n=%d` closer is printed BEFORE it rather than after. Both
+         * fixes have been made here in sequence and each undid part of the
+         * other: printing the closer first stopped `sdbm` being glued onto the
+         * last `[oN:...]` entry, but with `oam-band:` sitting between them the
+         * closer then landed on a line of its own -- so `margin_track.py`'s
+         * regex, which wants `... n=NN` at the END of the `sdbw` line, matched
+         * nothing and the audit reported "no sdbw lines in that log" on a
+         * perfectly healthy run. `n` is final after the draw loop, so the
+         * closer goes here, and this block prints after it. */
+        s_margin_count = n;
+        if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+            fprintf(stderr, " n=%d\n", n);
+        if (n > s_margin_peak) s_margin_peak = n;
         if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to) {
             const uint8_t *oam = cyc_render_oam();
-            fprintf(stderr, " oam-band:");
+            fprintf(stderr, "oam-band:");
             for (int j = 0; j < 64; j++) {
                 if (oam[j * 4] >= 0xEF || oam[j * 4 + 3] >= SDB_WS_CLIP) continue;
                 fprintf(stderr, " [%d:y%d,$%02X,$%02X,x%d]", j, oam[j * 4], oam[j * 4 + 1],
@@ -1711,24 +1885,16 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
             }
             fprintf(stderr, "\n");
         }
-        if (n > s_margin_peak) s_margin_peak = n;
         /* The per-frame margin line lives HERE, not in the frame-begin hook:
          * `n` is what this presented frame actually painted, and frame-begin for
          * the next frame is the only other place that could print it -- one
-         * frame late, against a `s_frame` counter that has already moved on.
-         *
-         * The `n=%d` CLOSER comes FIRST, and it has to. The `sdbw` line above
-         * opens with no newline and its entries are printed one at a time, so
-         * printing the summary first glues `sdbm 1146 48 8955` onto the end of
-         * the last `[oN:...]` entry -- and `margin_track.py`'s line regex then
-         * matches nothing at all, so the audit silently reports "no sdbw lines
-         * in that log" on exactly the runs where you turned the trace on to run
-         * it. */
-        if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
-            fprintf(stderr, " n=%d\n", n);
+         * frame late, against a `s_frame` counter that has already moved on. */
         if (s_trace)
             fprintf(stderr, "sdbm %ld %d %ld\n", s_frame, n, s_margin_off_edge);
     }
+
+    if (sdb_json_want(s_frame))
+        sdb_json_margin(native_x0, width, diff, s_margin_count);
 
     s_ws_composed++;
     s_ws_last_diff = diff;
@@ -1827,6 +1993,17 @@ static void sdb_ws_report(void)
                         "peak %d, backstop %ld\n",
                 s_margin_frames, s_margin_off_edge, s_margin_drawn,
                 s_margin_peak, s_margin_lost);
+    /* The same totals as a record, so a run's verdict is readable without
+     * scraping prose. Printed whenever the JSON stream is on, not only under
+     * SDB_TRACE: it is one line and it is the line that says whether the
+     * margins were drawn at all. */
+    if (s_json_from >= 0)
+        fprintf(stderr, "{\"k\":\"r\",\"frames\":%ld,\"composed\":%ld,\"pillarboxed\":%ld,"
+                        "\"diff\":%ld,\"mframes\":%ld,\"mcap\":%ld,\"moff\":%ld,"
+                        "\"mdrawn\":%ld,\"mpeak\":%d,\"mlost\":%ld}\n",
+                s_frame, s_ws_composed, s_ws_pillarboxed, s_ws_last_diff,
+                s_margin_frames, s_margin_frames, s_margin_off_edge,
+                s_margin_drawn, s_margin_peak, s_margin_lost);
 }
 
 static int sdb_ws_aspect_from(const char *env, const char *option)

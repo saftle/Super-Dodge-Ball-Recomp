@@ -235,7 +235,7 @@ Static recompilation, not an emulator. The original 6502 machine code is transla
 - **`tools/overclock/`** — PPU-overclocking oracle harness (research.md §23)
 - **`tools/blargg/`** — blargg test-ROM suite on the cycle backend (`run_blargg.py`, `manifest.json`); per-ROM builds in `build-cyc-blargg/`, ROMs in `external/nes-test-roms/` (both gitignored)
 - **`tools/tas/`** — TAS-integrated differential harness: bk2/fm2 → canonical `tas.json`, shared-input runners for MesenCE + cycle backend with full state capture, three-layer first-divergence diff (`run_tas.py`, `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored)
-- **`tools/widescreen/`** — Measurement behind research.md §25–26: `nametable.py`, `blank_extent.py`, `objects.py`, `margin_track.py` (the per-sprite audit of the margin sprites) and `band_fault.py`
+- **`tools/widescreen/`** — Measurement behind research.md §25–26: `nametable.py`, `blank_extent.py`, `objects.py`, `margin_track.py` (the per-sprite audit of the margin sprites), `band_fault.py`, and `json_trace.py` (reads the `SDB_TRACE_JSON` stream)
 
 ## Recording a playthrough
 

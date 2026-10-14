@@ -1,8 +1,8 @@
 # tools/widescreen — analysis behind research.md §25 and §26
 
-Four scripts, all read a `--frame-log` binary or a trace, and all back a specific
-claim in `docs/research.md` §25-26. Nothing here runs the emulator; make the log
-first.
+Five scripts. Four read a `--frame-log` binary or a trace and back a specific
+claim in `docs/research.md` §25-26; `json_trace.py` reads the `SDB_TRACE_JSON`
+stream instead. Nothing here runs the emulator; make the log first.
 
 ## Make the logs
 
@@ -187,6 +187,61 @@ at all, because `$0617` only advances for sprites the game actually draws. That
 property is proved structurally instead: the blit is clipped to the columns the
 machine does not own, so a margin-sprite run and a `--margin-sprites 0` run must
 differ by **0 pixels** across the machine's 256 columns, every frame.
+
+## `json_trace.py` — the structured trace (`SDB_TRACE_JSON`)
+
+The other four read prose. This reads the machine-readable stream, which exists
+because two of the seven §26 bugs were the prose lying rather than the feature
+misbehaving: a missing newline made `margin_track.py`'s regex match nothing on
+exactly the runs where you enabled the trace to run it, and a `part` check that
+only fired for wholly off-screen objects let the seventh bug through. Both were
+parsing and ordering faults. `json.loads` per line cannot care where a closer
+was printed.
+
+```bash
+mkdir -p tmp/jt
+SDB_TRACE_JSON=600-660 ./build-cycle/nes_game \
+  "roms/Super Dodge Ball (USA).nes" --frames 661 \
+  --input tas/vectors/sdb_sweep.input --ram-init zeros --widescreen 16:9 \
+  --overscan --present-out tmp/jt/p_ --present-every 1 >/dev/null 2>tmp/jt/trace.log
+python3 tools/widescreen/json_trace.py summary tmp/jt/trace.log
+python3 tools/widescreen/json_trace.py flicker tmp/jt/trace.log
+python3 tools/widescreen/json_trace.py margin  tmp/jt/trace.log --objects 2,8
+```
+
+Three record kinds, discriminated by `"k"`, on one line each:
+
+| kind | when | carries |
+|---|---|---|
+| `f` | frame begin | flicker counters, `scr`/`cam`, and **every live OAM entry** |
+| `m` | composite | what this presented frame painted, per object, per part |
+| `r` | exit | run totals |
+
+`f` and `m` describe different instants and do not share a frame — the
+compositor runs after the frame it is presenting. Join them on `"f"` knowing
+that.
+
+Each margin part carries the branch the draw site took: **`drawn`**, `machine`
+(the machine owns those columns), `ghost` (in the revealed band with no OAM
+entry behind it — §26's seventh bug), `clip` (straddles into columns we do not
+own), `oob`. A recycled record is emitted as `"stale": n` with an **empty**
+`parts`, because the draw site skips that object before any placement decision
+exists for it.
+
+**`flicker` is the instrument plan item 14 is waiting on.** It prints live OAM
+against the mod's published list in the same frame, which is the question that
+bug turns on — does the game emit fewer sprites in Bean Ball, or does the mod
+drop them? `pub` is the presented list, `oamn` the live OAM count. It only
+prints the interpretation on a ≥30% collapse, because `pub` jitters by a few
+sprites per frame and a hint that fires on every run trains you to ignore it.
+
+**What it does not replace.** `margin_track.py`'s *temporal* checks — `gone`,
+`shift`, a `ghost` that persists across frames — are still its job. This gives
+you the per-frame truth without a regex; that script gives you the trend.
+
+Verified inert: with `SDB_TRACE_JSON` unset, 1937 human trace lines and 661
+presented PNGs are byte-identical to a run with it set, and the JSON stream is
+simply absent (0 records vs 123).
 
 ## Attribution
 

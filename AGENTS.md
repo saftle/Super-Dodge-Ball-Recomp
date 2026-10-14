@@ -257,16 +257,29 @@ a `--virtual-pad` replay needs `Player1Source = 2` in the config or the guest
 never sees the input and the run sits at the title screen — which looks exactly
 like "the feature does nothing".
 
-### Two instrumentation bugs that both made a gate silently blind
+### Three instrumentation bugs that all made a gate silently blind
 
 - **The `sdbw` trace line had no newline before `sdbm`.** The per-sprite entries
   were glued onto the summary line, so `margin_track.py`'s regex matched nothing
   and it reported `no sdbw lines in that log` on exactly the runs where
-  `SDB_TRACE_CAPTURES` was turned on to run it. Fixed; the `n=` closer prints
-  first now.
+  `SDB_TRACE_CAPTURES` was turned on to run it. The `n=` closer was moved first.
+- **That fix then hit the mirror-image failure.** The same commit also added the
+  `oam-band:` line, which ends with its own `\n` — so the closer moved above the
+  entries and *below* that block landed on a line of its own. `margin_track.py`
+  wants `… n=NN` at the end of the `sdbw` line, so **0 of 701** lines matched and
+  gate 3 was inoperable: a healthy run reported "no sdbw lines in that log". The
+  closer now prints *before* the `oam-band:` block. Two fixes, each undoing part
+  of the other; the order of the two blocks is the whole thing.
 - **`margin_track.py`'s `part` check only fires for wholly off-screen objects.**
   An object straddling the band at screen column 5 holding 2 parts instead of 8
   passes clean. That is how the ghost survived an otherwise-green audit.
+
+**Check the gate can run before believing it is green.** Two of these produced a
+clean-looking pass over zero examined frames. `python3 tools/widescreen/margin_track.py
+LOG --records REC` should print a per-object table; "no sdbw lines in that log"
+is a broken instrument, not a clean picture. `SDB_TRACE_JSON` + `json_trace.py`
+exists for the same reason — one JSON object per line, parsed with `json.loads`,
+which cannot care where a closer was printed.
 
 ### Bean Ball: the flicker mod's sprite list degenerates while running — open
 
@@ -526,9 +539,12 @@ line means the capture is off, not that there is nothing to capture.**
    committed baseline exactly (cycles *and* native cycles, 0 callbacks). Extra
    `[[mod_function_hook]]` sites must cost nothing when disabled.
 5. **They actually fire** — `off-edge` must be non-zero (3951 over 1200 sweep frames
-   with the flicker mod on) and `drawn` must follow it (33855; 104240 over 3000
+   with the flicker mod on) and `drawn` must follow it (**33726**; **104519** over 3000
    `sdb_throw` frames). A callback count of 4150 with `off-edge` at 0 means the CRC
-   key is wrong.
+   key is wrong. The two `drawn` figures were re-baselined 2026-10-13 against this
+   binary; the previous 33855 / 104240 did not reproduce and moved in *opposite*
+   directions, while `off-edge` 3951 reproduced exactly, so the drift is on the
+   presentation side only.
 6. **`peak` and `backstop`** — peak around 64 and backstop **0**. `SDB_MARGIN_PARTS`
    is 24, not 8: objects 9 and 11 legitimately emit more than a character's eight, and
    at 8 they lost sprites on 15 frames per 3000. Any non-zero backstop count means
@@ -768,7 +784,7 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 | `tas/vectors/sdb_beanball.input` | **Recorded**, not written: a played Bean Ball run across the full map, the repro for the open flicker-mod list degeneration (research §26, plan item 14). Replay in a window, not headless |
 | `tas/vectors/sdb_probe.input` | Diagnostic, not a test vector: LEFT in 4-frame pulses from frame 600, which is how **594** was measured as the frame the court starts accepting input (research §27 timings above). Keep it — it is the reproduction for the timing facts, and the facts cost three failed repros to establish |
 | `tools/flicker/` | Analysis scripts behind the research.md §2/§2.1 claims (OAM/record dumps, ref-finder, memdiff) + toolkit README |
-| `tools/widescreen/` | Analysis behind research.md §25-26 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge; `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame) |
+| `tools/widescreen/` | Analysis behind research.md §25-26 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge; `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite; **`json_trace.py` — reads the `SDB_TRACE_JSON=<from>-<to>` stream, one JSON object per line, which is what plan item 14 needs (`flicker` puts live OAM and the mod's published list side by side in one frame)**. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame) |
 | `tools/play_record.sh` | Play the game in a window and record the session as a replayable `--input` vector plus `SDB_TRACE=1` and per-frame screenshots, into `tmp/<name>/`. Pins `WindowScale`/Fullscreen/VSync, or the screenshots make the game run in slow motion. The only way to find the band bugs — see the recorded-playback section above |
 | `tools/overclock/` | PPU-overclocking oracle harness behind research.md §23 (MesenCE sandbox + stock-vs-OC comparison). **Its self-check matters: if cycles/frame stays 29781 for a non-zero `Before NMI`, the setting never applied and the run is worthless** |
 | `mods/packages/super-dodgeball.character-flicker/` | Mod package — `manifest.toml` only (data-only by design; implementation is `src/sdb_host_extras.c`). Off by default, toggleable in the launcher's Mods screen; PolyForm NC, same as the project |
