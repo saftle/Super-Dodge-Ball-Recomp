@@ -213,7 +213,7 @@ when you do not know the frame count in advance.
 *presenting*.** It decides how often the frame is presented at all, and the
 compositor only runs when something presents. So a large stride skips the
 compositor entirely: at `--present-every 200` over 1200 frames the compositor ran
-~6 times and `margin sprites:` read **167 drawn** instead of 33855. Verified
+~6 times and `margin sprites:` read **167 drawn** instead of 33874. Verified
 2026-10-13. Consequences:
 
 - **Every `drawn` / `margin sprites:` figure is stride-dependent and only
@@ -588,24 +588,41 @@ line means the capture is off, not that there is nothing to capture.**
    `shift` (the object moved further than its record and the camera did), `part`
    (a wholly off-screen object holding fewer parts than it did). Current baseline:
    **701 sweep frames, eleven objects, no anomalies**, at 16:9 and 32:9, with and
-   without the reveal, and with the character-flicker feature on. Objects 2 and 8 —
-   the two the game's display list almost never contains — must read **701/701**.
-   **A `ghost` is the one to take seriously**: a character is sixteen columns of two
-   eight-wide sprites, so two halves placed on different bases come out one pixel
-   apart and the player is drawn at a sixteenth of his width.
+   without the reveal, and with the character-flicker feature on — **and no anomalies
+   on `sdb_pan`**, which is the vector to add whenever this gate is re-run. Objects 2
+   and 8 — the two the game's display list almost never contains — must read
+   **701/701**. **A `ghost` is the one to take seriously**: a character is sixteen
+   columns of two eight-wide sprites, so two halves placed on different bases come
+   out one pixel apart and the player is drawn at a sixteenth of his width.
+
+   **What this audit cannot see, and it is not small.** It checks the margin against
+   *itself*: are an object's parts evenly spaced and consistently placed? A margin
+   that is perfectly self-consistent and a whole camera step from the **machine** is
+   reported clean, and that was exactly the seam doubling — it survived this gate on
+   701 sweep frames *and* on the pan vector, while the picture showed a duplicated
+   character at frames 624-625. Only a margin-vs-machine comparison finds it, and the
+   one that works is a whole-object one (two parts must agree on one distance, or a
+   coincidental match with a neighbouring player passes for one). See research §26.
+   Treat "no anomalies" from this tool as "the margin is not self-inconsistent", not
+   as "the margin is correct".
 4. **Declaring the sites is free** — with margin sprites off, the run must equal the
    committed baseline exactly (cycles *and* native cycles, 0 callbacks). Extra
    `[[mod_function_hook]]` sites must cost nothing when disabled.
 5. **They actually fire** — `off-edge` must be non-zero (3951 over 1200 sweep frames
-   with the flicker mod on) and `drawn` must follow it (**33855**; **104612** over 3000
+   with the flicker mod on) and `drawn` must follow it (**33874**; **104615** over 3000
    `sdb_throw` frames). **All four figures are `--present-every 1` figures** — see
    the stride warning above; at any other stride they read far lower and mean
    nothing. A callback count of 4150 with `off-edge` at 0 means the CRC
-   key is wrong. **33855** and **104612**, re-baselined 2026-10-13.
-   The sweep figure was **33855 before research §26's `sdb_oam_has()` ghost filter
-   and 33726 after it**, a difference of exactly **129** parts over this vector.
-   That ordering was the wrong way round and is now reversed — the filter was the
-   bug, so 33855 is current and 33726 is the broken reading (research §26). The
+   key is wrong. **33874** and **104615** (re-baselined 2026-10-14).
+   History, because the numbers moved three times and two of the moves were
+   mistakes: the sweep figure was **33855 before research §26's `sdb_oam_has()`
+   ghost filter and 33726 after it**, a difference of exactly **129** parts — and
+   that ordering was the wrong way round. The filter was the bug, so 33855 was
+   restored when it was removed. A band anchor then moved it to **33816** and was
+   itself removed (tile matching is ambiguous); the current basis correction moves
+   it to **33874**. Both later moves go the *other* way because both put parts back
+   in the machine's hands, which is correct skipping, not loss. Research §26 keeps
+   the full chain. The
    previous throw figure of 104240 is **not** explained: it is 279 *below* what
    this binary produces while that vector's ghost count is only 93, and no
    configuration reproduces it (aspect, reveal, flicker mod and vector length
@@ -658,21 +675,31 @@ line means the capture is off, not that there is nothing to capture.**
 All three are the same mistake wearing different clothes, and all three were made
 here before they were measured. Read this before touching the draw site.
 
-1. **There is one basis and it is `cyc_render_line_scroll_x`.** `$C3/$C4` is not
-   it. It is what the game subtracted to make OAM X, it looks authoritative, and at
-   composite time it already holds the camera for the frame *after* the one being
-   presented — one 6-7 px step away on the frames where the camera is stepping.
-   Using it puts standalone margin sprites a whole camera step ahead of the court
-   under them. The authority is the game's own behaviour: the machine glues its
-   sprites to its background (world-aligned frames match to a mean absolute
-   difference of 0.00), so scroll, margin background, machine sprites and margin
-   sprites are all on the scroll.
+1. **`cyc_render_line_scroll_x` is the basis — but not the only one, and
+   "only that" cost a bug.** `$C3/$C4` is what the game subtracted to make OAM X,
+   it looks authoritative, and at composite time it already holds the camera for
+   the frame *after* the one being presented — one 6-7 px step away on the frames
+   where the camera is stepping. Placing wholesale with it is measurably **worse**,
+   not a wash: over 1581 whole-object comparisons on the pan vector the scroll gets
+   ~75% of the camera-stepping frames right and `$C3/$C4` ~33%. The authority for
+   that default is the game's own behaviour — the machine glues its sprites to its
+   background (world-aligned frames match to a mean absolute difference of 0.00).
+   **But on roughly a quarter of the stepping frames a whole object sits exactly
+   one camera step from the machine's copy of it**, and that is the seam doubling:
+   a duplicated sprite at the band that flickered with the pan. `sdb_object_delta`
+   moves such an object onto the machine's columns, and the gate is what makes it
+   safe — the disagreement must be *exactly* the camera step, so a stale OAM (three
+   columns out on the sweep at 759-761, which is no multiple of anything) is
+   ignored. Never relax that gate: live OAM is unreliable in exactly the way this
+   mod exists to fix, and acting on it unconditionally cuts characters in half.
 2. **Never split parts across the two bases.** It reads like a refinement — "use the
    machine's basis for the part it holds, the scroll's for the part it does not" —
    and it collapses a character from sixteen columns to one, because its two
    eight-wide halves stop being eight apart. Measured at sweep frame 1060: object
    10's rows 184, 168 and 176 one pixel apart instead of eight, correct again at 1063
-   when the bases happened to agree. The intermittency is the tell.
+   when the bases happened to agree. The intermittency is the tell. **Any correction
+   is per OBJECT, never per part** — doing it per part measured 22 `ghost`s on the
+   sweep, which is this same collapse.
 3. **`$04/$05` is the accumulator, not a column.** `$84A1: SEC / SBC #$04` makes OAM X
    from it, so the screen column is that minus 4. Leaving the 4 in moves every part
    across the boundary test below, which both *drops* parts the margin owns (a stripe

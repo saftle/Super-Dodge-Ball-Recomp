@@ -1,8 +1,6 @@
 # Super Dodgeball NES Recompilation — Project Plan
 
-> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). PPU overclocking **shipped** (opt-in mod; deliberately changes timing). Widescreen **shipped** (opt-in mod, 16:9 / 21:9 / 32:9), and its margins now carry sprites as well as court. Margin sprites found by a *played* session rather than a script — `--record-input` + `tools/play_record.sh` (item 4, research §26). The sprite judder while the camera pans is **resolved and it is the game's** — MesenCE reproduces the same two-frame offset, so nothing here is broken (item 12, research §27). **Two** open questions left unattributed: the Bean Ball sprite-list degeneration (item 14) and
-the presented sprite layer being one build old, which puts the character 1-2 px from where OAM
-puts it (item 15). Frontier: full-movie TAS vectors (level-switch screens).
+> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). PPU overclocking **shipped** (opt-in mod; deliberately changes timing). Widescreen **shipped** (opt-in mod, 16:9 / 21:9 / 32:9), and its margins now carry sprites as well as court. Margin sprites found by a *played* session rather than a script — `--record-input` + `tools/play_record.sh` (item 4, research §26) — and the last of them, a duplicated sprite at the seam that flickered while the camera panned, turned out to reproduce **headlessly on `sdb_pan` all along** (research §26). The sprite judder while the camera pans is **resolved and it is the game's** — MesenCE reproduces the same two-frame offset, so nothing here is broken (item 12, research §27). **One** open question left unattributed: the Bean Ball sprite-list degeneration (item 14). Item 15 is **fixed**, and so is the seam offset it left behind. Frontier: full-movie TAS vectors (level-switch screens).
 
 ## Where Things Stand
 
@@ -27,9 +25,16 @@ puts it (item 15). Frontier: full-movie TAS vectors (level-switch screens).
    hides eight columns the game never culls, and with the reveal drawing them
    the band has to draw them), a fragment instead of a character (one `$8231`
    visit emits four of a character's eight sprites), and an older animation frame
-   pinned in the band. The basis is `cyc_render_line_scroll_x` and only that —
-   `$C3/$C4` is a camera step ahead of the frame being presented — and the audit is
-   `tools/widescreen/margin_track.py`, 701 sweep frames, no anomalies. Research.md §26.
+   pinned in the band. The basis is `cyc_render_line_scroll_x` — but *not* only
+   that, and getting that wrong cost the eighth bug: on about a quarter of the
+   camera-stepping frames a whole object sits **exactly one camera step** from the
+   machine's copy of it, which is the seam doubling, and `margin_track.py` cannot
+   see it because it audits the margin against itself. Fixed by moving such an
+   object onto the machine's columns, gated on the disagreement being exactly the
+   camera step so a stale OAM is ignored. The audit is
+   `tools/widescreen/margin_track.py` — **no anomalies on the sweep and on the pan
+   vector** — and the gate that actually found this one is the whole-object delta
+   table in research §26. Research.md §26.
 
 5. ~~Flicker fix~~ — **DONE, all causes.** `super-dodgeball.character-flicker`, opt-in from the launcher's Mods screen (off by default: the culling half shifts guest timing and the level-switch screen shows ghosts with it on — needs a full playthrough test). (a) Hard 64-sprite OAM budget with a `BEQ` bail on `$84B6` — stops emitting. (b) Display-list culling at `$067C` (`$43` bits 4-6 `$20`), three gates overridden. (c) Two sprite classes no bump hook could see: floating damage numbers (bank-3 pair emitter, `ADC #$08` step) and team-select position numbers (bank-4 block copier, no bump at all) — hooked per-emitter plus prefix carry-over and done-freshness for sitters. Ten content-keyed `[[mod_function_hook]]` sites + host-side redraw + six `cycle_seed_file` roots (hook sites need recompiled code; all three emitters were on the interpreter). Truncation: body-ink stdev 8.7 → 0.8 (truncation-only build). Culling: B's box-ink stdev 55.0 → 16.6 with 0 frames still culled (re-verified current binary). Numbers: 108/108 frames steady. Traps and the guest-cost caveat in research.md §2 and §2.1.
 
@@ -209,7 +214,7 @@ puts it (item 15). Frontier: full-movie TAS vectors (level-switch screens).
     backstop. If this bug turns out to be ours, start from that fix and ask what
     is different about a camera in constant motion.
 
-15. **The presented sprite layer is one build old — FIXED by reconciliation.** With the flicker mod on the character used to render 1-2 px from where OAM put it, and 7-11 px on a build boundary: the captured list is published only once a build completes, so an entry the game has since moved was drawn where it *was*.
+15. **The presented sprite layer is one build old, and the seam offset it shared a symptom with — BOTH FIXED.** With the flicker mod on the character used to render 1-2 px from where OAM put it, and 7-11 px on a build boundary: the captured list is published only once a build completes, so an entry the game has since moved was drawn where it *was*.
 
     Measured for the first time with `json_trace.py flicker`'s new positional column: over the 1200-frame sweep, **42514 of 54479 unambiguous (y, tile, attr) matches agreed exactly and 11965 (22.0%) were off-position** — and every one of those sat on a frame that saw no build reset, i.e. mid-build with OAM already carrying the next list. 640 of 1201 frames carried at least one.
 
@@ -217,9 +222,11 @@ puts it (item 15). Frontier: full-movie TAS vectors (level-switch screens).
 
     Rejecting instead is what four earlier attempts did and each cost more than it fixed; moving it is a different decision, because the sprite is still drawn and it is drawn where the machine has that exact sprite.
 
-    Still open: the two `json_trace.py` caveats below, and the fact that a straddling character is drawn by TWO sources at all.
+    **And at the widescreen seam it was fixed too, by a different mechanism — which is why this item closes.** A character straddling the edge of the 4:3 viewport is drawn by TWO sources at once: the machine paints the half inside its own picture, the margin paints the band half. Two separate defects sat on that join. The reconciliation above fixed the flicker side's one-build lag. The **margin's** side was not that at all — on about a quarter of the camera-stepping frames the margin placed a whole object on `$C3/$C4` while the machine was on the latched scroll, so the halves registered a whole camera step apart and the character read as doubled, worse the more the view panned. Reported as a duplicated ball at the left seam and as a sliver left behind at it; measured at research §26, "The margin and the machine are on different cameras". `sdb_object_delta` moves such an object onto the machine's columns, gated on the disagreement being exactly one camera step. The band HOLES that used to sit on top of all this were fixed earlier by removing `sdb_oam_has` (research 26).
 
-    **Now also visible at the widescreen seam, and that is where it should be fixed.** The reconciliation above is what fixed that doubling: the two sources now agree on position, so the halves meet. A character straddling the edge of the 4:3 viewport is drawn by TWO sources at once: the machine paints the half inside its own picture from current OAM, and the margin paints the band half from the captured list. Those are a build apart, so the halves register 1-2 px out and the character reads as doubled with a jog down it — reported as "the partial person from stock isn't lined up with the widescreen drawing of the rest of the body". Every camera step re-registers them, which is why it looks worse the more the view pans. The band HOLES that used to sit on top of this were fixed by removing `sdb_oam_has` (research 26); this offset is what is left, and it is the same one-build lag, not a new bug.
+    What remains is not this but the list's own age: it is still a build old for every entry that cannot be matched unambiguously, which is most of them once several players share a tile. That is what `json_trace.py`'s positional column measures, and it is why the two sides of the seam needed *different* corrections rather than one.
+
+    **Item closed.** Both halves of the seam problem are fixed; the second was a basis disagreement rather than this one-build lag, and the two had been reported as one symptom for several passes. What structurally remains is that a straddling character is drawn by two sources at all.
 
 16. **The menu ghost: a stale sprite list outliving its screen** (research 26, **OPEN**). Playing found it twice, and it is still there: a menu screen ends with an 8-sprite character, the next screen retires it with `y=$F0`, the game emits nothing for ~14 frames, and the mod repaints it — `s_build_count` is never reset per frame because the build spans two. Four rules were built and all four traded this for something worse; the table is in research 26. The nearest miss: stamping `s_done_frame` with the list's CAPTURE frame instead of its publish frame fixes the ghost cleanly and costs 11% of sweep frames (8 players become 4). **Do not retry that.** What is needed is a signal that *the screen changed* — the mod has no screen notion, and the ghost's published list is 14 frames old while a healthy fallback's is 5, so age cannot separate them either.
 

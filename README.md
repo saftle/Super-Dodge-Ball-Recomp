@@ -4,9 +4,14 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 
 ![Super Dodge Ball title screen (recompiled build)](docs/assets/title.png)
 
-> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). The **widescreen mod is playable and has been played**: 16:9 / 21:9 / 32:9 with the court *and the players* in the margins, including the columns the game itself hides. It was found to be correct by recording and replaying real playthroughs, which is how its last two bugs were caught. Not yet tested on a full playthrough to completion. Three open questions remain, all in the flicker mod's presentation layer: the Bean Ball sprite-list bug, the presented sprite layer being one build old, and a one-frame "ghost" of a menu character on screen transitions — four fixes were built and measured for that last one and each cost more than it fixed (`docs/research.md` §26, `docs/plan.md` 16). The pan judder that used to sit beside them is resolved — it is the game's own cadence, see `docs/research.md` §27. See `docs/plan.md` for the frontier.
+> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). The **widescreen mod is playable and has been played**: 16:9 / 21:9 / 32:9 with the court *and the players* in the margins, including the columns the game itself hides. It was found to be correct by recording and replaying real playthroughs, which is how its last two bugs were caught. Not yet tested on a full playthrough to completion. **Two** open questions remain, both in the flicker mod's presentation layer: the Bean Ball sprite-list bug, and a one-frame "ghost" of a menu character on screen transitions — four fixes were built and measured for that last one and each cost more than it fixed (`docs/research.md` §26, `docs/plan.md` 16). The pan judder that used to sit beside them is resolved — it is the game's own cadence, see `docs/research.md` §27. See `docs/plan.md` for the frontier.
 
 > *Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong here. This port is in development — expect rough edges.*
+
+> **Fan project.** Unaffiliated with and not endorsed by any rights holder — see
+> [Legal and project notices](#legal-and-project-notices). No game content is
+> included; you supply your own legally obtained ROM. Built with substantial AI
+> assistance — see the [AI disclosure](#ai-disclosure).
 
 ---
 
@@ -146,12 +151,16 @@ with it off the output is byte-identical to the unmodded game.
 
   Design notes, the four reconstruction bugs the seam check caught, and the
   overscan measurement are in `docs/research.md` §25. The margin-sprite half —
-  and the seven placement/boundary bugs found while auditing it, the last two by
-  recording a played session — are in §26.
+  and the **eight** placement/boundary bugs found while auditing it — are in §26.
 
-  **To play it and record what you see**, use `tools/play_record.sh` below. That
-  is how the margin feature was verified: not by running a script, but by playing
-  the game and replaying the session.
+  **To play it and record what you see**, use `tools/play_record.sh` below. Seven
+  of those eight bugs were found by playing the game and replaying the session
+  rather than by running a script, because no hand-written vector reached the
+  states they needed. **The eighth was not**: a duplicated sprite at the seam that
+  flickered while the camera panned turned out to sit on a committed vector the
+  whole time, and was missed because the audit in use compares the margin against
+  itself and cannot see a margin that is internally consistent and a whole camera
+  step from the machine. Worth knowing before reaching for the gamepad again.
 
 For headless runs the catalog is only read when you point at it, and the feature is
 off unless you ask for it:
@@ -318,8 +327,8 @@ Super Dodgeball Recomp/
 │   ├── research.md                # Deep research notes
 │   ├── plan.md                    # Project plan
 │   └── assets/                    # README images (title screen)
-├── LICENSE.md                   # PolyForm Noncommercial 1.0.0
-├── NOTICE.md                      # Attribution + no-ROM disclaimer
+├── LICENSE.md                     # PolyForm Noncommercial 1.0.0
+├── NOTICE.md                      # Attribution, rights holders, no game content, AI disclosure
 ├── .github/
 │   ├── workflows/ci.yml           # ROM-less CI (engine + scripts + config)
 │   └── raid-discord.png           # R.A.I.D. invite badge (footer)
@@ -417,7 +426,7 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 - ~~**Sprite flickering**~~ — **fixed, all causes.** Not emulator sprite-limit removal: the game (1) stops emitting once OAM's 64 slots fill, (2) deliberately culls one object off its own display list each frame, rotating which, so a character blinks out 4 frames in 9, and (3) draws its damage numbers and menu digits through emitters no bump hook could see. Characters now stay whole with the opt-in `super-dodgeball.character-flicker` mod — toggleable in the launcher's **Mods** screen. See `docs/research.md` §2 and §2.1.
 - **Palette mirrors** — sprite entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`) read stale in cycle snapshots (upstream model keeps power-on bytes; hardware mirrors the backdrop). Masked in the TAS diff; rendering unaffected.
 - **Widescreen cannot show more world than the game has** — the court is a 512-pixel-wide loop, so at 21:9 and 32:9 the extra columns run off the end and are filled with the backdrop. Expect a black band at whichever end the camera has reached; 16:9 usually fits.
-- ~~**Widescreen margins are background only**~~ — **fixed, and it is part of the `widescreen` feature, not a toggle.** A margin with no players in it is not a wider game, so the players the game placed outside its own viewport (40% of them at any moment) are drawn there too. `--margin-sprites 0` still exists, but only as the headless A/B switch. Seven placement/boundary bugs were found and fixed while auditing this; see `docs/research.md` §26.
+- ~~**Widescreen margins are background only**~~ — **fixed, and it is part of the `widescreen` feature, not a toggle.** A margin with no players in it is not a wider game, so the players the game placed outside its own viewport (40% of them at any moment) are drawn there too. `--margin-sprites 0` still exists, but only as the headless A/B switch. **Eight** placement/boundary bugs were found and fixed while auditing this; see `docs/research.md` §26.
 - ~~**Sprites double when two mods are on**~~ — **fixed.** With character-flicker and
   widescreen both enabled, every sprite was drawn twice: once by the compositor (whose native
   256 columns are the machine's finished picture) and once by the flicker mod's captured list.
@@ -435,16 +444,120 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 
 ## References
 
-- NESRecomp: https://github.com/mstan/nesrecomp
-- NESRecomp Discord (R.A.I.D.): `discord.gg/Ad9BwSzctP`
-- MesenCE: https://github.com/nesdev-org/MesenCE
-- SNES Port (Rumbleminze): https://github.com/rumbleminze/super-super-dodgeball
-- Romhacking.net: https://www.romhacking.net/games/814
-- StrategyWiki: https://strategywiki.org/wiki/Super_Dodge_Ball_(NES)
+### Toolchain and framework
+
+- **NESRecomp** — the recompiler and cycle backend this builds on —
+  <https://github.com/mstan/nesrecomp>
+- **RetroPortingToolKit docs** — house invariants, verification rituals, mod
+  manifest and agent guidance — <https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/main/data/docs>
+- **recomp-ui** — the launcher and in-game menu — <https://github.com/RetroPortingToolKit/recomp-ui>
+- **NESRecomp Discord (R.A.I.D.)** — `discord.gg/Ad9BwSzctP`
+
+### Other NESRecomp ports
+
+- **Zelda NES Recomp** — <https://github.com/mstan/LegendOfZeldaNESRecomp> — the
+  worked MMC1 comparison in `docs/research.md` §4
+- **Super Mario Bros NES Recomp** — <https://github.com/mstan/SuperMarioBrosNESRecomp>
+  — comparison in §5; its `docs/WIDESCREEN.md` reads enemy records in world
+  coordinates out of game RAM and is the only other NES widescreen that renders
+  margin sprites, which is the whole premise of §26
+
+### Oracle, test ROMs and hardware reference
+
+- **MesenCE** — <https://github.com/nesdev-org/MesenCE> — reference renderer and
+  oracle; every state claim in this repo is measured against it
+- **blargg's NES test ROMs** — <https://github.com/christopherpow/nes-test-roms> —
+  the engine gate (`tools/blargg/`); fetched at setup time, never committed
+- **NESdev Wiki** — <https://www.nesdev.org/wiki/Tools>, and the FDS BIOS
+  `$0100`/`$0101`/`$0102` convention this cart's RESET follows:
+  <https://www.nesdev.org/wiki/FDS_BIOS>
+- **NESdev Forum** — <https://forums.nesdev.org/>
+- **RetroReversing (NES)** — <https://www.retroreversing.com/nes>
+
+### This game
+
+- **SNES port** (Rumbleminze) — <https://github.com/rumbleminze/super-super-dodgeball>
+  — the closest existing reference and the only public annotated source for this
+  game's fixed bank: it supplied §13's NMI dispatcher, RESET and title-writer
+  notes, and its `RTS ; disable sprite flickering` comment is what identified the
+  second flicker (§2.1)
+- **Partial NES disassembly** (aj_187, 2012) — <https://ajworld.net/sdb/> —
+  incomplete and not byte-identical to stock, so a lead rather than a reference
+- **wideNES** — <https://github.com/daniel5151/ANESE> ·
+  <https://prilik.com/blog/post/widenes/> — the standard "NES widescreen" answer
+  and deliberately *not* the approach here; §25 explains the difference
+- **TASVideos submission #4976** — <https://tasvideos.org/4976> — the source of
+  `tas/vectors/sdb_4976.bk2` and the co-simulation input
+- **Romhacking.net** — <https://www.romhacking.net/games/814>
+- **StrategyWiki** — <https://strategywiki.org/wiki/Super_Dodge_Ball_(NES)>
+
+## Legal and project notices
+
+### Not affiliated with the rights holders
+
+**Super Dodge Ball** (熱血高校ドッジボール部, *Nekketsu Kōkō Dodgeball Bu*) and all
+related material are the property of their respective rights holders: Technōs Japan
+Corp. (developer and original publisher), CSG Imagesoft (North American publisher),
+and the entities that later succeeded to Technōs Japan's rights — including Million
+and Arc System Works. *Kunio-kun*, *Renegade* and the other titles in that lineage
+are covered by the same rights.
+
+**This project is not affiliated with, endorsed by, sponsored by, or approved by
+Technōs Japan, CSG Imagesoft, Million, Arc System Works, Miracle Kidz, Nintendo, or
+any other company holding rights in the game, nor by any of their parents,
+subsidiaries, affiliates, successors or assignees.** It is an independent,
+non-commercial fan project. Trade, brand and product names — including console names
+— are used **nominatively**: to identify the hardware and software being recompiled,
+and to credit the tools this is built on. The screenshot above is for identification
+and to demonstrate the project's output. All trademarks and copyrights remain the
+property of their respective owners.
+
+Nintendo is named here only as the manufacturer of the NES on which the original
+game ran and of the Virtual Console releases that re-published it; Nintendo is not
+involved in, has not reviewed, and does not endorse this project.
+
+### AI disclosure
+
+**This project was developed with the assistance of AI coding agents.** They were
+used for the game-specific mods, the analysis and verification tooling, the mod
+manifests, and substantial parts of this documentation. `AGENTS.md` is the developer
+reference for AI coding agents that this project works from.
+
+The human maintainer directs the work, reviews the output, decides what ships, and
+is responsible for the contents of this repository. The verification gates are not
+decoration: this project's bug log is largely a record of instrumentation that
+reported success while measuring nothing — the failure mode AI-assisted code
+invites, and the reason every claim here is backed by a measurement rather than by
+reading the code.
+
+The upstream projects this builds on — [NESRecomp](https://github.com/mstan/nesrecomp),
+[recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui),
+[MesenCE](https://github.com/nesdev-org/MesenCE) and the RetroPortingToolKit
+documentation — carry their own authorship and licensing and are not covered by
+this statement.
+
+### No game content
+
+This repository contains **no Super Dodge Ball ROM and no assets extracted from
+one** — no tiles, CHR, nametables, palettes, audio, or disassembly listings derived
+from the game's data. It contains addresses, sizes, hashes and layout descriptions
+only, which are facts about the cartridge rather than the game; the recompilation
+configuration keys its hooks by CRC32 rather than by ROM bytes for exactly this
+reason. You must supply your own legally obtained ROM, which the build reads at run
+time without ever committing it.
+
+What a build produces is a statically recompiled — machine-translated — build of the
+original 6502 code. That is inherent to static recompilation and is the same
+distribution model as other recompilation projects, including NESRecomp and
+N64: Recompiled. The generated C, the built executable and the build directory are
+gitignored, and no prebuilt binary is published here. The license here covers the
+source code in this repository and grants no rights to the game itself.
 
 ## License
 
-PolyForm Noncommercial 1.0.0 — see [LICENSE.md](LICENSE.md), with attribution in [NOTICE.md](NOTICE.md). The pinned `external/nesrecomp` submodule carries its own license. You must supply your own legally obtained ROM; no game content is included.
+PolyForm Noncommercial 1.0.0 — see [LICENSE.md](LICENSE.md), with attribution in
+[NOTICE.md](NOTICE.md). The pinned `external/nesrecomp` submodule carries its own
+license, as do the other submodules and system dependencies.
 
 ---
 
