@@ -818,6 +818,31 @@ static int sdb_no_cull(uint16_t addr)
  * tile per call, so calling it once per scanline would stack eight overlapping
  * copies and overwrite each other's pixels -- which shows up as doubled,
  * wrongly-coloured sprites. */
+/* How many live sprites the machine's OAM holds right now.
+ *
+ * This is the ordinal that decides what the mod may add. The captured list is in
+ * the game's EMISSION order (slot order) and OAM holds the first N of them --
+ * the cursor only advances for sprites the machine actually keeps, and the 64
+ * slot budget is what truncates the rest. So entry i of the list is one the
+ * machine already draws for every i < N, and is a sprite the game emitted and
+ * the hardware dropped for every i >= N.
+ *
+ * That is a count, not a content match, and that is the whole point. A content
+ * match (tile + y, or tile + y + x) fails precisely when the list is most stale:
+ * on an animation change every tile differs, nothing matches, and the entire
+ * stale set gets painted next to the machine's current one. Measured on the menu
+ * walk, that put a second whole character on screen at every build boundary
+ * (142, 154, 166, 178 -- the 12-frame cadence). Counting cannot fail that way,
+ * because the count is what "did the machine drop this" actually means. */
+static int sdb_oam_live(void)
+{
+    const uint8_t *oam = cyc_render_oam();
+    int live = 0;
+    for (int j = 0; j < 64; j++)
+        if (oam[j * 4] < 0xEF) live++;
+    return live;
+}
+
 static void sdb_blit(const SdbSprite *s, uint32_t *out, int width, int height, int x0)
 {
     int y = s->y + 1;                       /* OAM Y+1 is the first drawn line */
@@ -1017,11 +1042,27 @@ static const uint32_t *sdb_present(void *ctx, int *width, int *height)
     {
         int x0 = cyc_render_native_origin(cw);
         if (x0 < 0 || x0 + 256 > cw) x0 = (cw - 256) / 2;
-        for (int i = count - 1; i >= 0; i--)
+
+        /* A wide canvas already carries the machine's own sprites: the
+         * compositor's contract is that the native 256 columns win, so its
+         * output is the machine's picture, sprites included (see the copy-back in
+         * sdb_ws_composite). Blitting the whole captured list on top of that
+         * therefore paints every sprite twice, and the two copies disagree --
+         * measured: the machine places the character 1-2 px left of where the
+         * published list says, because that list is a build or more old. Two
+         * 8-wide halves two pixels apart read as a split or doubled sprite.
+         *
+         * So add only what the machine did NOT draw. A sprite the machine has
+         * stays exactly where the machine put it (byte-identical, 0 px), and the
+         * mod contributes only the sprites it exists to restore -- the ones the
+         * game emitted and the hardware hid. That also removes the stale-position
+         * error entirely, instead of inheriting it.
+         *
+         * At cw == 256 this does not apply: s_picture above is a sprite-free
+         * background, so there the captured list IS the sprite layer and must be
+         * drawn whole. */
+        for (int i = count - 1; i >= sdb_oam_live(); i--)
             sdb_blit(&list[i], s_canvas, cw, *height, x0);
-        const uint8_t *oam = cyc_render_oam();
-        SdbSprite front = { oam[0], oam[1], oam[2], oam[3] };
-        sdb_blit(&front, s_canvas, cw, *height, x0);
         return s_canvas;
     }
 
