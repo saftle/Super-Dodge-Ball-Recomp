@@ -72,6 +72,11 @@
 
 /* ---- guest constants (facts about the ROM, not ROM bytes) ---- */
 
+/* The widest disagreement, in world columns, that still counts as a whole
+ * object sitting beside the machine's copy of itself rather than as two
+ * unrelated sprites. One camera step; see sdb_object_delta. */
+#define SDB_MATCH_SLOP 8
+
 #define SDB_CURSOR      0x0617u   /* OAM byte cursor into the $0200 page */
 #define SDB_OAM_BASE    0x0200u
 #define SDB_OAM_LAST    0xFCu     /* byte offset of sprite slot 63 */
@@ -516,6 +521,98 @@ static int sdb_copy(uint16_t addr)
  * run, and $0617 is not touched (the culled path branches past the cursor bump
  * at $84B6), so the guest's OAM is exactly what it would have been without us.
  * That is what keeps this feature presentation-only. */
+/* How far a margin part's reconstructed world sits from the machine's copy of
+ * it, or 0 if the machine does not hold it.
+ *
+ * `world` is the part's world column as the margin re-placed it (`rec_x + dx`);
+ * the machine's is `oam_x + scroll + 4` -- the same quantity measured through the
+ * guest's own `$84A1: SEC / SBC #$04`. Both carry the same OAM bias, so the
+ * difference needs no correction.
+ *
+ * Matched on WORLD, never on tile. Every player shares tiles, so a tile-and-row
+ * match is ambiguous by construction, and this project has been bitten by that
+ * twice already: the `sdb_oam_has` filter (research 26) and the band anchor that
+ * replaced it. Two objects are never at the same world column, so this names one
+ * sprite and cannot name the wrong one. */
+static int sdb_world_delta(int world, int row, uint8_t tile, int scroll)
+{
+    const uint8_t *oam = cyc_render_oam();
+    if (!oam) return 0;
+    for (int j = 0; j < 64; j++) {
+        if (oam[j * 4] >= 0xEF) continue;          /* the game's hidden slot */
+        if (oam[j * 4 + 1] != tile) continue;
+        if (abs((int)oam[j * 4] + 1 - row) > 2) continue;
+        int d = (int)oam[j * 4 + 3] + scroll + 4 - world;
+        if (abs(d) <= SDB_MATCH_SLOP) return d;
+    }
+    return 0;
+}
+
+/* The one correction to make to this object's record anchor this frame, or 0.
+ *
+ * THE PROBLEM. The margin places a part with the latched scroll
+ * (`cyc_render_line_scroll_x`); the guest makes OAM X from `$C3/$C4`. Those two
+ * cameras differ by one step, and only while the camera is moving. On the frames
+ * where they differ, a part the machine is also painting gets painted a second
+ * time, one character-width away: the doubled ball at the left seam and the
+ * sliver left behind by it (research 26). Measured on the pan vector over 1581
+ * whole-object comparisons, the disagreement is 0 or exactly one step, and
+ * nothing else:
+ *
+ *     d = cam - scr     -7      -6       0      +6      +7
+ *     delta            0,+7    0,+6      0      0,-6    0,-7
+ *
+ * Swapping the basis for `$C3/$C4` outright is NOT the fix and measures worse:
+ * it puts 75% of stepping frames right where the scroll had 33%.
+ *
+ * THE GATE, and why it is what makes this safe. Live OAM cannot be trusted as
+ * "where is this sprite now" -- the game leaves OAM alone for 3-6 frames between
+ * builds, so on a quiet frame it answers for an older one, and placing parts by
+ * it unconditionally cuts characters in half (the sweep at 759-761, where OAM was
+ * three columns out and following it moved a player's head off its body).
+ *
+ * But OAM IS authoritative about one thing: it is what the machine paints this
+ * frame, stale or not. So the correction is applied only when the disagreement
+ * has exactly the shape of a basis error -- a whole object sitting a CONSTANT
+ * distance from the machine's copy of it, and that distance being the camera
+ * step. A stale OAM disagrees by an arbitrary amount and is ignored; a
+ * coincidental match with a neighbouring player cannot hold one offset across an
+ * object's parts. Both are measured facts, not hopes: the stale case reads 3,
+ * which is no multiple of anything, and the gate rejects it.
+ *
+ * WHOLE OBJECT, never per part. A character is sixteen columns of two eight-wide
+ * sprites; moving one half onto the machine's column and leaving the other on
+ * the record collapses the eight pixels between them to one, and `margin_track`
+ * reads that as a `ghost`. Done per part it measured 22 of them on the sweep. */
+static int sdb_object_delta(int rec_x, const SdbMarginObj *ob)
+{
+    /* The camera difference, sampled at a mid-picture row. It is the same for
+     * every row of a frame: the PPU latches one horizontal scroll for the frame. */
+    int d = (int)(cyc_mod_peek(SDB_CAM_LO) | (cyc_mod_peek(SDB_CAM_HI) << 8))
+          - cyc_render_line_scroll_x(140);
+    if (!d) return 0;                   /* the camera is still: the bases agree */
+
+    int seen[2 * SDB_MATCH_SLOP + 1];
+    memset(seen, 0, sizeof seen);
+    int parts = 0;
+    for (int i = 0; i < ob->n; i++) {
+        const SdbMargin *m = &ob->parts[i];
+        int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
+        int dd = sdb_world_delta(rec_x + m->dx, m->y, m->tile,
+                                 cyc_render_line_scroll_x(prow));
+        if (dd) seen[dd + SDB_MATCH_SLOP]++;
+        parts++;
+    }
+    if (parts < 2) return 0;            /* one part is not a basis disagreement */
+
+    int best = 0, n = 0;
+    for (int k = 0; k < 2 * SDB_MATCH_SLOP + 1; k++)
+        if (seen[k] > n) { n = seen[k]; best = k - SDB_MATCH_SLOP; }
+    if (n < 2) return 0;                /* no two parts agree: not our object */
+    if (abs(best + d) > 1) return 0;    /* not a camera step: stale, not a basis */
+    return best;
+}
+
 static int sdb_margin_capture(uint16_t addr)
 {
     uint8_t cur = cyc_mod_peek(SDB_CURSOR);
@@ -1270,6 +1367,9 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
         }
         int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
                         | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
+        /* Once per object, as at the draw site: the correction is a property of the
+         * object, and recomputing it per part is a parts-squared OAM scan. */
+        int corr = sdb_object_delta(rec_x, ob);
         int placed = 0;
         /* Mirrors the draw site's decision EXACTLY, in the same order, and says
          * which branch each part took. Reporting a 0/1 "drawn" here instead
@@ -1285,7 +1385,7 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
         for (int i = 0; i < ob->n; i++) {
             const SdbMargin *m = &ob->parts[i];
             int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
-            int sx = rec_x + m->dx - cyc_render_line_scroll_x(prow) - 4;
+            int sx = (rec_x + corr) + m->dx - cyc_render_line_scroll_x(prow) - 4;
             int completes = s_ws_reveal && sx >= 0 && sx < SDB_WS_CLIP;
             int px0 = sx + x0;
             const char *st;
@@ -1825,6 +1925,14 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
             /* The anchor, read live. */
             int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
                             | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
+            /* The anchor, corrected only on a whole-object basis disagreement. */
+            int corr = sdb_object_delta(rec_x, ob);
+            /* Only when it acted. Printing the zeroes too would fill the trace with
+             * `[corr+0]` per object per frame, which reads as a column of data and
+             * is none -- the same "a green line that measured nothing" shape this
+             * file keeps having to undo. */
+            if (corr && s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+                fprintf(stderr, " [corr%+d]", corr);
             for (int i = 0; i < ob->n; i++) {
                 const SdbMargin *m = &ob->parts[i];
                 /* Current screen column: the record's world column plus this
@@ -1899,13 +2007,10 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * pixel" and "slightly the wrong size" artifact, and it is the
                  * basis split, not a stale part. */
                 int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
-                int sx = rec_x + m->dx - cyc_render_line_scroll_x(prow) - 4;
+                int sx = (rec_x + corr) + m->dx - cyc_render_line_scroll_x(prow) - 4;
                 /* Completing a sprite the PPU clipped is the one case the margin
                  * owns rather than the machine. */
                 int completes = s_ws_reveal && sx >= 0 && sx < SDB_WS_CLIP;
-                /* Completing a sprite the PPU clipped is the one case the margin
-                 * owns rather than the machine -- but only for a sprite the game
-                 * actually emitted. See sdb_oam_has. */
                 /* NOTE there is deliberately NO `sdb_oam_has` test here.
                  *
                  * One was added to avoid drawing a band sprite the machine also
