@@ -2230,11 +2230,78 @@ next measurement, and how to get a fresh capture.
 
 ---
 
-## 27. Sprite judder: the sprite list and the scroll take turns
+## 27. Sprite judder: the game's own cadence (RESOLVED 2026-10-13)
 
-**OPEN.** Recorded with a measurement and a reproduction, and deliberately
-*not* with a conclusion: whether the game's own cadence or this engine's PPU
-model is responsible is the open question, and it decides where a fix would go.
+**The judder is the game updating its camera and its sprite OAM two frames
+apart. MesenCE reproduces it exactly. Nothing to fix, and specifically not in
+this engine's PPU model.** Reproduce in one command with `tools/tas/judder.py`;
+the measurement is below and the script is kept so nobody re-chases it.
+
+### The metric, and why it needs no picture correlation
+
+While the camera pans, the player walks left one 6–7 px step and the camera
+walks right one 6–7 px step. If the game does both on the *same* frame they
+cancel and the player is glued to the court. If they are `N` frames apart the
+player detaches from the floor for `N` frames and snaps back — which is exactly
+what is seen.
+
+So for the player sprite (OAM y=143, tile `$20`):
+
+```
+world_x(frame) = OAM X + $C3/$C4
+```
+
+`world_x` sits on a base value and blips by one step for `N` frames. Both
+quantities are in artefacts each side *already* writes — the cycle log carries
+RAM and OAM, MesenCE dumps `.ram.bin` and `.oam.bin` per frame at
+`SHOT_STRIDE` 1 — so this needs no picture analysis and no new emulator probe.
+
+An earlier attempt compared consecutive frames by column-SAD and locked onto
+the flat regions of the court, reporting shifts that contradicted the `scr`
+trace. **Do not measure this by correlating pictures.**
+
+### Measured
+
+| | camera steps at | sprite steps at | N | world_x base | blips |
+|---|---|---|---|---|---|
+| cycle backend | 601, 608, 615, 622 | 603, 610, 617, 624 | **2, 2, 2, 2** | 207 | 15 / 34 |
+| MesenCE 2.2.1 | 603, 610, 617 | 605, 612 | **2, 2** | 207 | 6 / 20 |
+
+Same N, same base, same blip shape. A second, independent emulator does the
+same thing, so the two-frame offset is the game's cadence.
+
+The two sides log on different events (cycle via `--frame-log-at mesen`, MesenCE
+via `endFrame`), so absolute frame numbers are offset by a constant — **N is a
+difference of frames and compares directly; the frame numbers do not.**
+
+### What it means for this project
+
+Nothing to fix upstream, and nothing to fix in a mod. A presentation mod
+cannot reach it: the judder is in the machine's own 256-column picture, which
+the compositor's contract is to reproduce faithfully, and smoothing it would
+break the 0-pixel gate from §25/§26.
+
+### Three things that had to be untangled first
+
+**The harness was not logging scroll at all.** This section previously claimed
+*"`mesen_tas.lua` already logs scroll and OAM per frame in
+`mesen_state.jsonl`"*. It does not: five of its state columns have been `null`
+since it was written, because the state keys are namespaced (`ppu.xScroll`,
+not `ScrollX`) and the script hardcoded the bare names — the exact thing
+research §16 warns about. Fixed in `7cfa35a`.
+
+**`ppu.xScroll` is not the court's scroll.** With the key fixed it populates,
+and it reads 0–7 through the whole pan while the game's `$C3/$C4` goes
+128→134→147→154. So it is some PPU-internal value and is **not** comparable to
+`cyc_render_line_scroll_x`. Reading it as the scroll would have produced a
+confidently wrong answer. The metric above sidesteps the question by using the
+game's own camera variable, which both sides dump in RAM.
+
+**The two sides are not in the same game for the whole run.** Cameras agree at
+frame 600 (134 on both) and have diverged by 650 (cycle 75, MesenCE 115). That
+is the known RNG divergence (AGENTS.md), and it is why the window above is
+597–618 rather than the whole pan. A comparison that ran to the end of the pan
+would have been comparing two different games.
 
 ### What it looks like
 
@@ -2247,8 +2314,8 @@ where the background has little horizontal detail to hide it.
 
 ### Reproducing it
 
-`tas/vectors/sdb_bar.input`. Measured timings on this ROM, all of which had to be
-found rather than guessed, and each of which silently swallows input aimed
+`tas/vectors/sdb_bar.input`. Measured timings on this ROM, all of which had to
+be found rather than guessed, and each of which silently swallows input aimed
 before it:
 
 | frame | what |
@@ -2268,37 +2335,17 @@ It needs **no mods at all** — this is the stock picture. That is the first thi
 to establish, because the obvious suspects (the flicker mod restoring sprites,
 the widescreen compositor re-placing margin sprites) are all absent here.
 
-### What is measured
-
-Pick one sprite — OAM row 143, tile `$20`, present on 60 consecutive frames — and
-compare its OAM X with the frame's scroll. `cyc_render_line_scroll_x(160)` gives
-the scroll the background was actually rendered with; the OAM comes from a
-`--frame-log`.
-
-```
-frame | scroll | OAM X | X + scroll |   d(X) | d(scroll)
- 602  |  134   |   73  |   207   |
- 603  |  134   |   66  |   200   |   -7   |    0     <- sprite moves, court does not
- 605  |  141   |   66  |   207   |    0   |   +7     <- court moves, sprite does not
- 610  |  141   |   60  |   201   |   -6   |    0
- 612  |  147   |   60  |   207   |    0   |   +6
- 617  |  147   |   53  |   200   |   -7   |    0
- 619  |  154   |   53  |   207   |    0   |   +7
-```
-
-`X + scroll` alternates between **200 and 207**. The sprite's position *relative
-to the court* is oscillating by 6-7 px — half a character's width — and the sprite
-step and the scroll step are **2 frames apart** for the whole constant-direction
-part of the run (603/605, 610/612, 617/619, 624/626), compressing to 1 frame at
-the turnaround. That is the judder: two 7 px steps that should coincide,
-alternating.
+The original `X + scroll` table that first recorded the symptom is kept in git
+history; it used `cyc_render_line_scroll_x(160)` for the scroll, and the
+attribution above supersedes it only in its *conclusion*, not its observation —
+the 200↔207 alternation is exactly what `world_x` shows.
 
 ### What is ruled out
 
 - **A mid-frame scroll split.** `cyc_render_line_scroll_x` at rows 60, 120, 160,
   200 and 239 is **identical on every frame checked** (597-625). So this is not
-  the game writing `$2005` part-way down the screen and the screen tearing at the
-  write point.
+  the game writing `$2005` part-way down the screen and the screen tearing at
+  the write point.
 - **A deliberate OAM snapshot in the renderer.** `cyc_render_sprites`
   (`cyc_render.c:126`) reads `ppu.oam` live, so there is no frame-boundary buffer
   that could be a frame stale.
@@ -2306,50 +2353,11 @@ alternating.
   (128 → 134 at frame 598 → 141 at 605 → 147 at 612 → 154 at 619), so the game is
   scrolling coarsely — there is no sub-pixel motion being dropped.
 
-### What is NOT established
-
-**Whether the game writes `$2005` and OAM two frames apart, or this engine adds
-the latency.** Nothing measured so far distinguishes them, and guessing is how an
-emulator bug gets shipped as a faithful reproduction — or the reverse.
-
-The oracle settles it, and the harness exists:
-
-```bash
-python3 tools/tas/input_to_tas.py tas/vectors/sdb_bar.input \
-    --out tas/vectors/sdb_bar.tas.json --frames 700
-python3 tools/tas/run_tas.py --tas tas/vectors/sdb_bar.tas.json \
-    --frames 700 --out tas/runs/bar700
-# then compare MesenCE's own (OAM X + scroll) against the table above
-```
-
-`mesen_tas.lua` already logs scroll and OAM per frame in
-`mesen_state.jsonl`. The gap that had to be filled first is that no converter
-read our own `.input` vectors — only speedrun movies, via `bk2_to_tas.py` and
-`fm2_to_tas.py` — so `tools/tas/input_to_tas.py` was written for it, verified to
-reproduce the vector's effective input on **0 differing frames out of 1200**.
-
-- MesenCE shows the same 200↔207 alternation → **the game's own cadence**.
-  Nothing to fix; it is recorded here so nobody re-chases it, and it is *not* a
-  mod.
-- MesenCE holds it constant → **ours**, and it belongs upstream in the PPU model
-  as a patch beside `patches/006`, not in `src/sdb_host_extras.c`.
-
-### Why it must not become a mod either way
-
-A presentation mod cannot reach it: the judder is in the machine's own 256-column
-picture, which the compositor's contract is to reproduce faithfully. A mod that
-smoothed it would make the widescreen frame disagree with the stock frame, which
-is the one thing §25's copy-back and the 0-pixel gate exist to prevent.
-
-The margin sprites of §26 are the only thing a mod legitimately owns here, and
-they already track the presented frame's scroll rather than the game's camera
-variable — see §26's note on the two bases.
-
 ### Related, and *not* the same thing
 
 §2's character flicker is sprites being **dropped**; this is sprites being drawn
 at a position two frames behind the floor. Both come from the same underlying
 cadence — the game rebuilds a list over two frames and then leaves OAM alone —
 but they are different symptoms, different measurements, and a fix for one says
-nothing about the other. §2's fix is opt-in because it changes the guest; this one
-cannot be changed by a mod at all.
+nothing about the other. §2's fix is opt-in because it changes the guest; this
+one cannot be changed by a mod at all.

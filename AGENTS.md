@@ -308,19 +308,33 @@ because of these, so they are recorded rather than re-measured:
 `tas/vectors/sdb_bar.input` is the vector built on them. Anything aimed at a
 court input must start after 594.
 
-### Sprite judder while the camera pans — open, and not yet attributed
+### Sprite judder while the camera pans — RESOLVED, and it is the game's
 
 Visible in the **stock** picture with no mods: a player holds still for several
 frames then jumps, and the jump is not the same size as the court's, so he
-detaches from the floor and snaps back. Measured: the sprite steps and the scroll
-step **2 frames apart**, both in 6-7 px increments, so `OAM X + scroll`
-alternates between 200 and 207. Full write-up, the reproduction and the oracle
-command are in research.md §27; plan.md open item 12.
+detaches from the floor and snaps back. The sprite steps and the camera steps
+**2 frames apart**, both in 6-7 px increments.
 
-**Do not "fix" it in a mod.** It is in the machine's own 256-column picture, which
-the compositor must reproduce faithfully — smoothing it would break the 0-pixel
-gate. If the oracle attributes it to the engine it belongs upstream as a PPU
-patch beside `patches/006`; if to the game, it is recorded and closed.
+**Measured against the oracle 2026-10-13: MesenCE does exactly the same thing,
+so this is the game's own cadence and nothing here is broken.** Metric:
+`world_x = OAM X + $C3/$C4` for the player sprite (OAM y=143, tile `$20`) — the
+player walks left one step while the camera walks right one step, so same-frame
+would cancel. Cycle: camera 601/608/615/622, sprite 603/610/617/624, N = 2 four
+times. MesenCE: camera 603/610/617, sprite 605/612, N = 2 twice. Same base (207),
+same blip. Full write-up in research.md §27; `python3 tools/tas/judder.py RUN`
+re-derives it in one command. plan.md item 12.
+
+**Nothing to fix, and specifically not upstream** — a second independent
+emulator reproducing it is the proof. **And never in a mod**: it is in the
+machine's own 256-column picture, which the compositor must reproduce faithfully,
+and smoothing it would break the 0-pixel gate.
+
+Two traps that cost the time, both in §27: the TAS harness had **never** been
+logging scroll (five `mesen_tas.lua` state columns are `null` — the keys are
+namespaced, `ppu.xScroll`, which is what research §16 warns about), and with the
+key fixed **`ppu.xScroll` is still not the court's scroll** (it reads 0-7 through
+the whole pan). Do not measure this by correlating pictures either — a column-SAD
+over the flat court locks onto the wrong feature.
 
 ### Model Notes (cycle backend behavior, verified)
 
@@ -799,7 +813,7 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 | `tools/frame_gen/oracle_dump.lua` | MesenCE `--testrunner` oracle: frame-N PPU dump + per-NMI `$0100/$0106` log (see `docs/research.md` §16) |
 | `tools/frame_gen/` | Frame export Lua script and wrapper |
 | `tools/blargg/` | blargg test-ROM harness on the cycle backend (`run_blargg.py` + `manifest.json`); per-ROM builds in `build-cyc-blargg/` (gitignored), ROMs via `--fetch` into `external/nes-test-roms/` (gitignored) |
-| `tools/tas/` | TAS differential harness on the cycle backend (bk2/fm2 converters, `run_tas.py` + `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored) — see `tools/tas/README.md`, research §21 |
+| `tools/tas/` | TAS differential harness on the cycle backend (bk2/fm2/`.input` converters, `run_tas.py` + `diff_tas.py`, `mesen_tas.lua`, and **`judder.py` — re-derives research §27's pan-judder attribution in one command**); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored) — see `tools/tas/README.md`, research §21 |
 | `build-cycle/` | Cycle backend build (gitignored; `./setup.sh` builds it, `./build_and_run.sh` runs it) |
 | `config/settings.json` | MesenCE runtime configuration (gitignored) |
 | `pyproject.toml` | Python project configuration |

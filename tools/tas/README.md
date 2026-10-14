@@ -36,6 +36,7 @@ movie pages rather than re-hosting.
 | `mesen_tas.lua` | MesenCE player + full capture (input in `inputPolled`) |
 | `run_tas.py` | Runs both sides into `tas/runs/<name>/`, writes `run.json` |
 | `diff_tas.py` | First-divergence report (liveness → state → images) |
+| `judder.py` | Attribute the pan judder to the game or this engine (research §27) |
 | `watch_tas.py` | Watch the TAS in the cycle backend's own window (`--virtual-pad`) |
 | `watch_mesen.py` / `watch_mesen.lua` | Watch the TAS in the MesenCE GUI (playback only, hands P1 back at the end) |
 | `tas_watch.lua` | Who-writes probe under the TAS (addrs → frame/value/writing PC; `PRGLOG=1` resolves banked PCs) |
@@ -84,6 +85,37 @@ per-frame input rather than the text.
 This is what research.md §27 needs, to attribute the pan judder to either the game
 or this engine; `mesen_tas.lua` already logs scroll and OAM per frame in
 `mesen_state.jsonl`.
+
+### The pan judder (research §27) — resolved, and it is the game's
+
+`judder.py` measures whether the sprite step and the camera step land on the
+same frame, on both sides, from artefacts the harness already writes:
+
+```bash
+python3 tools/tas/run_tas.py --tas tas/vectors/sdb_bar.tas.json \
+    --frames 700 --out tas/runs/bar700
+python3 tools/tas/judder.py tas/runs/bar700
+```
+
+Measured 2026-10-13: cycle N = 2, 2, 2, 2; MesenCE N = 2, 2. Same base (207),
+same blip. **A second independent emulator reproduces it, so the two-frame
+offset is the game's own cadence and nothing here is broken** — nothing to fix
+upstream, and nothing to fix in a mod (the judder is in the machine's own
+256-column picture, which the compositor must reproduce faithfully).
+
+Two traps, both of which produce a confidently wrong answer rather than an
+error:
+
+- **`ppu.xScroll` is not the court's scroll.** It reads 0–7 through the whole pan
+  while `$C3/$C4` goes 128→154. `judder.py` uses the game's own camera variable,
+  which both sides dump in RAM, and never touches this column.
+- **Do not correlate pictures.** Comparing consecutive frames by column-SAD
+  locks onto the flat regions of the court and reports shifts that contradict
+  the `scr` trace.
+
+Also note the two sides are **not** in the same game for the whole run: cameras
+agree at frame 600 and diverge by 650 (the known RNG divergence), so the usable
+window is 597–618.
 
 ### Recorded playthroughs, and the three-way vocabulary
 

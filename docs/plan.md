@@ -1,6 +1,6 @@
 # Super Dodgeball NES Recompilation — Project Plan
 
-> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). PPU overclocking **shipped** (opt-in mod; deliberately changes timing). Widescreen **shipped** (opt-in mod, 16:9 / 21:9 / 32:9), and its margins now carry sprites as well as court. Margin sprites found by a *played* session rather than a script — `--record-input` + `tools/play_record.sh` (item 4, research §26). Two open questions left unattributed: sprite judder while the camera pans (open item 12, research §27), and the Bean Ball sprite-list degeneration (open item 14). Frontier: full-movie TAS vectors (level-switch screens).
+> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). PPU overclocking **shipped** (opt-in mod; deliberately changes timing). Widescreen **shipped** (opt-in mod, 16:9 / 21:9 / 32:9), and its margins now carry sprites as well as court. Margin sprites found by a *played* session rather than a script — `--record-input` + `tools/play_record.sh` (item 4, research §26). The sprite judder while the camera pans is **resolved and it is the game's** — MesenCE reproduces the same two-frame offset, so nothing here is broken (item 12, research §27). **One** open question left unattributed: the Bean Ball sprite-list degeneration (item 14). Frontier: full-movie TAS vectors (level-switch screens).
 
 ## Where Things Stand
 
@@ -43,19 +43,18 @@
 
 11. **Flicker follow-ups** (not blocking): the mod draws sprites with no scanline evaluation at all, so it also drops the NES 8-per-scanline rule — real hardware behaviour some may want kept, which would be an `[[option]]` on the same feature rather than a second package. The blit also ignores OAM attribute bit 5 (behind-background priority); this ROM never sets it, but a future change would need the coverage buffer.
 
-12. **Sprite judder while the camera pans** (research §27, **open, not yet attributed**). Visible in the **stock** picture, no mods: a player holds still for several frames then jumps, and the jump is not the same size as the court's, so he detaches from the floor and snaps back. Measured as the sprite stepping and the scroll stepping **2 frames apart**, both in 6-7 px increments, so `OAM X + scroll` alternates between 200 and 207 — half a character of relative error. Ruled out: a mid-frame scroll split (the per-line scroll is identical at rows 60/120/160/200/239), a stale OAM buffer in the renderer (`cyc_render_sprites` reads `ppu.oam` live), and dropped fine scroll (the scroll never takes a value between its steps). **Not established: whether the game writes `$2005` and OAM two frames apart or this engine adds the latency** — that decides whether there is anything to fix at all. The oracle answers it and is ready to run:
+12. ~~**Sprite judder while the camera pans**~~ — **RESOLVED, and it is the game's.** (research §27.) Visible in the **stock** picture, no mods: a player holds still for several frames then jumps, and the jump is not the same size as the court's, so he detaches from the floor and snaps back. The metric is `world_x = OAM X + $C3/$C4` for the player sprite (OAM y=143, tile `$20`): the player walks left one 6-7 px step and the camera walks right one 6-7 px step, so if the game did both on the same frame they would cancel and `world_x` would be constant. Measured, with the oracle run and one command:
 
-    ```bash
-    python3 tools/tas/input_to_tas.py tas/vectors/sdb_bar.input \
-        --out tas/vectors/sdb_bar.tas.json --frames 700
-    python3 tools/tas/run_tas.py --tas tas/vectors/sdb_bar.tas.json \
-        --frames 700 --out tas/runs/bar700        # AGENTS.md: ask before running TAS
-    ```
+    | | camera steps | sprite steps | N | world_x base | blips |
+    |---|---|---|---|---|---|
+    | cycle backend | 601, 608, 615, 622 | 603, 610, 617, 624 | **2, 2, 2, 2** | 207 | 15/34 |
+    | MesenCE 2.2.1 | 603, 610, 617 | 605, 612 | **2, 2** | 207 | 6/20 |
 
-    Same cadence as the court appears at frame 412 but the input window only opens at **594**, and a left tap starts the run at **617** — input aimed earlier is silently dropped, which is why `tas/vectors/sdb_bar.input` exists and why two earlier attempts at this repro did nothing.
+    Same N, same base, same blip. **A second, independent emulator reproduces it exactly, so the two-frame offset is the game's own cadence and nothing here is broken.** Nothing to fix upstream and nothing to fix in a mod; §27 keeps the reasoning, and `tools/tas/judder.py` re-derives it in one command so nobody re-chases it.
 
-    **Deliberately not a mod.** A presentation mod cannot reach it: the judder is in the machine's own 256-column picture, which the compositor must reproduce faithfully, and smoothing it would break the 0-pixel gate from §25/§26. If the oracle says it is ours, it goes upstream in the PPU model as a patch beside `patches/006`; if it says the game's, it is recorded and closed.
+    Two traps that cost most of the time, both recorded in §27. The harness had **never** been logging scroll — five of `mesen_tas.lua`'s state columns are `null` because the keys are namespaced (`ppu.xScroll`, not `ScrollX`), which is exactly what research §16 warns about; fixed in `7cfa35a`. And with the key fixed, **`ppu.xScroll` is still not the court's scroll** — it reads 0-7 through the whole pan while `$C3/$C4` goes 128→154, so treating it as the scroll gives a confidently wrong answer. The metric avoids both by using the game's own camera variable, which both sides already dump in RAM. Do not measure this by correlating pictures either: a column-SAD over the flat court locks onto the wrong feature.
 
+    The sides agree at frame 600 (camera 134 on both) and diverge by 650, which is the known RNG divergence — so the usable window is 597-618, not the whole pan.
 14. **Bean Ball: the flicker mod's sprite list degenerates while running across the full map** (research §26, **OPEN — shelved at the owner's request, not closed**). Everything needed to resume is below, including what the owner said in their own words and how to get the capture again without referring to any scratch folder.
 
     ### How it presents, from the owner's description
