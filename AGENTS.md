@@ -555,10 +555,15 @@ line means the capture is off, not that there is nothing to capture.**
 5. **They actually fire** — `off-edge` must be non-zero (3951 over 1200 sweep frames
    with the flicker mod on) and `drawn` must follow it (**33726**; **104519** over 3000
    `sdb_throw` frames). A callback count of 4150 with `off-edge` at 0 means the CRC
-   key is wrong. The two `drawn` figures were re-baselined 2026-10-13 against this
-   binary; the previous 33855 / 104240 did not reproduce and moved in *opposite*
-   directions, while `off-edge` 3951 reproduced exactly, so the drift is on the
-   presentation side only.
+   key is wrong. **33726** and **104519**, re-baselined 2026-10-13.
+   The previous sweep figure of 33855 is *explained*: it is what `drawn` was
+   before research §26's `sdb_oam_has()` ghost fix, and that fix rejects exactly
+   **129** parts over this vector — 33726 + 129 = 33855, no residue. The
+   previous throw figure of 104240 is **not** explained: it is 279 *below* what
+   this binary produces while that vector's ghost count is only 93, and no
+   configuration reproduces it (aspect, overscan, flicker mod and vector length
+   all ruled out — `off-edge` pins throw to flicker-on + overscan at 3237).
+   Treat 104240 as stale and do not expect it back.
 6. **`peak` and `backstop`** — peak around 64 and backstop **0**. `SDB_MARGIN_PARTS`
    is 24, not 8: objects 9 and 11 legitimately emit more than a character's eight, and
    at 8 they lost sprites on 15 frames per 3000. Any non-zero backstop count means

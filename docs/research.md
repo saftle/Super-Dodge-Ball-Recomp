@@ -2011,10 +2011,8 @@ report. `margin_track.py`'s `ghost` check exists to catch exactly it.
   sweep and the pan vector.
 - **Stress vector** (`sdb_throw`, 3000 frames, 16:9 + overscan, flicker on):
   **104519 margin sprites drawn, peak 64, 0 backstop trips**, 0 part-limit
-  warnings. Re-baselined 2026-10-13: the previously recorded 104240 did not
-  reproduce on this binary, and the sweep figure moved the other way (33855 →
-  33726) while `off-edge` reproduced exactly at 3951 — so the drift is in the
-  presentation count, not the capture. `SDB_MARGIN_PARTS`
+  warnings. Re-baselined 2026-10-13: the previously recorded 104240 does not
+  reproduce on this binary and is **not explained** — see below. `SDB_MARGIN_PARTS`
   is 24, not 8: objects 9 and 11 legitimately emit more than a character's eight,
   and at 8 they were losing sprites on 15 frames per 3000.
 - Arms from the manifest (`state.toml`, `widescreen` ticked; margin sprites are
@@ -2126,6 +2124,50 @@ Measured, same vector:
 `drawn` 26795 → 26555 over 1180 frames. Object 10 is unaffected, so a sprite the
 game *did* emit and the hardware hid is still completed, which is the whole
 point of the feature.
+
+### The `drawn` re-baseline: one figure explained, one not
+
+`SDB_TRACE_JSON` makes this decidable rather than a matter of opinion, because
+it reports the *outcome of every part* rather than only a total. Over the
+1200-frame `sdb_sweep` vector at 16:9 + overscan:
+
+| outcome | count |
+|---|---|
+| drawn | 32281 |
+| machine (the machine owns those columns) | 6916 |
+| ghost (in the revealed band, no OAM entry behind it) | **129** |
+| clip | 0 |
+| oob | 1405 |
+
+**The sweep figure is fully explained.** The previously documented `33855` is
+exactly what `drawn` was *before* the `sdb_oam_has()` ghost filter existed: the
+run's own counter reports 33726, and 33726 + 129 = **33855** with no residue.
+That is the signature of a figure captured one fix earlier in this section, and
+the fix is the seventh bug above — which removes parts from `drawn` by
+construction. So it is not drift and not a regression; it is a stale measurement.
+
+**The throw figure is not explained.** The previously documented `104240` is
+*below* what this binary produces (104519) while that vector's ghost count is
+only 93, so the ghost filter cannot account for it in that direction. Every
+configuration axis available was ruled out:
+
+| axis | result |
+|---|---|
+| aspect 16:9 / 21:9 / 32:9 | `drawn` identical (33726 at all three) |
+| overscan | 32108 without — and `off-edge` 3665 ≠ the documented 3951 |
+| character-flicker mod off | 33538, `off-edge` 3791 ≠ 3951 |
+| vector length, `--present-every` | ruled out; `off-edge` pins both vectors to flicker-on + overscan |
+
+`off-edge` reproducing **exactly** on both vectors (3951 and 3237) is what makes
+this tractable at all: the capture side is bit-identical, so the discrepancy is
+entirely in the presentation count and is not RNG divergence. The throw figure is
+recorded as stale; `AGENTS.md` gate 5 says not to expect it back.
+
+One methodological note: `--present-every` throttles **presenting**, not just
+screenshotting. At `--present-every 200` the compositor ran about six times in
+1200 frames and `drawn` read 167 instead of 33726 — so `drawn` is only comparable
+at stride 1, and a figure taken at another stride is meaningless rather than
+merely different.
 
 ### Recording a playthrough: `--record-input`, and why it is not optional
 
