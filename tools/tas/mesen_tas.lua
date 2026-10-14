@@ -78,6 +78,26 @@ local function js(v)
   return string.format("%q", tostring(v))
 end
 
+-- State keys are NAMESPACED and vary by build (research.md 16: "key names vary
+-- by build -- enumerate, never hardcode"). MesenCE 2.2.1 exposes
+-- ppu.xScroll / ppu.videoRamAddr / ppu.tmpVideoRamAddr / ppu.writeToggle, and
+-- the bare ScrollX / VideoRamAddr / TmpVideoRamAddr / WriteToggle names this
+-- script used before return nil -- so every one of those five columns has been
+-- logging a bare `null` since the harness was written. Enumerated by dumping
+-- emu.getState() on this build (308 keys).
+--
+-- There is no ppu.yScroll, so scrollY has no source at all and stays null; it
+-- is kept in the line so the schema does not change under downstream readers.
+--
+-- Probe a list rather than pick one, so a different build still finds its key.
+local function pick(st, ...)
+  for i = 1, select("#", ...) do
+    local v = st[select(i, ...)]
+    if v ~= nil then return v end
+  end
+  return nil
+end
+
 emu.addEventCallback(function()
   local idx = frame
   -- cheap per-frame state line (always)
@@ -91,9 +111,13 @@ emu.addEventCallback(function()
     idx, nmiCount, regs.pc or 0, regs.a or 0, regs.x or 0, regs.y or 0, regs.sp or 0,
     rb(0x0100, emu.memType.nesInternalRam), rb(0x0106, emu.memType.nesInternalRam),
     rb(0x0107, emu.memType.nesInternalRam), rb(0x0168, emu.memType.nesInternalRam),
-    js(st.ScrollX), js(st.ScrollY), js(st.VideoRamAddr),
-    js(st.TmpVideoRamAddr), js(st.WriteToggle),
-    js(st.Cycle or st.cycle), js(emu.getMasterClock and emu.getMasterClock() or 0), m))
+    js(pick(st, "ppu.xScroll", "ScrollX")),
+    js(pick(st, "ppu.yScroll", "ScrollY")),
+    js(pick(st, "ppu.videoRamAddr", "VideoRamAddr")),
+    js(pick(st, "ppu.tmpVideoRamAddr", "TmpVideoRamAddr")),
+    js(pick(st, "ppu.writeToggle", "WriteToggle")),
+    js(pick(st, "ppu.cycle", "Cycle", "cycle")),
+    js(emu.getMasterClock and emu.getMasterClock() or 0), m))
   -- heavy dumps at stride (PPM chosen deliberately: raw P6, no encoder needed)
   if (idx % SHOT_STRIDE) == 0 then
     local tag = string.format("%s/mesen_%05d", OUT, idx)
