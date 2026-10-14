@@ -231,8 +231,14 @@ fi
 # a COMMENT ("# 200 frames, 41 input steps"), so do not anchor on ^ -- that
 # matches nothing, `set -e` then kills the script silently right here, and the
 # run looks like it worked with no summary.
-REC_FRAMES=$(grep -oE '[0-9]+ frames' "$OUT/repro.input" | tail -1 | grep -oE '^[0-9]+' || true)
-REC_STEPS=$(grep -oE '[0-9]+ input steps' "$OUT/repro.input" | tail -1 | grep -oE '^[0-9]+' || true)
+#
+# Anchor on `^# ` plus a DIGIT, and take the FIRST match, not the last. The
+# script appends a long comment block below this that contains the phrase in
+# prose ("769 vs 752 frames composed"), so an unanchored `tail -1` reads THAT
+# number and replays the wrong length. Measured: a 287-frame capture replayed
+# 752 frames. `^# [0-9]+ frames` matches only the destructor's trailer.
+REC_FRAMES=$(grep -oE '^# [0-9]+ frames' "$OUT/repro.input" | head -1 | grep -oE '[0-9]+' || true)
+REC_STEPS=$(grep -oE '^# [0-9]+ frames, [0-9]+ input steps' "$OUT/repro.input" | head -1 | grep -oE '[0-9]+ input' | grep -oE '^[0-9]+' || true)
 : "${REC_FRAMES:=$FRAMES}"
 : "${REC_STEPS:=?}"
 
