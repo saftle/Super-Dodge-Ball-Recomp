@@ -332,6 +332,16 @@ REC_STEPS=$(grep -oE '^# [0-9]+ frames, [0-9]+ input steps' "$OUT/repro.input" |
 WS_FLAG=""
 if [ "$WS_ON" = "true" ]; then WS_FLAG="--widescreen $ASPECT"; fi
 
+# The overclock has to reach the replay, not just widescreen. The printed
+# command used to carry only --widescreen, so a replay of an overclocked capture
+# silently dropped --ppu-overclock -- and the overclock changes the guest's
+# timing, so the replay would not even reach the same game state. Built from the
+# same SDB_MODS the run used, so it cannot drift apart from it.
+EXTRA_FLAG=""
+if [ "${ON[ppu-overclock]:-false}" = "true" ]; then
+    EXTRA_FLAG="$EXTRA_FLAG --ppu-overclock $SCANLINES"
+fi
+
 cat >> "$OUT/repro.input" <<EOF
 #
 # --- replay (what this capture was) ---
@@ -339,7 +349,7 @@ cat >> "$OUT/repro.input" <<EOF
 #
 #   cd "$PWD" && SDB_TRACE=1 ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" \\
 #       --frames $REC_FRAMES --input $OUT/repro.input --ram-init zeros \\
-#       --mods-root $OUT/mods $WS_FLAG \\
+#       --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG \\
 #       --present-out $OUT/r_ --present-every 1
 #
 # MEASURED 2026-10-13, and do not assume it: this replay is NOT byte-faithful to
@@ -365,5 +375,5 @@ echo
 echo "Replay it with:"
 echo "  SDB_TRACE=1 ./build-cycle/nes_game \"$ROM\" \\"
 echo "      --frames $REC_FRAMES --input $OUT/repro.input --ram-init zeros \\"
-echo "      --mods-root $OUT/mods $WS_FLAG \\"
+echo "      --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG \\"
 echo "      --present-out $OUT/r_ --present-every 1 2> $OUT/replay.log"

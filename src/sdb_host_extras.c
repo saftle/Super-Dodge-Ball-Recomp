@@ -975,8 +975,18 @@ static void sdb_blit(const SdbSprite *s, uint32_t *out, int width, int height, i
     int tall = cyc_render_line_sprite16(ly);
     uint16_t table = cyc_render_line_sprite_table(ly);
     int rows = tall ? 16 : 8;
-    /* Behind-background priority: SDB does not use OAM attr bit 5 (measured over
-     * a full match), so there is no coverage buffer to consult. */
+    /* BEHIND-BACKGROUND PRIORITY, attr bit 5. This was previously a comment
+     * claiming Super Dodge Ball does not use it, "measured over a full match".
+     * That measurement was wrong: OAM slot 0 carries attr $23 -- bit 5 set --
+     * and blitting it unconditionally painted 3 pixels a frame the machine leaves
+     * showing background through (126 px over 70 sweep frames, all in rows 46-47 /
+     * columns 338-339). Resolved the way cyc_render_sprites resolves it
+     * (cyc_render.c:154), against the engine's own per-pixel background coverage.
+     * `px - x0` is the native column, because x0 is where native column 0 sits
+     * on this canvas. Outside the native 256 there is no captured coverage to
+     * test; this function is never called for a margin column (sdb_margin_blit
+     * is), so an out-of-range column here can only be the canvas edge. */
+    const uint8_t *opq = (attr & 0x20) ? cyc_frame_bg_opaque() : NULL;
     for (int r = 0; r < rows; ++r) {
         int py = y + r;
         if (py < 0 || py >= height || py >= 240) continue;
@@ -994,6 +1004,10 @@ static void sdb_blit(const SdbSprite *s, uint32_t *out, int width, int height, i
             int bit = (attr & 0x40) ? c : 7 - c;
             int v = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
             if (!v) continue;
+            if (opq) {
+                int nx = px - x0;
+                if (nx >= 0 && nx < 256 && opq[(size_t)py * 256 + nx]) continue;
+            }
             out[(size_t)py * (size_t)width + (size_t)px] =
                 cyc_render_color(16 + (int)(attr & 3) * 4 + v);
         }
@@ -1503,11 +1517,25 @@ static void sdb_frame_begin(void *ctx)
          * `scr` is `cyc_render_line_scroll_x`, what the PPU latched. They should
          * agree, and the gap between them is the machine's own sprite/bg
          * misalignment for this frame -- which is the visual judder when it is
-         * not zero. See the draw site's note on which one the margin uses. */
-        if (s_ws_aspect != NES_VIDEO_STOCK || s_trace)
-            fprintf(stderr, "sdbc %ld scr=%d cam=%d\n", s_frame,
-                    cyc_render_line_scroll_x(160),
-                    (int)(cyc_mod_peek(SDB_CAM_LO) | (cyc_mod_peek(SDB_CAM_HI) << 8)));
+         * not zero. See the draw site's note on which one the margin uses.
+         *
+         * `sxs` samples the same call at rows 0, 46 and 47, and `band` is the
+         * first and last row scrolling at row 160's value. Mid-match this reads
+         * `sxs=0,0,0 band=48-239`: the game holds its skyline/scoreboard band
+         * still with a real mid-frame scroll split at row 48, and the engine
+         * reports it per row. (An earlier ruling in research 27 said there was
+         * no split, sampled at rows 60-239 -- all inside the lower band.) Never
+         * hardcode 48; the band is measured so it survives a different course. */
+        if (s_ws_aspect != NES_VIDEO_STOCK || s_trace) {
+            int court = cyc_render_line_scroll_x(160), lo = -1, hi = -1;
+            for (int y = 0; y < 240; y++)
+                if (cyc_render_line_scroll_x(y) == court) { if (lo < 0) lo = y; hi = y; }
+            fprintf(stderr, "sdbc %ld scr=%d cam=%d sxs=%d,%d,%d band=%d-%d\n",
+                    s_frame, court,
+                    (int)(cyc_mod_peek(SDB_CAM_LO) | (cyc_mod_peek(SDB_CAM_HI) << 8)),
+                    cyc_render_line_scroll_x(0), cyc_render_line_scroll_x(46),
+                    cyc_render_line_scroll_x(47), lo, hi);
+        }
     }
     s_frame++;
     s_cap_run = s_captured ? s_cap_run + 1 : 0;
@@ -1526,8 +1554,17 @@ static void sdb_power_on(void *ctx)
     cyc_render_capture_background(true);
     /* Re-apply the requested CPU-budget enhancement: cyc_power_on() cleared
      * hw_extra_timing after the mod activated. 0 is the stock default, so with
-     * the feature off this changes nothing. */
-    cyc_set_extra_scanlines((unsigned)s_oc_lines);
+     * the feature off this changes nothing. It is also where a value the launcher
+     * could not apply BEFORE the cart existed actually lands -- see
+     * sdb_oc_apply -- so this reports instead of assuming. */
+    if (s_oc_lines) {
+        if (cyc_set_extra_scanlines((unsigned)s_oc_lines))
+            fprintf(stderr, "ppu-overclock: %d extra scanlines before NMI (applied)\n",
+                    s_oc_lines);
+        else
+            fprintf(stderr, "ppu-overclock: still refused %d extra scanlines after "
+                            "power-on; running at stock timing\n", s_oc_lines);
+    }
     s_build_count = 0;
     s_done_count = 0;
     s_overflow = 0;
@@ -2544,7 +2581,15 @@ static void sdb_oc_apply(int lines)
     if (lines > SDB_OC_MAX) lines = SDB_OC_MAX;
     s_oc_lines = lines;
     if (!cyc_set_extra_scanlines((unsigned)lines))
-        fprintf(stderr, "ppu-overclock: backend refused %d extra scanlines\n", lines);
+        /* Not an error, and saying so was the bug. cyc_extra_scanlines_supported()
+         * reads the cart's mapper, and the launcher enables features BEFORE the
+         * ROM is attached, so at this point the mapper is still 0 and the gate
+         * says no. power_on() re-applies s_oc_lines once the cart exists and it
+         * succeeds; the old message claimed the backend had refused a setting
+         * that was in fact applied, which reads as a broken feature and sends you
+         * looking for a fault in the wrong place. Say what is actually true. */
+        fprintf(stderr, "ppu-overclock: %d extra scanlines queued; the cart is not "
+                        "attached yet, applying at power-on\n", lines);
     else
         fprintf(stderr, "ppu-overclock: %d extra scanlines before NMI%s\n", lines,
                 lines ? "" : " (stock timing)");
