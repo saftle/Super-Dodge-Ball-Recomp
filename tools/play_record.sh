@@ -49,6 +49,13 @@
 #                   provide this trusted plugin") names a PACKAGE, which leaves
 #                   you guessing which of the three features you got wrong.
 #   SDB_ASPECT      aspect for widescreen: 16:9 | 21:9 | 32:9 | stock  (16:9)
+#   SDB_CAMERA      camera for widescreen: follow | locked   (follow)
+#                   locked pins the canvas to the court instead of to the game's
+#                   camera, so the picture does not slide (research.md S28). It is
+#                   written into state.toml alongside the aspect, because a capture
+#                   that cannot be replayed from its own state file is not a
+#                   capture. (The env var alone would work at run time -- the code
+#                   reads it ahead of the option -- but not for the replay.)
 #   SDB_SCANLINES   ppu-overclock scanlines, 0..262   (default 262, the manifest's)
 #   SDB_SHOT_EVERY  PRESENT every N frames               (default 1, which is only
 #                   affordable because the scale is pinned -- see the measured
@@ -82,7 +89,19 @@ fi
 FRAMES="${2:-${SDB_FRAMES:-2000}}"
 UNLIMITED="${SDB_UNLIMITED:-0}"
 ASPECT="${SDB_ASPECT:-16:9}"
+CAMERA="${SDB_CAMERA:-follow}"
 SCANLINES="${SDB_SCANLINES:-262}"
+
+case "$CAMERA" in
+    follow|locked) ;;
+    '')
+        echo "play_record: SDB_CAMERA is empty; use follow or locked." >&2
+        exit 2 ;;
+    *)
+        echo "play_record: SDB_CAMERA=$CAMERA is not a camera." >&2
+        echo "             valid: follow, locked" >&2
+        exit 2 ;;
+esac
 
 # Every feature the catalog ships, in catalog order. Written out rather than
 # scraped from the manifests so a typo in SDB_MODS fails here with a usable
@@ -221,6 +240,7 @@ cp -r build-cycle/mods "$OUT/mods"
                     echo
                     echo "[feature.values]"
                     echo "aspect = \"$ASPECT\""
+                    echo "camera = \"$CAMERA\""
                 fi ;;
             ppu-overclock)
                 if [ -n "${ON[$f]:-}" ]; then
@@ -255,7 +275,10 @@ else
 fi
 # An `&&` on its own line would abort the script under `set -e` when false, so
 # this is an `if`.
-if [ "$WS_ON" = "true" ]; then echo "    aspect: $ASPECT"; fi
+if [ "$WS_ON" = "true" ]; then
+    echo "    aspect: $ASPECT"
+    echo "    camera: $CAMERA"
+fi
 echo "    vector  -> $OUT/repro.input"
 echo "    trace   -> $OUT/trace.log"
 echo "    shots   -> $OUT/w_<frame>.png (every $SHOT_EVERY)"

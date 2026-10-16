@@ -3061,3 +3061,267 @@ cadence — the game rebuilds a list over two frames and then leaves OAM alone �
 but they are different symptoms, different measurements, and a fix for one says
 nothing about the other. §2's fix is opt-in because it changes the guest; this
 one cannot be changed by a mod at all.
+---
+
+## 28. The camera anchor: the court is 440 columns and the panning buys nothing
+
+*2026-10-15. `widescreen`'s `camera = locked` option, `tools/widescreen/anchor_gate.py`.*
+
+### The claim that started it
+
+The margin bound from §25 (`60b94e7`) is not only a stopping rule for the
+reconstruction. It is also a statement about the *game*: the camera is clamped to
+`[$28, $E0]` = `[40, 224]` and the viewport is 256 wide, so the world the machine
+can ever display is `[40, 480)` — **440 columns** — and the game's own viewport
+slides 184 columns of it.
+
+That makes "show the whole court and stop panning" answerable from two immediate
+operands, with no per-level detection and no measurement of the art. Which is
+what §25's first attempt got wrong: the end wall's appearance is not a fact
+about the game's limits, but the clamp is.
+
+### Why it is worth doing, stated correctly
+
+The first framing — "show more of the court" — is **false at both wide
+aspects**, and it is worth recording because it was the framing that produced the
+overscan and margin-sprite work.
+
+The canvas shows world `[camera - pad, camera + 256 + pad)` with
+`pad = (width - 256) / 2`:
+
+| canvas | pad | court (440) fits? | with the measured camera range |
+|---|---|---|---|
+| 426 (16:9) | 85 | no, 14 short | which end is missing depends on where the ball is |
+| 560 (21:9) | 152 | yes, for camera ≥ 72 | measured range **102..180** — always |
+| 854 (32:9) | 299 | yes, for every camera the clamp allows | always |
+
+Measured on the sweep vector's match (frames 422-760), the camera spans
+**102..180**. So at 21:9 and 32:9 the entire court is **already on screen at
+every camera position play reaches**, today, with no mod at all.
+
+The panning therefore adds motion and no information, and it competes with the
+one thing being tracked. The feature is a *camera policy*, not a wider view: the
+canvas becomes a fixed window on the court and the game pans behind it.
+
+### The rule
+
+```
+s = (SDB_WS_LO + SDB_WS_HI - width) / 2      /* centre the court's own window */
+if (s > court) s = court;                    /* native column 0 on the canvas */
+if (s < court - (width - 256)) s = court - (width - 256);
+x0_court = court - s;                        /* x0_held = native_x0           */
+```
+
+`s` is a function of the **width alone**, recomputed per presented frame, so
+`fit` re-evaluates it on a window resize. The two clamps exist only to keep the
+machine's own 256 columns on the canvas; the first bites during the level intro,
+where `$DBBB` initialises the camera to 0.
+
+Measured anchors, and they are the formula evaluated:
+
+| canvas | `anchor` (world column at canvas column 0) | court at canvas columns |
+|---|---|---|
+| 560 | **-20** | 60..500 — centred, 60 columns of backdrop each side |
+| 854 | **-167** | 207..647 |
+
+### The held band, and why the offset is per row
+
+This game splits its scroll mid-frame. Rows 0-47 hold scroll 0 and carry the
+skyline and the scoreboard; rows 48-239 scroll with the camera:
+
+```
+sdbc 601 scr=134 cam=134 sxs=0,0,0 band=48-239
+```
+
+(`sxs` samples rows 0, 46 and 47; measured on the sweep vector mid-pan.)
+
+So anchoring the whole canvas on the court **slides the HUD 6-7 px every time
+the camera steps** — a new artefact, introduced by the thing meant to remove
+one. The held rows are not world content: the game pins them in screen space,
+which is why `native_x0` has always been the right place for them. Hence two
+offsets, and the band is decided per row by measurement
+(`cyc_render_line_scroll_x(y) == s_ws_court`), never by hardcoding 48.
+
+No margin sprite has been observed in the held band — 3333 parts over 81
+captured frames of a pan, rows 102..217 — so this only decides background rows
+and the native block's placement. It is per row anyway so that a row's scroll
+and its offset are always read together and cannot disagree, which is the
+"basis split" §26 records as a character drawn at a sixteenth of his width.
+
+### `cyc_render_set_native_origin` is what this was for
+
+`cyc_render.h`: *"Called by a compositor that placed the native picture somewhere
+other than the native_x0 it was given (a camera anchored at an area's edge)."*
+Nothing in the tree used it. The flicker mod's wide path reads it
+(`cyc_render_native_origin`) to place its own sprite list, so declaring it is
+what keeps the two sprite sources together when the block is not centred.
+
+### What is measured
+
+All on the sweep vector, `--ram-init zeros`, `--present-out --present-every 1`
+(the compositor only runs on a presented frame; a stride above 1 skips it and
+every count below is meaningless).
+
+| claim | 32:9 | 21:9 |
+|---|---|---|
+| distinct anchor values over 339 frames | **1** (`-167`) | **1** (`-20`) |
+| frames with the court off its own picture | 0 | 0 |
+| machine's own 256 columns vs the same stock frame, at each run's own anchor | **339/339 identical** | **339/339 identical** |
+
+And over 1800 frames of `sdb_throw` at 21:9 — team-select, roster, innings,
+level transitions: **1752 anchored frames, one anchor value, 0 frames with the
+court off canvas, seam diff 0 px, margin backstop 0, peak 63.**
+
+**Follow mode changed nothing of its own**: 701 of 701 presented frames
+byte-identical to the pre-change build, and every counter (`composed 652,
+pillarboxed 1, diff 1, off-edge 1458, drawn 9372, peak 48`). That is why `locked`
+defaults off and why the option exists rather than the behaviour replacing it.
+(Follow mode *does* differ from the pre-change build now — see the reveal fix
+below, which is a deliberate behaviour change and not the anchor's.)
+
+**The `drawn` and `off-edge` baselines do NOT move with the camera.** Locked and
+following read **12507** and **1795** — to the byte, at both aspects, with
+`peak 59, backstop 0` — which is the right answer and was not the prediction:
+both counters count sprites outside the *machine's* run, and the run is defined
+relative to the block, which the anchor moves but does not resize. Every earlier
+statement that the anchor would re-baseline these was wrong.
+
+(The 12507/1795 figures include the reveal, which is now on by default — see
+below. With `SDB_OVERSCAN=0` they read 9372 and 1458 at 700 frames.)
+
+### Four things this cost, recorded because they are reusable
+
+1. **The anchor record belongs to presented file `f-1`, not `f`.** The presented
+   index runs one ahead of the trace's frame counter (AGENTS.md). Pairing them
+   the wrong way round reports **26 failures, every one of them a
+   camera-stepping frame**, and each looks exactly like a 7-pixel placement bug.
+   It is only visible when the scroll *changes*, because on every other frame a
+   one-frame offset compares two identical pictures. Scanning the canvas for the
+   block's real position settles it: file 596's block is where anchor **597**
+   says it is. This one nearly became a "the camera is misregistered by a camera
+   step" conclusion.
+2. **Do not compare one run's pixels to another's.** The obvious form of claim 2
+   — locked canvas == follow canvas translated — is true and was measured
+   directly (0 of 76,970 court pixels differ at the predicted shift at frame
+   605, ~40% at every other shift), but as a *gate* it is not well posed: it
+   needs both runs' presented indices to agree and they do not reliably. The
+   form that works asks each run the same question of the *same stock frame*
+   using *its own* recorded anchor, which has no alignment assumption at all.
+3. **The shift is per band, not per canvas.** Comparing all 240 rows at the
+   court's shift reports ~910 differing pixels on a healthy run, every one a
+   held-band pixel read four columns off.
+4. **A probe window is not a fix for an index ambiguity.** The gate's first
+   version probed ±4 and reported placement errors that were not there — the
+   kind of error a reader believes. `tools/widescreen/anchor_gate.py` says so at
+   the constant.
+
+### A pre-existing asymmetry found on the way, and FIXED
+
+`--widescreen` on the command line never enabled the clipped-column reveal:
+`sdb_ws_set_overscan` was called from `sdb_ws_enable` (the mod activation path)
+and **not** from the `--widescreen` option handler in `sdb_option`. So a bare
+`--widescreen 21:9` presented an 8-column black gutter at the block edge — the
+exact artefact widescreen exists to remove, and the reason `overscan` was folded
+into this feature at all — while the same feature through the launcher revealed
+it. AGENTS.md's documented gate command uses `--widescreen`, so its "no black
+gutter" expectation was being measured with the reveal **off**.
+
+Fixed, and the obvious one-line fix was the wrong shape twice:
+
+1. **Stamping the reveal from the `--widescreen` handler** makes the two flags
+   order-dependent: `--overscan 0 --widescreen 21:9` would reveal and
+   `--widescreen 21:9 --overscan 0` would not. `--overscan` is a bare flag and
+   cannot carry a default of its own, so the default has to be *asked for*
+   rather than pushed.
+2. **Putting the `SDB_OVERSCAN` read in the activation plugin** regresses the
+   documented A/B on the CLI path, because the plugin does not run there:
+   measured **280 of 701 frames differing** between `SDB_OVERSCAN=0 --widescreen
+   21:9` and the same with `--mods-root`. Same class of bug as the one being
+   fixed — two paths to one feature answering differently.
+
+So the reveal now has **one** resolver, `sdb_ws_reveal_ask`, consulted by
+`sdb_ws_apply`: an explicit `--overscan`, then `SDB_OVERSCAN`, then widescreen's
+own default of revealing. Stock width resolves to 0 (no compositor owns those
+columns). Five measurements, 700 frames of the sweep at 21:9:
+
+| comparison | frames differing |
+|---|---|
+| CLI vs the launcher path (**the bug**) | **0 of 701** |
+| `SDB_OVERSCAN=0`, CLI vs launcher (the regression) | **0 of 701** |
+| reveal default vs `SDB_OVERSCAN=0` (the A/B must still bite) | 280 of 701 |
+| `--overscan --widescreen` vs `--widescreen --overscan` | **0 of 701** |
+| `SDB_OVERSCAN=0` vs explicit `--overscan` (must differ) | 280 of 701 |
+
+Every one of those is a *comparison*, not a single file, which is the point:
+three of the five are 0 and two are non-zero, so the instrument distinguishes
+"the paths agree" from "the switch still works". The camera lock was re-gated
+after the change, at both aspects, with `--reveal`: still 339/339.
+
+### What is NOT established
+
+- **How it looks in play.** Every measurement here is scripted. AGENTS.md's
+  standing rule — a played session is the only way to find the band bugs —
+  applies with full force, because a locked camera turns the margin from "where
+  the camera happens to be looking" into "where the players are, all the time".
+  Every one of §26's eleven margin bugs gets a larger audience.
+- **Bean Ball.** Its world is not the 512-px stadium, and the margin is already
+  black there. Whether the anchor helps, does nothing, or exposes something new
+  is unmeasured. It needs a window (`SDB_CAMERA` / the option), not a headless
+  replay — see plan item 14.
+
+### Two bugs PLAY found and a scripted run never could
+
+Both were found by playing it, in one session, and both are the anchor's. They
+are recorded here because the first is the more interesting lesson: **the anchor
+was never only the compositor's business.**
+
+**1. The health bars and player names slid left and right with the camera.** Not
+the whole picture — the court sat still, which is the point — but rows 0-47, the
+skyline band, drifted 6-7 px per camera step.
+
+Measured, not inferred: at sweep frame 649, where the court's band sits 48 columns
+from the held band's slot, the flicker-mod-on run's rows 0-48 are the
+flicker-mod-off run's rows 0-48 shifted **exactly +48**, with the court band
+aligning at 0. The compositor places the machine's picture at *two* offsets, and
+`sdb_present` — the flicker mod's own presentation path, which runs earlier in
+the file and had no idea — stamped all 240 rows at the single
+`cyc_render_native_origin` returns. So every sprite redraw dragged the HUD with
+it.
+
+It took a played session to find because **every scripted check in this project
+runs with the flicker mod off**, and with it off the wide path returns the
+compositor's canvas untouched: `redraw` is false and `sdb_present` copies
+straight through. 701/701 byte-identical frames, two clean aspect gates, and a
+339/339 block comparison — none of them touch the code that was broken. The
+combination is the bug, and no single-mod gate can see it.
+
+**2. Every menu rendered 132 columns left of centre.** A title screen or a menu
+is not world content: nothing tells the PPU to scroll, so `cyc_render_line_scroll_x`
+reads 0, the anchor still engaged, and the block went to canvas column 20 where
+the engine had centred it at 152. Measured across frames 12-140 — every one of
+them `scroll 0, x0 20, xh 152`.
+
+The court's window does not describe a menu, and the game's own clamp is the
+test: `[SDB_WS_CAM_MIN, SDB_WS_CAM_MAX]` is `[40, 224]`, the camera cannot leave
+it during play, so "is this a court frame?" is answered for free and costs
+nothing where it matters. It also catches the locked intro camera that `$DBBB`
+sets to 0 for ~204 frames at the start of a course — which the bound's own comment
+had already called "a cosmetic cost for a locked intro camera, and the right way
+round" without noticing the picture itself was 132 columns off.
+
+**A third path, caught by reasoning rather than by playing**, and it would have
+been worse than either: when the compositor *declines* a frame (no background
+capture, or a seam-check failure) the host pillarboxes at the **centred** column,
+and the anchor state was still saying `x0_court`. `sdb_present` would have
+stamped the flicker redraw a camera step from where the host drew the picture —
+on exactly the frame-0 and scene-change frames a player notices. Every `return 0`
+in `sdb_ws_composite` now calls `sdb_ws_deanchor()` first.
+
+**What the gate says now.** `anchor_gate.py` reads a per-frame `here` flag from
+the anchor JSON and treats the two regimes separately: frames the anchor engaged
+on must share one anchor, and frames it declined must have `x0 == xh` — which is
+the menu fix, stated as a check. A run that examined menus and reported several
+anchor values would not be movement, and the gate no longer reports it as such.
+Follow mode has exactly one `(x0, xh)` pair per aspect (`152/152`, `299/299`),
+which is the proof that the per-row helper is a no-op there and stock is
+untouched.

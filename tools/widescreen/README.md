@@ -351,7 +351,89 @@ It reports **data that looks like an opcode as well as code** — a linear sweep
 cannot tell them apart, and the output is a list of candidates to disassemble,
 not a list of answers. Confirm every hit with `dis65.py`.
 
+## `anchor_gate.py` — did the camera lock hold still, and change nothing?
+
+For `widescreen`'s `camera = locked` option (research §28). Three claims:
+
+1. **The view does not move.** `anchor` is the world column at canvas column 0;
+   locked it is one value for the whole run, derived from the width alone.
+2. **The anchor changes nothing else.** Each run's own machine block is compared
+   against the *same* stock frame using *each run's own* recorded anchor, and the
+   per-frame differences must be identical. The machine's own 256 columns are the
+   strongest thing to check, and this form of the check has no frame-alignment
+   assumption in it.
+3. **The court is on its own picture.** Canvas column 0 holds world `anchor`, so
+   the court's edges are at `40 - anchor` and `480 - anchor`; both must be inside
+   the canvas on every frame.
+
+`--stock` is not optional. `SDB_TRACE_JSON` must be on for the anchor records —
+they are emitted as `{"k":"anchor",...}`, one per composed frame.
+
+```bash
+mkdir -p tmp/anchor
+for m in locked follow; do
+  d=tmp/anchor/$m; mkdir -p $d; extra=""; [ $m = locked ] && extra="--camera locked"
+  SDB_TRACE=1 SDB_TRACE_JSON=400-760 ./build-cycle/nes_game ROM --frames 760 \
+    --input tas/vectors/sdb_sweep.input --ram-init zeros --widescreen 32:9 $extra \
+    --present-out $d/f --present-every 1 >/dev/null 2>$d/trace.log
+done
+mkdir -p tmp/anchor/stock
+SDB_TRACE=1 ./build-cycle/nes_game ROM --frames 760 --input tas/vectors/sdb_sweep.input \
+  --ram-init zeros --present-out tmp/anchor/stock/f --present-every 1 >/dev/null 2>&1
+python3 tools/widescreen/anchor_gate.py --frames tmp/anchor/locked \
+  --trace tmp/anchor/locked/trace.log --follow tmp/anchor/follow \
+  --follow-trace tmp/anchor/follow/trace.log --stock tmp/anchor/stock \
+  --frame-from 421 --expect locked --reveal
+```
+
+**Run it against the follow capture as well. It must FAIL**, on claim 1, with a
+list of anchor values. A gate that only ever passes is not a gate, and claim 1
+is one integer that a broken run would report as a constant.
+
+Baseline: **339/339 frames, one anchor, 0 off-canvas, machine block identical on
+every frame** at both 32:9 and 21:9; 1800 frames of `sdb_throw` give one anchor
+over 1379 anchored frames, the other 373 being menus and pre-court frames left
+centred on purpose.
+
+The gate treats the two regimes separately, using the per-frame `here` flag:
+frames the anchor engaged on must share one anchor, and frames it declined must
+have `x0 == xh`. That second half is the menu check — a title screen or a menu
+has a scroll of 0, which is outside the game's camera window `[40, 224]`, so the
+court bound does not describe it and the anchor stands down. Without the split, a
+run that examines menus would report their centred positions as "the view moved".
+
+### Two traps, both of which produce a failure that is not there
+
+- **The anchor record with `f = N` was written by the compose that produced
+  presented file `N-1`.** Pair it with file `N` and the gate reports 26
+  failures, every one a camera-stepping frame, each looking exactly like a
+  7-pixel placement bug. It is only visible when the scroll *changes*, because
+  otherwise a one-frame offset compares two identical pictures. To settle it,
+  scan the canvas for where the block actually is: file 596's block is where
+  anchor **597** says.
+- **Never compare one run's pixels to another's.** Claim 2 reads as "locked
+  canvas == follow canvas translated", which is true and was measured directly,
+  but it needs both runs' presented indices to agree and they do not reliably.
+  Compare each run to the same stock frame instead.
+- **The flicker mod has to be ON for a compositor gate.** Every scripted widescreen
+  check runs with it off, and with it off the wide path in `sdb_present` copies
+  the compositor's canvas straight through — `redraw` is false and no copy is
+  made. That is how the camera anchor shipped a compositor bug (the HUD sliding,
+  because `sdb_present` stamped all 240 rows at the court's one offset while the
+  compositor places the court and held bands at two) with 701/701 frames
+  byte-identical and two clean aspect gates. Gate the pair.
+
+`--reveal` / `--no-reveal` says whether the run revealed the 8 clipped columns,
+because that changes what the machine's block contains: widescreen leaves them
+reconstructed rather than stamping the machine's picture over them. The reveal is
+**on by default on every path** now (`--widescreen`, the launcher, `--mods-root`),
+so `--reveal` is right for the command above and `--no-reveal` is right for a
+`SDB_OVERSCAN=0` run.
+
 ## Attribution
 
-Written for this project from the `--frame-log` format documented in
-`runner/cyc/cyc_host.c` (`write_frame_log`). No third-party code.
+Written for this project, with no third-party code. `cycframe.py` reads the
+`--frame-log` format documented in `runner/cyc/cyc_host.c` (`write_frame_log`);
+`anchor_gate.py` reads the presented PNGs the host writes and the compositor's own
+JSON trace lines, both of which it documents the shape of inline. Pillow is the
+system package the rest of `tools/` already uses.

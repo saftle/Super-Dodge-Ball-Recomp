@@ -23,7 +23,8 @@ NESRecomp recompiles NES 6502 → native C via a two-part system:
 - **`src/game.toml`**: Recompiler config — display `name` (window title), a `cycle_seed_file`, plus twelve content-keyed `[[mod_function_hook]]` sites: the ten the character-flicker mod hooks, plus two (`$8483`, `$8302`) that read the game's off-screen sprite cull for the widescreen margins. No discovery tuning; the stock ROM needs none.
 - **`src/cycle_seeds.txt`**: Recompiler discovery roots for the sprite emitters. A mod hook site only exists in recompiled code, and `$8040`/`$821E`/`$E32D`/`$966D`/`$A36C` ran on the interpreter — a hook there compiled, bound and never fired. These six lines fix that; total cycle count unchanged.
 - **`src/sdb_host_extras.c`**: Our three mods (`HOST_EXTRAS`), the only game-specific code. **(1) character-flicker**: captures every OAM sprite the game emits and presents them host-side, and overrides the game's own object culling (three gates). The truncation half is presentation only (identical cycle count; only `$02FD`/`$02FF` differ); the culling half is **not** — it makes the guest emit sprites it had dropped. **(2) PPU overclocking** (section 5): picks a value for `cyc_set_extra_scanlines` so the guest gets more CPU time per frame and runs faster; re-applied it from `power_on`, because `cyc_power_on()` zeroes the field after mods activate. **(3) widescreen** (section 4): a compositor that presents 426/560/854 columns, filling the margins from the nametable, CHR and the frame's own scroll, with a per-frame seam check against the machine's own background capture; it also draws the sprites the game placed outside its own viewport (research.md §26), which is part of what widescreen means, not a separate feature. No engine patch needed — the engine already ships the widths and the compositor API. See research.md §25 and §26. (VSync started as a mod here and moved to the launcher's Graphics section — patch 007, research §24.)
-- **`mods/packages/super-dodgeball.widescreen/`**: The widescreen package (manifest-only like the others), carrying ONE off-by-default feature, `widescreen` (with an `aspect` **choice** option — stock / 16:9 / 21:9 / 32:9 / fit). Enabling it also reveals the 8 blank left-hand columns the game hides with PPUMASK and draws the players the game culled off-screen (research.md §26): all three are done by the same compositor, so they are not separable. It used to carry `overscan` as a second feature and was folded in, because the combination the toggle permitted — widescreen on, reveal off — is a wide frame with a black band at its edge, which is the artefact the feature exists to remove. `SDB_OVERSCAN=0` in the environment still forces the clip back for the gate 5 measurement.
+- **`mods/packages/super-dodgeball.widescreen/`**: The widescreen package (manifest-only like the others), carrying ONE off-by-default feature, `widescreen` (with an `aspect` **choice** option — stock / 16:9 / 21:9 / 32:9 / fit — and a `camera` **choice**, follow / locked). Enabling it also reveals the 8 blank left-hand columns the game hides with PPUMASK and draws the players the game culled off-screen (research.md §26): all three are done by the same compositor, so they are not separable. It used to carry `overscan` as a second feature and was folded in, because the combination the toggle permitted — widescreen on, reveal off — is a wide frame with a black band at its edge, which is the artefact the feature exists to remove. `SDB_OVERSCAN=0` in the environment still forces the clip back for the gate 5 measurement.
+- **`camera = locked`** (same feature, §28): the canvas becomes a fixed window on the court instead of one centred on the camera. The court is `[40,480)` = 440 columns and the camera is clamped to `[40,224]`, so at 21:9 and 32:9 the whole court is **already on screen at every camera position play reaches** (measured range 102..180) — the panning adds motion and no information. Presentation only: `$C3/$C4`, OAM and the machine's own 256 columns are untouched, the block is placed elsewhere on the canvas via `cyc_render_set_native_origin` (which exists for exactly this and had no caller). `native_x0` is **per row** because the game splits its scroll mid-frame — rows 0-47 hold scroll 0 and carry the skyline/scoreboard, so anchoring the whole canvas would slide the HUD 6-7 px a step. Gate: `tools/widescreen/anchor_gate.py`.
 - **`mods/packages/super-dodgeball.character-flicker/`**: The mod *package* — a `manifest.toml` only, copied beside the executable at build time. Data-only by design; `.nesmod` archives may not carry native code, so the package is a declaration and the implementation is `src/sdb_host_extras.c`. Off by default, toggleable in the launcher's Mods screen.
 - **`mods/packages/super-dodgeball.ppu-overclock/`**: The PPU-overclocking package (same data-only design). Integer `[[option]]` so the launcher exposes the scanline count. Off by default because it changes console timing. Requires `patches/006_ppu_overclock_mmc1`; without it the backend refuses the setting on our MMC1 cart.
 - **`patches/006_ppu_overclock_mmc1.patch`**: The first active submodule patch — widens `cyc_extra_scanlines_supported()` from MMC3-only to MMC1 too. Strictly additive (consulted only when `extra_scanlines != 0`, so stock timing is unchanged for every game) and on its way upstream.
@@ -103,6 +104,8 @@ Three options (setup.sh uses Option C by default):
 - **PPU overclocking**: `--ppu-overclock <0..262>` (blank scanlines before NMI). Needs `patches/006`; refuses with the backend's MMC3 message otherwise. Deliberately changes timing; 0 is stock. The mod's manifest feature does the same thing for the window.
 - **VSync**: the launcher's Graphics section (needs `patches/007` or the row is absent). Off by default; persisted as `[Display] VSync` in `build-cycle/config.ini`. Presentation only — guest timing untouched.
 - **Widescreen**: `--widescreen stock|16:9|21:9|32:9|fit` (or the Mods screen). Widths come from the engine's `common/nes_video_geometry.h` — 426/560/854 — never hardcode them. Needs no patch.
+- **Camera**: `--camera follow|locked` (or the feature's `camera` option; `SDB_CAMERA=locked` for the headless path). `follow` is stock. `locked` pins the canvas to the court (§28) and does nothing at stock width, where the compositor is never called. **The launcher's option wins whenever the widescreen feature is enabled** — same asymmetry as `--widescreen` itself.
+- **Reveal follows widescreen.** The clipped-column reveal is on by default whenever widescreen is, on **every** path — `--widescreen`, the launcher, `--mods-root`. It used to be set only by `sdb_ws_enable` (the activation plugin), so a bare `--widescreen` presented an 8-column black gutter the launcher did not. One resolver, `sdb_ws_reveal_ask`, consulted by `sdb_ws_apply`, with the precedence **explicit `--overscan` → `SDB_OVERSCAN` → on**; stock width resolves to off. Both obvious shapes of the fix are wrong: stamping it from the `--widescreen` handler makes the flags order-dependent, and reading `SDB_OVERSCAN` in the plugin regresses the A/B on the CLI path (280 of 701 frames). Measured 0/701 CLI-vs-launcher, 280/701 default-vs-`SDB_OVERSCAN=0`. Research §28.
 - **Overscan**: revealed automatically with `widescreen`; there is no separate feature. It has no effect at width 256, because at that width the engine never calls the compositor. `SDB_OVERSCAN=0` in the environment forces the clip back for the headless A/B in gate 5; the launcher cannot turn it off.
 - **Presentation**: `--present-out` saves what the *window* would show — the only path that exercises the character-flicker mod. `--screenshot`/`--frame-log` capture the machine's native frame and ignore it. `--present-every N` sets the **present** interval, not a screenshot interval: the compositor only runs on a presented frame, so `N > 1` skips it and every `drawn`/`composed` count drops accordingly. Measure at `N = 1` (see the stride warning under Known Issues).
 
@@ -565,6 +568,75 @@ Gates:
 7. **Play it** — a scripted run never reaches team-select, the roster screens or the
    innings changes, which are exactly the states the seam gate has to hold through.
 
+### Verifying the camera anchor (`camera = locked`, research §28)
+
+`--camera locked`, the launcher's `camera` option, or `SDB_CAMERA=locked`. Follow is
+stock and the default, so **every baseline above is a follow baseline** — re-run any of
+them and nothing should move.
+
+One command, and it needs three runs (the gate is a comparison, not a single file):
+
+```bash
+python3 tools/widescreen/anchor_gate.py --frames tmp/anchor/locked \
+  --trace tmp/anchor/locked/trace.log --follow tmp/anchor/follow \
+  --follow-trace tmp/anchor/follow/trace.log --stock tmp/anchor/stock \
+  --frame-from 421 --expect locked --reveal
+```
+
+`--reveal` / `--no-reveal` must match the run: the reveal is on by default now,
+so the CLI runs above reveal the 8 clipped columns and `--reveal` is correct. A
+`SDB_OVERSCAN=0` run needs `--no-reveal`.
+
+Gates, all measured on the sweep vector (`--present-every 1`, `SDB_TRACE_JSON` on — the
+anchor records are JSON lines, and without them the tool exits 2 rather than passing):
+
+1. **One anchor value on every frame the anchor engaged on.** `-167` at 32:9, `-20` at
+   21:9. It is a function of the width alone. Baseline: 1 value over 339 match frames; 1
+   over 1379 anchored frames of an 1800-frame `sdb_throw` (the other 373 are menus and
+   pre-court frames, correctly left centred).
+   **Frames the anchor declined must have `x0 == xh`** — that is the menu fix as a check,
+   and it is what catches a title screen rendering left of centre. The gate reports both
+   counts; a run that examines menus and sees several anchor values is not movement.
+2. **The court is on its own picture, every frame.** 0 failures. It goes wrong silently
+   if a clamp is dropped.
+3. **The anchor is not only the compositor's business.** `sdb_present` — the flicker
+   mod's own presentation path, which runs earlier in the file — must use the same per-row
+   offsets, and it originally did not: it stamped all 240 rows at one x0, so rows 0-47
+   (the skyline, the names and the health bars) slid with the camera while the court sat
+   still. **Every scripted gate in this project runs with the flicker mod off**, and with
+   it off the wide path copies the compositor's canvas straight through, so no
+   single-mod gate can see this class at all. Verified fixed: at sweep frame 649, where
+   the two bands are 48 columns apart, the flicker-on run's rows 0-48 now align with the
+   flicker-off run's at **shift 0, 0 bytes differ**; they were shifted exactly +48.
+   **Any new work on the compositor has to be gated with the flicker mod ON as well.**
+4. **The machine's own 256 columns are unchanged**, compared per run against the *same*
+   stock frame using each run's own recorded anchor. Baseline **339/339** at 32:9 and
+   21:9. This is the strictest thing to check and the only one that would catch a
+   placement error.
+5. **Follow mode is unchanged by the camera work** — 701 of 701 presented frames
+   byte-identical to the build before it, and every counter. Not a fresh baseline: if it
+   moves, the *option* changed stock. (Follow mode did change with the reveal fix, below,
+   and that is deliberate.)
+6. **`drawn` and `off-edge` do NOT move with the camera.** Locked and following read
+   **12507** and **1795** to the byte at both aspects, with `peak 59, backstop 0`, because
+   both count sprites outside the *machine's* run and the anchor moves that run without
+   resizing it. Every prediction that the anchor re-baselines these was wrong. They DO
+   move with the reveal (9372 / 1458 with `SDB_OVERSCAN=0`).
+
+Two ways this instrument lies, both of which report a failure that is not there:
+
+- **The anchor record with `f = N` belongs to presented file `N-1`.** Pair it with file
+  `N` and the gate reports 26 failures, every one a camera-stepping frame, each looking
+  exactly like a 7-pixel placement bug. It only shows when the scroll *changes*, because
+  otherwise a one-frame offset compares two identical pictures. Never fix an index
+  ambiguity with a probe window.
+- **Never compare one run's pixels to another's.** "Locked canvas == follow canvas
+  translated" is true — 0 of 76,970 pixels at the predicted shift, ~40% at every other —
+  but as a gate it needs both runs' presented indices to agree, and they do not reliably.
+
+And **run it against the follow capture as well: it must FAIL**, listing many anchor
+values. A gate that only ever passes is not a gate.
+
 ### Verifying the margin sprites (part of `widescreen`, not a separate feature)
 
 It reads the game's own placement, so its gate is **not** "does it look right" — it is
@@ -927,12 +999,12 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 | `tas/vectors/sdb_beanball.input` | **Recorded**, not written: a played Bean Ball run across the full map, the repro for the open flicker-mod list degeneration (research §26, plan item 14). Replay in a window, not headless |
 | `tas/vectors/sdb_probe.input` | Diagnostic, not a test vector: LEFT in 4-frame pulses from frame 600, which is how **594** was measured as the frame the court starts accepting input (research §27 timings above). Keep it — it is the reproduction for the timing facts, and the facts cost three failed repros to establish |
 | `tools/flicker/` | Analysis scripts behind the research.md §2/§2.1 claims (OAM/record dumps, ref-finder, memdiff) + toolkit README |
-| `tools/widescreen/` | Analysis behind research.md §25-26 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge (corr-explained shifts report as `cshift`, exit 0); `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite; **`json_trace.py` — reads the `SDB_TRACE_JSON=<from>-<to>` stream, one JSON object per line, which is what plan item 14 needs (`flicker` puts live OAM and the mod's published list side by side in one frame)**; **`bounds_gate.py` — asserts nothing is drawn past the court's own bounds `[32,480)` on the presented PNGs; it exits 2 when it examined no frames, because the host's literal `%05d` output prefix makes a naive filename format read zero files and report a clean pass**; **`cycframe.py` — the shared `--frame-log` reader the other four sit on, since four copies of the header parser meant a format change would break three tools silently**. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame) |
+| `tools/widescreen/` | Analysis behind research.md §25-26 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge (corr-explained shifts report as `cshift`, exit 0); `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite; **`json_trace.py` — reads the `SDB_TRACE_JSON=<from>-<to>` stream, one JSON object per line, which is what plan item 14 needs (`flicker` puts live OAM and the mod's published list side by side in one frame)**; **`bounds_gate.py` — asserts nothing is drawn past the court's own bounds `[32,480)` on the presented PNGs; it exits 2 when it examined no frames, because the host's literal `%05d` output prefix makes a naive filename format read zero files and report a clean pass**; **`anchor_gate.py` — the camera anchor's gate (research §28): is the view still, is the court on its own picture, and are the machine's own 256 columns untouched. Needs THREE runs (locked, follow, stock) and `SDB_TRACE_JSON` on, because it is a comparison and not a single file; **run it against the follow capture too and it must FAIL**. Two index traps are documented at the constant: the anchor record with `f = N` belongs to presented file `N-1`, and one run's pixels must never be compared to another's**; **`cycframe.py` — the shared `--frame-log` reader the other four sit on, since four copies of the header parser meant a format change would break three tools silently**. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame) |
 | `tools/play_record.sh` | Play the game in a window and record the session as a replayable `--input` vector plus `SDB_TRACE=1` and per-frame screenshots, into `tmp/<name>/`. Pins `WindowScale`/Fullscreen/VSync, or the screenshots make the game run in slow motion. `SDB_UNLIMITED=1` drops `--exit-after` and runs until you close the window; closing it normally still flushes the vector's frame count (it is written from the destructor), but SIGKILL does not. The only way to find the band bugs — see the recorded-playback section above |
 | `tools/overclock/` | PPU-overclocking oracle harness behind research.md §23 (MesenCE sandbox + stock-vs-OC comparison). **Its self-check matters: if cycles/frame stays 29781 for a non-zero `Before NMI`, the setting never applied and the run is worthless** |
 | `mods/packages/super-dodgeball.character-flicker/` | Mod package — `manifest.toml` only (data-only by design; implementation is `src/sdb_host_extras.c`). Off by default, toggleable in the launcher's Mods screen; PolyForm NC, same as the project |
 | `mods/packages/super-dodgeball.ppu-overclock/` | Mod package for PPU overclocking (research.md §23). Manifest-only like the above; has an integer `[[option]]` so the launcher exposes the scanline count. **Needs `patches/006_ppu_overclock_mmc1`** or the backend refuses on mapper 1 |
-| `mods/packages/super-dodgeball.widescreen/` | Mod package for widescreen (research.md §25). Manifest-only; ONE feature, `widescreen` (an `aspect` **choice**: stock/16:9/21:9/32:9/fit). Enabling it also enables the clipped-column reveal and the margin sprites — both are drawn by the same compositor and are not separable, see the manifest header. Needs **no patch**: the engine already ships the widths and the compositor API |
+| `mods/packages/super-dodgeball.widescreen/` | Mod package for widescreen (research.md §25, §28). Manifest-only; ONE feature, `widescreen` (an `aspect` **choice**: stock/16:9/21:9/32:9/fit, and a `camera` **choice**: follow/locked). Enabling it also enables the clipped-column reveal and the margin sprites — both are drawn by the same compositor and are not separable, see the manifest header. Needs **no patch**: the engine already ships the widths and the compositor API, and `cyc_render_set_native_origin` is what the camera lock uses to say where it put the native block |
 | `external/nesrecomp/` | NESRecomp submodule (recompiler + runners) — pinned `origin/master`; **dirty tree is expected** when `patches/*.patch` is applied by `setup.sh` |
 | `external/mesence/` | MesenCE emulator source/binary |
 | `external/recomp-ui/` | recomp-ui submodule (launcher + in-game menu) — **pinned, never floated**; MIT, own license |

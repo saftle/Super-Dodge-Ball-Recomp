@@ -73,11 +73,34 @@ label = "32:9 Super Ultrawide"
 value = "fit"
 label = "Fit the window"
 
+# Where the camera looks. The court is 440 world columns ([40,480), the camera
+# clamp at $E6AB) and the game's own viewport slides 184 columns of it, so at
+# 21:9 and 32:9 every column of the court is already on screen at every camera
+# position play reaches -- the panning adds motion, not information. Locked
+# makes the canvas a fixed window on the court and the game pans behind it; the
+# view only moves when the width cannot hold the court (16:9 loses 7 columns at
+# each end). Presentation only: $C3/$C4, OAM and the machine's own 256 columns
+# are untouched, the block is simply placed elsewhere on the canvas.
+[[option]]
+feature = "widescreen"
+id = "camera"
+label = "Camera"
+type = "choice"
+default = "follow"
+
+[[option.choice]]
+value = "follow"
+label = "Follow the ball (stock)"
+
+[[option.choice]]
+value = "locked"
+label = "Locked: show the whole court"
+
 # An ACTIVATION plugin registered with nes_mod_register_activation_plugin().
-# It reads the aspect above with nes_mod_option_value(), installs the
-# compositor and asks the backend for that width; the reset callback puts the
-# stock 256-column picture back. Enabling it also enables the clipped-column
-# reveal and the margin-sprite capture sites -- see the header.
+# It reads the aspect and the camera policy above with nes_mod_option_value(),
+# installs the compositor and asks the backend for that width; the reset
+# callback puts the stock 256-column picture back. Enabling it also enables the
+# clipped-column reveal and the margin-sprite capture sites -- see the header.
 [[plugin]]
 feature = "widescreen"
 id = "super-dodgeball.widescreen"

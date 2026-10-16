@@ -196,6 +196,40 @@ typedef struct {
  * surely as the game's cull and is half of what this feature recovers. */
 #define SDB_WS_CLIP 8
 static int s_ws_reveal;         /* overscan: the clip is being revealed */
+/* What --overscan / SDB_OVERSCAN asked for, or -1 for "nobody has an opinion,
+ * follow widescreen". Resolved to s_ws_reveal by sdb_ws_apply, which is the
+ * only place that decides -- see the note there for why it cannot be stamped by
+ * whichever handler happened to run. */
+static int s_ws_reveal_explicit = -1;
+
+/* THE CAMERA ANCHOR. Declared HERE, with the rest of the widescreen state,
+ * because sdb_present -- the flicker mod's own presentation path, which runs
+ * BEFORE the compositor's function in this file -- has to agree with it.
+ *
+ * It did not, and the symptom was the health bars and the player names sliding
+ * left and right with the camera while the court sat still: the compositor
+ * places the machine's own picture at TWO offsets (the court band and the held
+ * band), and sdb_present stamped all 240 rows at the single one
+ * `cyc_render_native_origin` returns. Measured at frame 649 of the sweep, where
+ * the two are 48 columns apart: the flicker-on run's rows 0-48 are the
+ * flicker-off run's rows 0-48 shifted exactly +48, and the court band aligns at
+ * 0. Those 48 rows are the skyline, the names and the health bars -- the HUD the
+ * game holds still in screen space, which is the entire reason there are two
+ * offsets.
+ *
+ * See sdb_ws_anchor_frame and sdb_ws_row_x0, below, for the rest. */
+static int s_ws_lock;            /* the setting: 0 = follow, 1 = anchored */
+static int s_ws_court;           /* the modal line scroll: the court's camera */
+static int s_ws_x0_court;        /* canvas column of native column 0, court band */
+static int s_ws_x0_held;         /* ... on the HELD band, which is not the court */
+static int s_ws_anchor;          /* world column the canvas's column 0 holds */
+static int s_ws_anchored;        /* frames presented with the anchor engaged */
+static int s_ws_framed;          /* frames where it deliberately did not */
+static int s_ws_here;            /* this frame: did the anchor engage? */
+
+/* Where native column 0 sits, for one screen row. Forward-declared for
+ * sdb_present; defined with the anchor arithmetic. */
+static int sdb_ws_row_x0(int y);
 
 /* The frame counter and capture-trace range live here (rather than with the
  * flicker state below) because the object-index callback above needs them. */
@@ -1262,17 +1296,39 @@ static const uint32_t *sdb_present(void *ctx, int *width, int *height)
         {
             int first = s_ws_reveal ? SDB_WS_CLIP : 0;
             if (x0 >= 0 && x0 + 256 <= cw && ch >= 240 && first < 256)
-                for (int y = 0; y < 240; y++)
-                    memcpy(s_canvas + (size_t)y * cw + x0 + first,
+                /* PER ROW, not one x0 for the whole picture: with the camera
+                 * locked the compositor puts the court band and the held band at
+                 * two different canvas columns, and rows 0-47 -- the skyline, the
+                 * names and the health bars -- belong to the held one. Stamping
+                 * all 240 rows at the court's column is what made the HUD slide
+                 * sideways with the camera while the court sat still; measured at
+                 * sweep frame 649, where the two columns are 48 apart, the
+                 * flicker-on run's rows 0-48 were the flicker-off run's rows 0-48
+                 * shifted exactly +48, with the court band aligning at 0.
+                 *
+                 * In follow mode both columns are the same number, so this loop
+                 * is the same single-x0 copy it always was. */
+                for (int y = 0; y < 240; y++) {
+                    int rx0 = sdb_ws_row_x0(y);
+                    if (rx0 < 0 || rx0 + 256 > cw) continue;
+                    memcpy(s_canvas + (size_t)y * cw + rx0 + first,
                            s_picture + (size_t)y * 256 + first,
                            (size_t)(256 - first) * sizeof(uint32_t));
+                }
         }
 
+        /* Per entry, for the same reason as the stamp above: an entry's own row says
+         * which band it belongs to, so a sprite in the held rows is drawn at the
+         * held column and one in the court rows at the court's. `sdb_blit` takes
+         * one x0 per call and a character's parts share a row band, so this is
+         * per entry and not per part -- the split that research 26 records as a
+         * character drawn at a sixteenth of his width would be a per-part
+         * decision, and this is not one. */
         for (int i = count - 1; i >= 0; i--)
-            sdb_blit(&list[i], s_canvas, cw, *height, x0);
+            sdb_blit(&list[i], s_canvas, cw, *height, sdb_ws_row_x0(list[i].y));
         const uint8_t *oam = cyc_render_oam();
         SdbSprite front = { oam[0], oam[1], oam[2], oam[3] };
-        sdb_blit(&front, s_canvas, cw, *height, x0);
+        sdb_blit(&front, s_canvas, cw, *height, sdb_ws_row_x0(front.y));
         return s_canvas;
     }
 
@@ -1756,6 +1812,7 @@ static const CycHostOption SDB_OPTIONS[] = {
     { "--remove-character-flicker", false, "draw every OAM sprite host-side, so characters are never truncated" },
     { "--ppu-overclock", true, "extra blank scanlines before NMI (0-262); 0 = stock timing" },
     { "--widescreen", true, "present 16:9 / 21:9 / 32:9 / fit instead of stock 4:3" },
+    { "--camera", true, "follow = the view pans with the game; locked = the whole court is shown at once" },
     { "--overscan", false, "drop the blank scanlines a CRT hid at the top and bottom" },
     { "--margin-sprites", true, "background-only widescreen margins: do NOT draw the players the game culled off-screen (default is to draw them)" },
     { "--record-input", true, "record the live controller to an --input vector as you play, for replaying headless afterwards" },
@@ -1888,6 +1945,165 @@ static int s_ws_sx_lo = 9999, s_ws_sx_hi = -1;   /* camera scroll seen, SDB_TRAC
 /* Is this world column one the game can ever display? */
 static int sdb_ws_in_bounds(int wx) { return wx >= SDB_WS_LO && wx < SDB_WS_HI; }
 
+/* ---- the camera: follow the game, or anchor the whole court ---- */
+
+/* THE COURT IS 440 COLUMNS AND THE CAMERA PANNS INSIDE 184 OF THEM.
+ *
+ * The clamp bounds are the whole of what this is built on, and they make the
+ * question answerable without looking at the art: the court is
+ * [SDB_WS_LO, SDB_WS_HI) = [40, 480) -- 440 columns -- and the camera lives in
+ * [40, 224], so the game's own viewport slides 184 columns of a court that is
+ * 440 wide.
+ *
+ * Measured over the sweep vector's match (frames 422-760), the camera actually
+ * spans 102..180, inside [72, 192]. So at 21:9 and 32:9 -- 560 and 854 columns
+ * -- the ENTIRE COURT IS ALREADY ON SCREEN at every camera position play
+ * reaches, today, with no mod at all:
+ *
+ *     canvas x = native_x0 + (camera + n - native_x0) = camera + n, so the
+ *     canvas shows world columns [camera - pad, camera + 256 + pad) with
+ *     pad = (width - 256) / 2.
+ *
+ *     854: pad 299, camera 40..224 -> [.., ..) always covers [40, 480).
+ *     560: pad 152, camera 102..180 -> covers [40, 480) for camera >= 72.
+ *     426: pad 85 -- cannot cover 440 columns at all, and which END is missing
+ *          depends on where the ball is.
+ *
+ * Which is the whole argument for anchoring, and it is worth stating plainly
+ * because it is NOT "show more": the panning buys the player nothing at the two
+ * wide aspects. Every column of the court is already visible; the slide is
+ * motion with no information in it, and it competes with the one thing being
+ * tracked (the ball) for the eye. Anchoring turns the screen into a fixed field
+ * with the ball crossing it -- what the genre moved to for exactly this reason.
+ *
+ * The canvas is therefore a FIXED WINDOW on the court, chosen from the width
+ * alone, and the game pans behind it. Only the degenerate case moves it: when
+ * the machine's own 256 columns would otherwise hang off the canvas, which is a
+ * scene-change wipe (frames 411-420 of the sweep have a scroll all over the
+ * place) and nothing else.
+ *
+ * `s_ws_court` is the MODAL line scroll, not row 160's: the court is the band
+ * that most of the screen scrolls with, and during a wipe there is no such band
+ * -- the mode becomes one row's value, every row falls through to the held
+ * offset below, and the frame renders exactly as it does today. Selecting the
+ * band by counting rows is what makes that fallback free. A frame whose camera
+ * is outside the game's own window is not a court frame at all -- menus are the
+ * obvious case -- and is left centred; see the test below.
+ *
+ * The anchor is a PRESENTATION offset only. The guest still pans: `$C3/$C4` is
+ * untouched, OAM is untouched, and the machine's own 256 columns are still the
+ * machine's own picture, byte for byte -- they are simply placed somewhere else
+ * on the canvas. Which is the use `cyc_render_set_native_origin` exists for
+ * ("a compositor that placed the native picture somewhere other than the
+ * native_x0 it was given ... a camera anchored at an area's edge"), so the
+ * flicker mod's wide path follows the same number automatically. */
+/* (s_ws_lock, s_ws_court, s_ws_x0_court, s_ws_x0_held, s_ws_anchor,
+ * s_ws_anchored and s_ws_framed are declared next to s_ws_reveal, near the top
+ * of this file, because sdb_present reads them too.) */
+
+static void sdb_ws_anchor_frame(int width, int native_x0)
+{
+    int votes[512];
+    memset(votes, 0, sizeof votes);
+    for (int y = 0; y < 240; y++) votes[cyc_render_line_scroll_x(y) & 511]++;
+    int best = -1, n = 0;
+    for (int v = 0; v < 512; v++)
+        if (votes[v] > n) { n = votes[v]; best = v; }
+    s_ws_court = best < 0 ? cyc_render_line_scroll_x(160) : best;
+    s_ws_here = 0;
+
+    if (!s_ws_lock) {
+        /* Follow. Identical to before in every term: one offset for every row,
+         * which is what the compositor used unconditionally. */
+        s_ws_x0_court = s_ws_x0_held = native_x0;
+        s_ws_anchor = s_ws_court - native_x0;
+        return;
+    }
+
+    /* IS THIS EVEN A COURT FRAME? A title screen or a menu is not world content:
+     * it is drawn at screen-space columns and its scroll is 0, because nothing
+     * has told the PPU to scroll anything. The court's window does not describe
+     * it, and anchoring one put every menu 132 columns left of centre at 21:9
+     * (measured: anchor f=12..140 all read `scroll 0, x0 20` where the centred
+     * position is 152).
+     *
+     * The test is the game's OWN camera window -- the clamp at $E6AB, the same
+     * [40, 224] the bound is built from. During play the camera cannot leave it,
+     * so this costs nothing where it matters and catches exactly the frames the
+     * clamp does not govern: title, menus, and the locked intro camera that
+     * $DBBB sets to 0 for ~204 frames at the start of a course. The last of those
+     * is already documented above as "a cosmetic cost for a locked intro
+     * camera, and the right way round"; this makes it true of the picture too
+     * rather than only of the margin.
+     *
+     * Menus then render exactly as they do in follow mode, which is to say
+     * centred. */
+    if (s_ws_court < SDB_WS_CAM_MIN || s_ws_court > SDB_WS_CAM_MAX) {
+        s_ws_x0_court = s_ws_x0_held = native_x0;
+        s_ws_anchor = s_ws_court - native_x0;
+        s_ws_framed++;
+        return;
+    }
+
+    /* Centre the court's own window on the canvas, then move it only as far as
+     * keeping the machine's own 256 columns on the canvas requires. Two clamps,
+     * both about the native block's placement rather than the court's:
+     * `s > court` would put native column 0 at a negative canvas column (the
+     * $DBBB intro sets the camera to 0, so this bites), and the other would run
+     * the block off the right edge at the camera's extremes. */
+    int s = (SDB_WS_LO + SDB_WS_HI - width) / 2;
+    if (s > s_ws_court) s = s_ws_court;
+    if (s < s_ws_court - (width - 256)) s = s_ws_court - (width - 256);
+    s_ws_anchor = s;
+    s_ws_x0_court = s_ws_court - s;
+    s_ws_x0_held = native_x0;
+    s_ws_here = 1;
+}
+
+/* Where native column 0 sits, for one screen row.
+ *
+ * THE HELD BAND IS WHY THIS IS PER ROW. This game splits its scroll mid-frame:
+ * rows 0-47 hold scroll 0 and carry the skyline and the scoreboard, rows 48-239
+ * scroll with the camera. Measured on the sweep vector mid-pan:
+ *
+ *     sdbc 601 scr=134 cam=134 sxs=0,0,0 band=48-239
+ *
+ * (`sxs` samples rows 0, 46 and 47.) So anchoring the whole canvas on the
+ * court would slide the HUD 6-7 px every time the camera stepped -- a new
+ * artefact, introduced by the thing meant to remove one. The held rows are not
+ * world content at all: the game pins them in screen space, which is why
+ * `native_x0` has always been the right place for them. Hence two offsets, and
+ * the band is decided by MEASUREMENT per row (`cyc_render_line_scroll_x(y) ==
+ * s_ws_court`), never by hardcoding 48.
+ *
+ * No margin sprite has ever been observed in the held band -- 3333 parts over
+ * 81 captured frames of a pan, rows 102..217 -- so this only decides background
+ * rows and the native block's own placement. It is per row rather than a single
+ * offset anyway so that the row's scroll and its offset are always read
+ * together, and cannot disagree. */
+static int sdb_ws_row_x0(int y)
+{
+    if (y < 0) y = 0; else if (y > 239) y = 239;
+    return cyc_render_line_scroll_x(y) == s_ws_court ? s_ws_x0_court : s_ws_x0_held;
+}
+
+/* Put the anchor back to "one offset, the centred one the engine chose" and say
+ * it did not engage.
+ *
+ * Needed on every path where the compositor returns 0. The host's response to a
+ * declined frame is to pillarbox the machine's own picture at the CENTRED
+ * column, and `sdb_present` reads this state to place the flicker mod's redraw
+ * -- so leaving `s_ws_x0_court` pointing somewhere else would have the two
+ * paths disagree, and the flicker mod would stamp the picture a camera step away
+ * from where the host drew it. The frame-0 and scene-change declines are exactly
+ * where a player would see it. */
+static void sdb_ws_deanchor(int native_x0)
+{
+    s_ws_here = 0;
+    s_ws_x0_court = s_ws_x0_held = native_x0;
+    s_ws_anchor = s_ws_court - native_x0;
+}
+
 /* Past the edge of the 512-pixel ADDRESS space there is nothing to read, so the
  * canvas is filled with the backdrop. Inside that space but outside the game's
  * camera window is SDB_WS_LO/SDB_WS_HI's business, above: those columns are
@@ -1982,12 +2198,23 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                             const uint32_t *native, void *user)
 {
     (void)user;
+    /* Every decline from here on has to leave the anchor neutralised, because
+     * the host pillarboxes at the centred column when we return 0 and
+     * sdb_present reads this state to place the flicker mod's redraw. */
     if (width <= 256 || height != 240) return 0;
     if (!(cyc_render_line_mask(239) & 0x08)) return 0;   /* background off */
+
+    /* Where this frame's native picture goes on the canvas, decided before a
+     * single pixel is drawn: every loop below asks sdb_ws_row_x0() for its own
+     * row, so the scroll a row is drawn from and the offset it is drawn at are
+     * always read together and cannot disagree. */
+    sdb_ws_anchor_frame(width, native_x0);
+    if (s_ws_here) s_ws_anchored++;
 
     const uint8_t *opaque = cyc_frame_bg_opaque();
     for (int y = 0; y < height; y++) {
         int sx = cyc_render_line_scroll_x(y);
+        int row_x0 = sdb_ws_row_x0(y);
         /* PPUMASK bit 1 is "show background in the leftmost 8 pixels" -- SET means
          * shown, so the clip exists when the bit is CLEAR. (wideNES's own write-up
          * states the opposite of its code here; the code is right.) This game
@@ -1997,7 +2224,7 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
         int clip = s_ws_reveal ? 0 : ((cyc_render_line_mask(y) & 0x02) ? 0 : SDB_WS_CLIP);
         uint32_t *row = out + (size_t)y * width;
         for (int x = 0; x < width; x++) {
-            int off = x - native_x0;
+            int off = x - row_x0;
             if (off >= 0 && off < clip) { row[x] = cyc_render_color(0); continue; }
             /* cyc_render_line_scroll_x is 0-511, $2000 bit 0 already folded in,
              * so a canvas column's world column is that line's scroll plus its
@@ -2024,7 +2251,7 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
     long diff = 0;
     if (cyc_render_background(s_ws_native_bg)) {
         for (int y = 0; y < 240; y++) {
-            const uint32_t *row = out + (size_t)y * width + native_x0;
+            const uint32_t *row = out + (size_t)y * width + sdb_ws_row_x0(y);
             const uint32_t *bg = s_ws_native_bg + (size_t)y * 256;
             for (int x = first; x < 256; x++) {
                 if (opaque && !opaque[(size_t)y * 256 + x]) continue;
@@ -2034,6 +2261,7 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
     } else {
         /* No capture available: nothing to verify against, so do not claim a
          * seam we did not check. */
+        sdb_ws_deanchor(native_x0);
         return 0;
     }
     /* 2% of the frame's background pixels. Generous enough that a handful of
@@ -2042,6 +2270,7 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
     if (diff * 100 > 2 * 256 * 240) {
         s_ws_pillarboxed++;
         s_ws_last_diff = diff;
+        sdb_ws_deanchor(native_x0);
         return 0;
     }
 
@@ -2052,8 +2281,15 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
      * gutter straight back. */
     int keep = s_ws_reveal ? SDB_WS_CLIP : 0;
     for (int y = 0; y < height; y++)
-        memcpy(out + (size_t)y * width + native_x0 + keep, native + (size_t)y * 256 + keep,
-               (256 - keep) * sizeof(uint32_t));
+        memcpy(out + (size_t)y * width + sdb_ws_row_x0(y) + keep,
+               native + (size_t)y * 256 + keep, (256 - keep) * sizeof(uint32_t));
+
+    /* Declare where the native picture actually went. The flicker mod's wide
+     * path reads this (cyc_render_native_origin) to place its own sprite list,
+     * and the host maps aim through it; with the anchor engaged the block is
+     * nowhere near the centred position, so leaving this unsaid would put the
+     * flicker mod's sprites 0-400 columns from their own backgrounds. */
+    cyc_render_set_native_origin(s_ws_x0_court);
 
     /* Sprites the game placed outside its own viewport. Drawn AFTER the copy so
      * they cannot touch the native 256, which stay byte-identical to stock by
@@ -2086,10 +2322,17 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
      * with the object index, so a position can be watched across builds. */
     if (s_ws_margin) {
         int n = 0;
+        /* `x0` here is the COURT band's offset, which is the one the game places
+         * objects with and the one every measured part needs (rows 102..217, all
+         * of them). The per-part offset is read again inside the loop from the
+         * part's own row, so a part that ever did land on the held band would
+         * stay glued to the scroll it was computed from rather than be split
+         * across two bases -- the collapse research 26 records as a character
+         * drawn at a sixteenth of his width. */
         if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
-            fprintf(stderr, "sdbw f=%ld x0=%d:", s_frame, native_x0);
+            fprintf(stderr, "sdbw f=%ld x0=%d:", s_frame, s_ws_x0_court);
         /* The first canvas column the machine's own picture owns. */
-        int left_limit = native_x0 + keep;
+        int left_limit = s_ws_x0_court + keep;
         for (int o = 0; o < SDB_MARGIN_OBJECTS; o++) {
             SdbMarginObj *ob = &s_margin_obj[o];
             if (!ob->n) continue;
@@ -2178,11 +2421,11 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * are identical and there is nothing to see. The alternative is not
                  * a tidier trade, it is the tearing above.
                  *
-                 * Column 0 of the screen sits at native_x0 on the canvas, so a
-                 * negative column lands in the left margin and one past 255 in
-                 * the right. The offset is measured from the game's own
-                 * accumulator, which already carries its OAM bias of 4, so the
-                 * same subtraction the guest does puts it back.
+                 * Column 0 of the screen sits at this part's own row offset on
+                 * the canvas, so a negative column lands in the left margin and
+                 * one past 255 in the right. The offset is measured from the
+                 * game's own accumulator, which already carries its OAM bias of
+                 * 4, so the same subtraction the guest does puts it back.
                  *
                  * ONE BASIS, and it is the scroll.
                  *
@@ -2218,6 +2461,10 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * basis split, not a stale part. */
                 int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
                 int scroll = cyc_render_line_scroll_x(prow);
+                /* The offset for THIS part's own row: with the anchor engaged the
+                 * court band's columns move and the held band's do not, and the
+                 * two are read together with the scroll above. */
+                int rx0 = sdb_ws_row_x0(prow);
                 int sx = (rec_x + corr) + m->dx - scroll - 4;
                 /* Completing a sprite the PPU clipped is the one case the margin
                  * owns rather than the machine. */
@@ -2248,7 +2495,7 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * column the machine owns. */
                 int machine_drew = !completes && (sx >= 0 && sx <= 251);
                 if (machine_drew) continue;
-                int px0 = sx + native_x0;
+                int px0 = sx + rx0;
                 if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
                     fprintf(stderr, " [o%d:%d,%d,t%02X]", o, sx, m->y, m->tile);
                 n++;
@@ -2280,14 +2527,15 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * rather than dropped, so a character straddling the bound is
                  * still drawn up to it. */
                 int clip_lo, clip_hi;
-                if (px0 + 8 <= left_limit) {
+                int left_band = left_limit, right_band = rx0 + 256;
+                if (px0 + 8 <= left_band) {
                     clip_lo = 0; clip_hi = 0;                    /* fully left: all */
-                } else if (px0 >= native_x0 + 256) {
+                } else if (px0 >= right_band) {
                     clip_lo = 0; clip_hi = 0;                    /* fully right: all */
-                } else if (px0 < left_limit) {
-                    clip_lo = 0; clip_hi = px0 + 8 - left_limit;  /* left straddle */
+                } else if (px0 < left_band) {
+                    clip_lo = 0; clip_hi = px0 + 8 - left_band;  /* left straddle */
                 } else {
-                    clip_lo = native_x0 + 256 - px0; clip_hi = 0; /* right straddle */
+                    clip_lo = right_band - px0; clip_hi = 0;    /* right straddle */
                 }
                 /* The world's own bounds, on the same terms as the machine's
                  * run above: the two clip the same ends of the same 8 columns,
@@ -2297,8 +2545,8 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * whole up to it. Research 26 recorded the looser behaviour --
                  * "the sprite is drawn where the game put it, which may be over
                  * black" -- as an accepted limit; it is no longer one. */
-                int wl = native_x0 + (SDB_WS_LO - scroll);
-                int wh = native_x0 + (SDB_WS_HI - scroll);
+                int wl = rx0 + (SDB_WS_LO - scroll);
+                int wh = rx0 + (SDB_WS_HI - scroll);
                 int in_world = px0 + 8 > wl && px0 < wh;
                 if (in_world && px0 < wl)         clip_hi += px0 + 8 - wl;
                 else if (in_world && px0 + 8 > wh) clip_lo += wh - px0;
@@ -2356,7 +2604,20 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
     }
 
     if (sdb_json_want(s_frame))
-        sdb_json_margin(native_x0, width, diff, s_margin_count);
+        sdb_json_margin(s_ws_x0_court, width, diff, s_margin_count);
+
+    /* The anchor, in the structured stream rather than on the human `sdbw` line,
+     * which margin_track.py parses with a regex wanting `n=` at the end and
+     * which is not going to be broken to carry this. `x0` is the COURT band's
+     * offset and `xh` the held band's, so a gate cropping the machine's own 256
+     * columns out of a presented frame has everything it needs; `scroll` is the
+     * court's own camera and `anchor` the world column at canvas column 0, so
+     * "did the view move" is `anchor` not changing. */
+    if (sdb_json_want(s_frame))
+        fprintf(stderr, "{\"k\":\"anchor\",\"f\":%ld,\"x0\":%d,\"xh\":%d,"
+                        "\"scroll\":%d,\"anchor\":%d,\"cw\":%d,\"lock\":%d,\"here\":%d}\n",
+                s_frame, s_ws_x0_court, s_ws_x0_held, s_ws_court, s_ws_anchor,
+                width, s_ws_lock, s_ws_here);
 
     s_ws_composed++;
     s_ws_last_diff = diff;
@@ -2387,9 +2648,52 @@ static int sdb_ws_width_for(int mode, int rows)
     return w & ~1;              /* even, so the stock 256 stay centred */
 }
 
+/* What the reveal should be, in one place and in one precedence: an explicit
+ * `--overscan` first, then `SDB_OVERSCAN` (the headless A/B AGENTS.md documents
+ * for gate 5), then widescreen's own default of revealing.
+ *
+ * The environment read lives HERE rather than in an activation plugin because
+ * the two ways of turning widescreen on have to answer identically: with it in
+ * the plugin, `SDB_OVERSCAN=0 --widescreen 21:9` ignored the switch (the plugin
+ * never runs) while the same environment with `--mods-root` honoured it, which
+ * is the same class of bug as the one the default fixes. Measured: 280 of 701
+ * frames differing between those two. */
+static int sdb_ws_reveal_ask(void)
+{
+    if (s_ws_reveal_explicit >= 0) return s_ws_reveal_explicit;
+    const char *e = getenv("SDB_OVERSCAN");
+    if (e && e[0]) return atoi(e) != 0 ? SDB_WS_CLIP : 0;
+    return SDB_WS_CLIP;
+}
+
 static void sdb_ws_apply(void)
 {
     int wide = s_ws_aspect != NES_VIDEO_STOCK;
+
+    /* THE REVEAL FOLLOWS WIDESCREEN unless something explicitly turned it off.
+     *
+     * It used not to, and the two ways of turning widescreen on disagreed:
+     * `sdb_ws_enable` (the mod activation path -- the launcher, or any
+     * `--mods-root`) called `sdb_ws_set_overscan(1)`, while the `--widescreen`
+     * option handler set the aspect and nothing else. So a bare
+     * `--widescreen 21:9` left s_ws_reveal at 0 and presented the eight columns
+     * PPUMASK hides as the black band the PPU itself painted -- the exact
+     * artefact widescreen exists to remove, and the reason `overscan` was
+     * folded into this feature in the first place. AGENTS.md's documented
+     * widescreen gate command uses `--widescreen`, so its "no black gutter"
+     * expectation was being measured with the reveal off.
+     *
+     * Resolving it HERE rather than in a handler is the part that matters.
+     * Stamping it from `--widescreen` would make the two flags order-dependent:
+     * `--overscan 0 --widescreen 21:9` would end up revealing and
+     * `--widescreen 21:9 --overscan 0` would not, which is a worse bug than the
+     * one being fixed. `--overscan` is a bare flag, so it cannot carry a
+     * default of its own; asking here can.
+     *
+     * Stock width resolves to 0: there is no compositor to draw the columns
+     * and no margin to own them. */
+    s_ws_reveal = wide ? sdb_ws_reveal_ask() : 0;
+
     cyc_render_set_compositor(wide ? sdb_ws_composite : NULL, NULL);
 
     if (!wide) {
@@ -2418,8 +2722,18 @@ static void sdb_ws_set_aspect(int mode)
 
 static void sdb_ws_set_overscan(int on)
 {
-    s_ws_reveal = on ? SDB_WS_CLIP : 0;
+    /* Records the ASK; sdb_ws_apply resolves it against the current aspect, so
+     * the two flags commute. */
+    s_ws_reveal_explicit = on ? SDB_WS_CLIP : 0;
     sdb_ws_apply();
+}
+
+/* The camera policy. `follow` is what the compositor has always done -- the
+ * canvas is centred on whatever the game's camera is this frame -- and `locked`
+ * makes it a fixed window on the court instead. See sdb_ws_anchor_frame. */
+static void sdb_ws_set_camera(int locked)
+{
+    s_ws_lock = locked ? 1 : 0;
 }
 
 /* Reset callbacks run before every activation pass, so a disabled feature
@@ -2428,7 +2742,9 @@ static void sdb_ws_disable(void)
 {
     s_ws_aspect = NES_VIDEO_STOCK;
     s_ws_reveal = 0;
+    s_ws_reveal_explicit = -1;
     s_ws_fixed = 0;
+    s_ws_lock = 0;
     s_ws_margin = 0;
     s_margin_run = 0;
     s_margin_peak = 0;
@@ -2449,9 +2765,20 @@ static void sdb_ws_report(void)
 {
     if (s_trace && s_ws_composed + s_ws_pillarboxed)
         fprintf(stderr, "widescreen: %ld composed, %ld pillarboxed, seam diff %ld px, "
-                        "world bounds [%d,%d)\n",
+                        "world bounds [%d,%d)%s\n",
                 s_ws_composed, s_ws_pillarboxed, s_ws_last_diff,
-                SDB_WS_LO, SDB_WS_HI);
+                SDB_WS_LO, SDB_WS_HI,
+                s_ws_lock ? ", camera locked" : "");
+    /* The anchor, so a headless run says whether the lock engaged rather than
+     * leaving a still picture to be interpreted. `s=` is the world column the
+     * canvas's column 0 held on the last composed frame. */
+    if (s_trace && s_ws_lock && s_ws_composed)
+        fprintf(stderr, "camera: %ld of %ld frames anchored (%d left centred: menus "
+                        "and anything outside the camera window), court scroll %d, "
+                        "canvas world [%d,%d), native block at column %d\n",
+                s_ws_anchored, s_ws_composed + s_ws_pillarboxed, s_ws_framed,
+                s_ws_court, s_ws_anchor,
+                s_ws_anchor + (s_ws_fixed ? s_ws_fixed : 0), s_ws_x0_court);
     if (s_trace && s_margin_on)
         fprintf(stderr, "margin sprites: %ld captured (%ld off-edge), %ld drawn, "
                         "peak %d, backstop %ld\n",
@@ -2511,13 +2838,29 @@ static void sdb_ws_enable(void)
      * game asked for. Not a separate feature on purpose -- it was one, and the
      * two are not separable in practice: an overscan feature that is off while
      * widescreen is on produces the same frame with a black band at the margin
-     * boundary, which is the thing widescreen exists to stop doing.
+     * boundary, which is the thing widescreen exists to stop doing. The default
+     * itself lives in sdb_ws_apply, so `--widescreen` and this path agree.
      *
-     * SDB_OVERSCAN still forces the clip back ON, for the headless A/B in
+     * SDB_OVERSCAN still forces the clip back OFF, for the headless A/B in
      * research 26 gate 5 (the "no black gutter" measurement needs the band to be
-     * measurable in the first place). The launcher cannot turn it off. */
-    const char *e = getenv("SDB_OVERSCAN");     /* headless A/B only */
-    sdb_ws_set_overscan(e && e[0] ? atoi(e) != 0 : 1);
+     * measurable in the first place). The launcher cannot turn it off. It is
+     * read by sdb_ws_reveal_ask, so it works identically with and without
+     * `--mods-root`. */
+    /* Camera policy. SDB_CAMERA first for the headless A/B, then the launcher's
+     * option, then follow -- the default is what every existing baseline was
+     * measured against. Same order and same asymmetry as the aspect above: with
+     * the feature enabled the launcher wins, and --camera only reaches the
+     * compositor when widescreen is enabled from the command line. */
+    {
+        const char *cam = getenv("SDB_CAMERA");
+        char buf[16] = "";
+        int locked = 0;
+        if (cam && cam[0]) locked = !strcmp(cam, "locked") || !strcmp(cam, "1");
+        else if (nes_mod_option_value("super-dodgeball.widescreen", "widescreen",
+                                      "camera", buf, sizeof buf))
+            locked = !strcmp(buf, "locked") || !strcmp(buf, "1");
+        sdb_ws_set_camera(locked);
+    }
     if (!s_ws_margin_only) sdb_ms_enable();
 }
 
@@ -2664,6 +3007,14 @@ static bool sdb_option(void *ctx, const char *name, const char *value)
         if (on) sdb_ms_enable();
         else s_ws_margin = s_margin_on = 0;
         return true;
+    }
+    if (!strcmp(name, "--camera")) {
+        /* The camera policy, same asymmetry as the aspect: the launcher's
+         * `camera` option wins whenever the widescreen feature is enabled. */
+        if (value && !strcmp(value, "follow")) { sdb_ws_set_camera(0); return true; }
+        if (value && !strcmp(value, "locked")) { sdb_ws_set_camera(1); return true; }
+        fprintf(stderr, "--camera: needs a value, follow or locked\n");
+        return false;
     }
     if (!strcmp(name, "--record-input")) {
         /* Opens before the first frame: options run at cyc_session_start(), and

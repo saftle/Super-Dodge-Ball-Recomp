@@ -4,7 +4,7 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 
 ![Super Dodge Ball title screen (recompiled build)](docs/assets/title.png)
 
-> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). The **widescreen mod is playable and has been played**: 16:9 / 21:9 / 32:9 with the court *and the players* in the margins, including the columns the game itself hides. It was found to be correct by recording and replaying real playthroughs, which is how its last two bugs were caught. Not yet tested on a full playthrough to completion. **Two** open questions remain, both in the flicker mod's presentation layer: the Bean Ball sprite-list bug, and a one-frame "ghost" of a menu character on screen transitions — four fixes were built and measured for that last one and each cost more than it fixed (`docs/research.md` §26, `docs/plan.md` 16). The pan judder that used to sit beside them is resolved — it is the game's own cadence, see `docs/research.md` §27. See `docs/plan.md` for the frontier.
+> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). The **widescreen mod is playable and has been played**: 16:9 / 21:9 / 32:9 with the court *and the players* in the margins, including the columns the game itself hides. It was found to be correct by recording and replaying real playthroughs, which is how its last two bugs were caught. It also has a **camera lock**, which stops the picture sliding and shows the whole court at once — built and gated, **not yet played**. Not yet tested on a full playthrough to completion. **Two** open questions remain, both in the flicker mod's presentation layer: the Bean Ball sprite-list bug, and a one-frame "ghost" of a menu character on screen transitions — four fixes were built and measured for that last one and each cost more than it fixed (`docs/research.md` §26, `docs/plan.md` 16). The pan judder that used to sit beside them is resolved — it is the game's own cadence, see `docs/research.md` §27. See `docs/plan.md` for the frontier.
 
 > *Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong here. This port is in development — expect rough edges.*
 
@@ -128,7 +128,8 @@ with it off the output is byte-identical to the unmodded game.
   with PPUMASK — blank in every one of 2112 measured frames. That is not a second
   toggle: the same compositor draws both, so leaving them separately switchable
   permits the combination this feature exists to prevent, a wide frame with a
-  black band at its edge.
+  black band at its edge. It follows widescreen on **every** path — the flag, the
+  launcher, `--mods-root` — and `SDB_OVERSCAN=0` is the only way to see it off.
 
   The extra columns carry **the players too**, not just the court. Super Dodge Ball
   places every sprite in a 16-bit screen coordinate and then hides anything
@@ -163,6 +164,56 @@ with it off the output is byte-identical to the unmodded game.
   whole time, and was missed because the audit in use compares the margin against
   itself and cannot see a margin that is internally consistent and a whole camera
   step from the machine. Worth knowing before reaching for the gamepad again.
+
+- **Camera: follow, or locked** — a second setting on the widescreen feature, and
+  it is the one that changes how the game feels.
+
+  `follow` is stock: the canvas is centred on the camera, so the picture slides
+  when the camera steps. `locked` makes the canvas a **fixed window on the court**
+  and lets the game pan behind it.
+
+  The reason is arithmetic rather than taste. The court — everything the machine
+  can ever display — is world columns **40 to 480**, because the camera is clamped
+  to `[40, 224]` behind a 256-column viewport. So the court is 440 columns wide,
+  the camera slides 184 of them, and at **21:9 (560) and 32:9 (854) the entire
+  court is already on screen at every camera position play reaches** (measured:
+  the camera spans 102–180 over a match). The panning adds motion and no
+  information, and it competes with the one thing you are tracking. 16:9 is 426
+  columns and cannot hold the whole court; locked centres it and loses 7 columns
+  at each end rather than one end or the other depending on where the ball is.
+
+  It is strictly presentation. `$C3/$C4`, OAM and the machine's own 256 columns
+  are untouched — the block is simply placed elsewhere on the canvas. It is
+  off by default, and `follow` is byte-identical to a build without the setting.
+
+  Two details that are not obvious: the game's HUD stays put. This game splits its
+  scroll mid-frame, with rows 0–47 holding still for the skyline and the
+  scoreboard, so the offset is decided **per row** — anchoring the whole canvas on
+  the court would slide the HUD 6–7 px on every camera step. And the window is
+  placed with `cyc_render_set_native_origin`, which is what that engine call is
+  for and which nothing here used before.
+
+  ```bash
+  ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 900 \
+    --input tas/vectors/sdb_throw.input --ram-init zeros \
+    --widescreen 32:9 --camera locked
+  ```
+
+  Menus and title screens are **centred, not anchored** — a menu is drawn at
+  screen-space columns and its scroll is 0, so the court's window does not
+  describe it and the anchor stands down.
+
+  **Played once**, and playing found two bugs that no scripted check could see:
+  menus landing left of centre, and the health bars sliding with the camera
+  while the court sat still. Both fixed. The second is the one worth knowing
+  about — it only appears with the character-flicker mod *also* on, because with
+  it off the flicker path never touches the canvas. Any further work on the
+  compositor should be checked both ways.
+
+  A locked camera also promotes the margin from "where the camera happens to be
+  looking" to "where the players are, all the time", so the eleven margin bugs of
+  §26 all get a much bigger audience. `tools/play_record.sh` below is the way to
+  look. Measurements and the gate are in `docs/research.md` §28.
 
 For headless runs the catalog is only read when you point at it, and the feature is
 off unless you ask for it:
@@ -239,7 +290,7 @@ Static recompilation, not an emulator. The original 6502 machine code is transla
 - **`CMakeLists.txt`** — The game project (root). Wraps the submodule's `runner/cyc/project.cmake` and adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own project file can't express — so the submodule stays pristine.
 - **`src/game.toml`** — Recompiler config: display `name` (window title), a `cycle_seed_file`, and twelve content-keyed `[[mod_function_hook]]` sites: the ten the character-flicker mod hooks, plus `$8483` and `$8302` that read the game's off-screen sprite cull for the widescreen margins. Hooks are keyed by `crc32`, never by ROM bytes. Fed to the cycle backend at configure time.
 - **`src/cycle_seeds.txt`** — Recompiler discovery roots. A mod hook site only exists in *recompiled* code, and the sprite emitters the mod hooks ran on the interpreter; these six lines make them native. Total cycle count unchanged.
-- **`src/sdb_host_extras.c`** — Our three mods: the **character-flicker mod** (captures every OAM sprite the game emits and presents them host-side, overriding the game's own object culling — research.md §2.1), the **PPU-overclocking mod** (picks a value for the backend's extra-scanlines setting — research.md §23) and the **widescreen compositor** (reads the nametable to fill a 426/560/854-column canvas, and the game's own 16-bit sprite positions to fill it with players — research.md §25 and §26).
+- **`src/sdb_host_extras.c`** — Our three mods: the **character-flicker mod** (captures every OAM sprite the game emits and presents them host-side, overriding the game's own object culling — research.md §2.1), the **PPU-overclocking mod** (picks a value for the backend's extra-scanlines setting — research.md §23) and the **widescreen compositor** (reads the nametable to fill a 426/560/854-column canvas, the game's own 16-bit sprite positions to fill it with players, and optionally pins the canvas to the court instead of to the camera — research.md §25, §26 and §28).
 - **`mods/`** — The mod packages (`manifest.toml` only; `.nesmod` archives can't carry native code). Off by default, toggleable in the launcher's Mods screen.
 - **`build-cycle/`** — Cycle-backend build (gitignored): per-instruction C (`game_cyc*.c`, one revision dir per ROM/config) + `nes_game` runner + the preloaded `mods/` catalog.
 - **`external/nesrecomp/`** — NESRecomp framework submodule (recompiler + runners)
@@ -248,7 +299,7 @@ Static recompilation, not an emulator. The original 6502 machine code is transla
 - **`tools/overclock/`** — PPU-overclocking oracle harness (research.md §23)
 - **`tools/blargg/`** — blargg test-ROM suite on the cycle backend (`run_blargg.py`, `manifest.json`); per-ROM builds in `build-cyc-blargg/`, ROMs in `external/nes-test-roms/` (both gitignored)
 - **`tools/tas/`** — TAS-integrated differential harness: bk2/fm2 → canonical `tas.json`, shared-input runners for MesenCE + cycle backend with full state capture, three-layer first-divergence diff (`run_tas.py`, `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored)
-- **`tools/widescreen/`** — Measurement behind research.md §25–26: `nametable.py`, `blank_extent.py`, `objects.py`, `margin_track.py` (the per-sprite audit of the margin sprites), `band_fault.py`, `json_trace.py` (reads the `SDB_TRACE_JSON` stream), and `cycframe.py` (the shared `--frame-log` reader)
+- **`tools/widescreen/`** — Measurement behind research.md §25–26 and §28: `nametable.py`, `blank_extent.py`, `objects.py`, `margin_track.py` (the per-sprite audit of the margin sprites), `band_fault.py`, `json_trace.py` (reads the `SDB_TRACE_JSON` stream), `anchor_gate.py` (the camera lock's gate — needs three runs, and **fails on a follow capture by design**), and `cycframe.py` (the shared `--frame-log` reader)
 
 ## Recording a playthrough
 
@@ -274,6 +325,8 @@ SDB_SCALE=2 SDB_SHOT_EVERY=1 tools/play_record.sh bar-artifact   # bigger window
 |---|---|
 | `SDB_MODS` | which mods are on — any combination of `remove-character-flicker`, `widescreen`, `ppu-overclock`. Default `remove-character-flicker,widescreen`. An unknown name is refused with the valid list rather than being passed to the catalog, whose own refusal names a *package* and leaves you guessing which feature you mistyped |
 | `SDB_ASPECT` | `16:9` (default), `21:9`, `32:9`, `stock` — used only when `widescreen` is on |
+| `SDB_CAMERA` | `follow` (default) or `locked` — used only when `widescreen` is on. The locked camera pins the canvas to the court instead of to the game's camera (research.md §28) |
+| `SDB_OVERSCAN` | `0` turns the clipped-column reveal off for the headless A/B in gate 5. The reveal is otherwise on whenever widescreen is, on every path |
 | `SDB_SCANLINES` | `ppu-overclock` scanlines, `0..262` (default 262). **Changes guest timing**, so a capture with it on compares against no stock figure in the docs |
 | `SDB_SHOT_EVERY` | **present** every N frames (default 1) — not a screenshot interval: the compositor only runs on a presented frame, so `N > 1` silently skips it and every `drawn`/`composed` count drops |
 | `SDB_UNLIMITED` | `1` runs until you close the window, ignoring `SDB_FRAMES`. Close it normally — SIGKILL skips the destructor and the vector loses its frame count |
@@ -427,7 +480,8 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 - **Mod off by default** — the flicker mod needs a full-playthrough test first. Known issue with it on: white ghost sprites on the level-switch screen (under investigation).
 - ~~**Sprite flickering**~~ — **fixed, all causes.** Not emulator sprite-limit removal: the game (1) stops emitting once OAM's 64 slots fill, (2) deliberately culls one object off its own display list each frame, rotating which, so a character blinks out 4 frames in 9, and (3) draws its damage numbers and menu digits through emitters no bump hook could see. Characters now stay whole with the opt-in `super-dodgeball.character-flicker` mod — toggleable in the launcher's **Mods** screen. See `docs/research.md` §2 and §2.1.
 - **Palette mirrors** — sprite entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`) read stale in cycle snapshots (upstream model keeps power-on bytes; hardware mirrors the backdrop). Masked in the TAS diff; rendering unaffected.
-- **Widescreen cannot show more world than the game has** — the court is a 512-pixel-wide loop, so at 21:9 and 32:9 the extra columns run off the end and are filled with the backdrop. Expect a black band at whichever end the camera has reached; 16:9 usually fits.
+- ~~**Widescreen cannot show more world than the game has**~~ — the court is a 512-pixel-wide loop, so at 21:9 and 32:9 the extra columns run off the end and are filled with the backdrop. Expect a black band at whichever end the camera has reached; 16:9 usually fits.
+  **Superseded on both counts.** The bound is not the end of the address space but the game's own camera window: columns **40 to 480**, because the camera is clamped to `[40, 224]` behind a 256-column viewport (`docs/research.md` §25). And with `camera = locked` there is no sliding at all — the court is centred on the canvas and sits still. What remains true is that the margin past column 480 is the backdrop colour, at both ends, on purpose.
 - ~~**Widescreen margins are background only**~~ — **fixed, and it is part of the `widescreen` feature, not a toggle.** A margin with no players in it is not a wider game, so the players the game placed outside its own viewport (40% of them at any moment) are drawn there too. `--margin-sprites 0` still exists, but only as the headless A/B switch. **Eleven** placement/boundary bugs were found and fixed while auditing this — the last three a whole character blinking on the culling flag, a 4 px seam join with the camera still, and a 1 px row leapfrog; see `docs/research.md` §26.
 - ~~**Sprites double when two mods are on**~~ — **fixed.** With character-flicker and
   widescreen both enabled, every sprite was drawn twice: once by the compositor (whose native
@@ -442,7 +496,7 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 
 **[AGENTS.md](AGENTS.md)** — Developer reference with present-tense constraints, codegen notes, submodule workflow, MesenCE testrunner API, verification procedures, and current-known issues. The canonical document for AI coding agents.
 
-**[docs/research.md](docs/research.md)** — Deep research: ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map, MesenCE oracle, NMI survey, current build state, PPU overclocking (§23), VSync (§24), widescreen (§25), margin sprites (§26), the pan judder (§27).
+**[docs/research.md](docs/research.md)** — Deep research: ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map, MesenCE oracle, NMI survey, current build state, PPU overclocking (§23), VSync (§24), widescreen (§25), margin sprites (§26), the pan judder (§27), the camera anchor (§28).
 
 ## References
 
