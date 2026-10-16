@@ -1,12 +1,22 @@
-# Super Dodgeball NES — Recompilation
+# Super Dodgeball Recomp
 
-Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C using the [NESRecomp](https://github.com/mstan/nesrecomp) framework and run it on PC.
+**Super Dodge Ball** (NES, 1989, Technōs Japan) recompiled to native C and running on your PC.
 
-![Super Dodge Ball title screen (recompiled build)](docs/assets/title.png)
+Not an emulator. The cartridge's 6502 machine code is translated to C at build time and executed natively against a cycle-accurate model of the console. It boots, it plays, and its memory state is byte-for-byte identical to an accurate emulator's from power-on through team select.
 
-> **Status:** playable — it boots to the title screen, plays through team-select verified byte-exact vs Mesen (state, not just pixels), and plays full matches end-to-end (throws land, damage digits show, HUD/menus render). The **widescreen mod is playable and has been played**: 16:9 / 21:9 / 32:9 with the court *and the players* in the margins, including the columns the game itself hides. It was found to be correct by recording and replaying real playthroughs, which is how its last two bugs were caught. It also has a **camera lock**, which stops the picture sliding and shows the whole court at once — built and gated, **not yet played**. Not yet tested on a full playthrough to completion. **Two** open questions remain, both in the flicker mod's presentation layer: the Bean Ball sprite-list bug, and a one-frame "ghost" of a menu character on screen transitions — four fixes were built and measured for that last one and each cost more than it fixed (`docs/research.md` §26, `docs/plan.md` 16). The pan judder that used to sit beside them is resolved — it is the game's own cadence, see `docs/research.md` §27. See `docs/plan.md` for the frontier.
+You bring the ROM. Nothing from the cartridge ships here.
 
-> *Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong here. This port is in development — expect rough edges.*
+![Super Dodge Ball title screen, recompiled build](docs/assets/title.png)
+
+| | |
+|---|---|
+| **Playable** | title, menus, team select, and full matches end to end — throws land, damage numbers show, HUD and menus render |
+| **Verified against** | MesenCE 2.2.1 — 400 frames of RAM, OAM, palette and CIRAM byte-exact from boot · blargg CPU suite 25/25 |
+| **Mods** | 3, all **off by default** — flicker removal, widescreen with margin sprites, PPU overclocking |
+| **Engine patches** | 2, both strictly additive and on their way upstream |
+| **Open bugs** | 2, both in the flicker mod's presentation layer |
+
+Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong [here](https://github.com/saftle/Super-Dodgeball-Recomp/issues). **This port is in active development; expect rough edges.**
 
 > **Fan project.** Unaffiliated with and not endorsed by any rights holder — see
 > [Legal and project notices](#legal-and-project-notices). No game content is
@@ -15,405 +25,470 @@ Recompile **Super Dodge Ball (USA)** (NES, 1989, Technos Japan) to native C usin
 
 ---
 
-## Quick Start
+# Playing
+
+## Quick start
 
 ```bash
-# Full setup (venv, submodules, MesenCE, cycle backend, blargg test ROMs)
+# 1. Drop your legally obtained ROM here:
+#      roms/Super Dodge Ball (USA).nes
+#      CRC32 689971F9 · SHA-1 42f954e9bd3256c011aba14c7e5b400abe35fde3
+
+# 2. One-time setup: submodules, engine, patches, MesenCE, first build
 ./setup.sh
 
-# Or build and run in one go (window opens on the launcher — press Play)
+# 3. Build and play
 ./build_and_run.sh
-
-# Headless scripted run (input schedule + last-frame screenshot)
-./build_and_run.sh --frames 400 --input tas/vectors/sdb_idle.input --screenshot out.png
-
-# Per-frame screenshots + memory snapshot at frame N (differential checks)
-./build-cycle/nes_game "rom.nes" --frames 400 --input tas/vectors/sdb_idle.input \
-  --shot-every 10 --screenshot shots/shot.png --mem-frame 399 --mem-out mem.txt
 ```
 
-## The launcher
+The window opens on the launcher — a settings dashboard from
+[recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui) where you set display,
+audio and per-player bindings before the game starts. Press **Play**, or **Escape**
+to skip straight in. Once the game is running, **Escape** opens the in-game menu
+(display, audio, save states, quit).
 
-The window opens on **[recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui)'s** pre-boot
-launcher: a settings dashboard where you set display, audio and per-player bindings before the
-game starts. Press **Play** to boot the ROM, or **Escape** to skip straight in.
+`setup.sh` needs a C++ compiler, `make`, SDL2 development headers and `xvfb-run`.
+It prints exactly what is missing and stops rather than failing later.
 
-Once the game is running, **Escape** opens the in-game menu — display and audio, save states,
-and quit. (The same key does both, because the launcher only exists before boot.)
+<details>
+<summary><b>Just here to play, or curious how it works? Pick your route.</b></summary>
 
-Settings and bindings persist to `build-cycle/config.ini` beside the executable. Keybinds are
-SDL key names; defaults are P1 = `Z`/`X`/`\`/`Return` + arrows, gamepad = `a`/`x`/`back`/`start`
-+ d-pad. Delete `config.ini` to restore defaults.
+- **Just playing** — you are done. `./build_and_run.sh`, then the
+  [Mods screen](#what-this-recomp-adds).
+- **Building on it** — [Repository layout](#repository-layout) ·
+  [the three files that matter](#the-three-files-that-matter) ·
+  [headless and scripted runs](#headless-and-scripted-runs) ·
+  [verification](#verification) · **[AGENTS.md](AGENTS.md)**, which is the
+  operating manual for coding agents on this repo.
+- **Curious how a recomp works** — [This is a recompiler, not an emulator](#this-is-a-recompiler-not-an-emulator).
+- **Ambitious** — [Notes from the trenches](#notes-from-the-trenches), which is
+  where most of the interesting mistakes are recorded.
 
-The launcher is built from the pinned `external/recomp-ui/` submodule — nothing game-specific lives in
-this repo. To build the window without it (launcher and in-game menu both off):
+</details>
+
+## What this recomp adds
+
+Three mods, all in the launcher's **Mods** screen, all **off by default**. With all
+three off the build is byte-identical to the unmodded game.
+
+They are ordinary mod packages — manifests in `mods/packages/`, selectable and
+deselectable at runtime. Nothing is patched into your ROM, and each section below
+says exactly what it costs the guest: **widescreen does not touch the guest at all**,
+the flicker mod makes it emit sprites it had dropped (which shifts its cycle count by
+a hair without changing how the game plays), and overclocking deliberately changes
+console timing.
+
+### Remove character flicker
+
+*Mods screen → Display*
+
+Super Dodge Ball is notorious for flickering characters, and the usual fix does not
+apply to it. Every emulator's "remove sprite limit" targets the PPU's
+8-sprites-per-scanline hardware limit. This game never gets that far — it throttles
+its own sprites, three separate ways, and in the worst of them the missing tiles are
+never computed at all.
+
+1. **Half a character.** OAM has 64 slots and a character takes 8, so a full match
+   overflows. The sprite builder hits a hard budget and *stops emitting* — 79% of
+   match frames have someone missing their lower body. This keeps emission going and
+   draws every sprite the game produces.
+2. **A whole character, gone 4 frames in 9.** The game builds a display list each
+   frame and deliberately leaves one object off it, rotating which object. Three
+   separate gates on that decision are overridden.
+3. **The numbers.** The floating damage digits and the team-select position digits
+   come from two sprite emitters shaped differently enough that nothing had ever
+   captured them — so the one thing on screen that tells you a hit landed was
+   missing entirely.
+
+Measured on a match, counting non-background pixels inside a character's box:
+
+| | before | after |
+|---|---|---|
+| body ink in the truncated character's region, frames 440–469 | stdev **8.7** (flickering) | **0.8** — and **0.0** for the character itself |
+| culled character's box, frames 700–909 | ink 543–741, stdev **55.0**, missing on 106 of 210 frames | ink 677–741, stdev **16.6**, **0** frames still culled |
+| damage numbers, frames 895–1400 | never captured | **108 / 108** frames steady |
+
+**What it costs.** Game logic is untouched: nothing in the game reads sprite OAM
+back, and sprite slot 0 never differs on any of 910 measured frames. The truncation
+half is presentation only — identical cycle count, two bytes of the OAM shadow page
+differ. The culling half is *not*, and the honest wording is that making the game
+emit an object it had dropped is extra work the guest then has to do, so its cycle
+count and NMI phasing shift by a couple of frames and OAM differs on 484 of 910
+frames. Nothing in the game can observe any of it — but "cannot observe" is not
+"byte-identical", and the picture (CIRAM) is identical on 899 of 910.
+
+> **Known issue, and the reason this is off by default:** with the mod on, the
+> level-switch screen after winning a match briefly shows white ghost sprites. Four
+> candidate fixes were built and measured; each one fixed this and broke something
+> worse. It needs a signal that the screen changed, and the mod has no notion of a
+> screen. Details in [`docs/plan.md` 16](docs/plan.md).
+
+### Widescreen
+
+*Mods screen → Display*
+
+**16:9 / 21:9 / 32:9 — 426 / 560 / 854 columns**, or fit the window. The extra
+columns show real court, and **the players the NES could not display**. Not
+upscaled: the same chunky pixels on a wider canvas.
+
+This is deliberately *not* wideNES. wideNES warps a framebuffer the NES has already
+produced, so it can only ever show you what the machine already put on screen — and
+it ignores sprites entirely, which its own maintainer names as the reason it never
+shipped. This game's world is different: it is entirely resident in the PPU's
+nametable before the frame starts (measured byte-identical from frame 450 to frame
+900), so a margin pixel can be *read* out of guest state — scroll, world column,
+tile, attribute, pattern byte, palette — exactly the way the PPU resolves it.
+
+**And the sprites are there too.** Super Dodge Ball places every sprite in a 16-bit
+screen coordinate, computes the tile, the flips, the palette and both halves of the
+position — and then discards it by truncating one byte, because it lives in a
+256-column viewport. Measured over 61 match frames, **40% of the objects on the
+pitch are off-screen at any moment**. Widescreen recovers that placement and draws
+it in the margin, facing, animation frame and palette intact. That is the capability
+wideNES names as the reason it never shipped, and it works here because the guest
+still knows where the object is.
+
+Two options:
+
+| Option | Values | |
+|---|---|---|
+| **Aspect ratio** | `fit` *(default)* · `16:9` · `21:9` · `32:9` · `stock` | `fit` follows your window's shape. Choose an explicit ratio if you want the width to be independent of the window. |
+| **Camera** | `follow` *(default)* · `locked` | See below. |
+
+Turning it on also reveals the **8 blank columns at the left that the game hides with
+PPUMASK** — blank in every one of 2112 measured frames. That is not a second toggle.
+The same compositor draws the court, the margins and those columns, and the
+combination a separate toggle would permit — widescreen on, reveal off — is a wide
+frame with a black band at its edge, which is precisely the artefact the feature
+exists to remove. `SDB_OVERSCAN=0` in the environment forces it back for
+measurement only.
+
+**Camera: `locked`.** The reason is arithmetic rather than taste. The court —
+everything the machine can ever display — is world columns **40 to 480**, because the
+game clamps its camera to `[40, 224]` behind a 256-column viewport. That is a
+**440-column court**, and play never takes the camera outside 102–180. So at 21:9
+and 32:9 the **entire court is already on screen at every camera position you will
+ever reach it from**. The panning adds motion and no information, and it competes
+with the one thing you are tracking. `locked` pins the canvas to the court and lets
+the game pan behind it. (16:9 is 426 columns and cannot hold the whole court, so
+locked centres it and loses 7 columns at each end rather than whichever end the ball
+happens to be near.)
+
+Two details you will notice, both deliberate:
+
+- **The HUD stays put.** This game splits its scroll mid-frame — rows 0–47 hold
+  still for the skyline, the player names and the health bars — so the anchor offset
+  is decided *per row*. Anchoring the whole canvas on the court would slide the HUD
+  6–7 px on every camera step.
+- **Menus and title screens stay centred.** They are drawn at screen-space columns
+  with a scroll of 0, so the court's window does not describe them and the anchor
+  stands down. The game's own camera clamp is the test, and it is free.
+
+The guest is untouched either way: `$C3/$C4`, OAM and the machine's own 256 columns
+are identical, and `follow` is byte-identical to a build without the setting.
+
+**The honest limit.** Past the court's own bounds the margin is the backdrop
+colour, so at 21:9 and 32:9 there can be a band at either end. That is deliberate.
+Mirroring and wrapping were both implemented and both rejected on the output: the
+world's outer band holds the scoreboard and the Statue of Liberty skyline, so
+mirroring renders the text backwards.
+
+**What it costs: nothing.** Presentation only, and proven rather than asserted — a
+`--frame-log` with the feature on is byte-identical to the same run with it off, on
+every vector tested (1,200 frames on three of them, 1,500 on the fourth, with and
+without the reveal): CPU RAM, CIRAM, palette, OAM and the entire 256×240 picture, at
+an unchanged cycle count. The stock 256 columns in the centre of a wide frame differ
+from the unmodded game by **zero pixels**. The reconstruction is checked against the
+machine's own background capture every frame and agrees to 1–2 px out of 61,440; a
+frame that fails falls back to the ordinary centred picture, which is why title
+screens and menus just work.
+
+Eleven placement and boundary bugs were found and fixed while auditing the margins,
+**ten of them only by playing the game** and replaying the session. If something
+looks wrong near an edge, [recording a playthrough](#recording-a-playthrough) is
+the fastest route to a frame number.
+
+### PPU overclocking
+
+*Mods screen → Emulation*
+
+Super Dodge Ball feels slower than it should, and the reason is structural: its main
+loop is an **NMI-synced spin**. It parks waiting for the next NMI, so the 6502 only
+gets 262 scanlines of CPU per frame. Add **blank scanlines before the NMI** and the
+guest completes more of its own work before parking again — the game runs faster.
+
+Nothing new is drawn. The added lines are blank (rendering is off above scanline
+239) and audio pauses across them, so the picture stays 256×240 and the effect is
+purely extra CPU time. Same mechanism as MesenCE's *Additional scanlines before NMI*
+and FCEUX's post-render scanlines. Measured against MesenCE at **+12 work-ticks per
+frame on average, and the lead grows**; on our own backend, 262 lines roughly doubles
+the per-frame CPU budget and the guest has a populated display list on 565 of 800
+frames instead of 316.
+
+The Mods screen exposes the count as a slider, **0 to 262**.
+
+> **This deliberately changes console timing, so it is off by default and is not
+> hardware-accurate.** Leave it off if you want original behaviour.
+
+### VSync
+
+*Launcher → Graphics → VSync*
+
+A toggle in the launcher's Graphics section. With it on, each present syncs to your
+display's refresh, so motion lands evenly at 60 Hz, 120 Hz or anything else.
+**Presentation only** — the guest keeps its stock clock either way. Needs
+`patches/007`, which `setup.sh` applies.
+
+Super Dodge Ball is already 60 Hz; there is no 30→60 cap to lift. What this fixes is
+presentation jitter — every frame used to be presented on a host timer with a few
+milliseconds of wobble. It cannot subdivide a scroll step the guest never drew, and
+this game scrolls coarsely: 6–7 pixels in a single frame, never anything between.
+
+## Controls
+
+| NES button | Keyboard | Gamepad 1 |
+|---|---|---|
+| A | Z | a |
+| B | X | x |
+| Select | `\` | back |
+| Start | Return | start |
+| Up / Down / Left / Right | Arrow keys | d-pad |
+
+| Key | |
+|---|---|
+| **Escape** | launcher before boot · in-game menu during play |
+| **Tab** | fast-forward |
+| **F8 / F9** | save state · load state |
+| **F11 / F12** | fullscreen · screenshot |
+
+All of these are rebindable in the launcher and persist to
+`build-cycle/config.ini` beside the executable — delete that file to restore
+defaults. Player 1 defaults to the keyboard and player 2 to the controller.
+
+To build the window without the launcher and in-game menu at all:
 
 ```bash
 NESRECOMP_RECOMP_UI=OFF ./build_and_run.sh
 ```
 
-See `NOTICE.md` for attribution.
+## What is and is not finished
 
-## Mods
+**Works:** boot, title, every menu, team select (400 verified frames reach
+`CHANGE POSITION?` with rosters and courts rendering), and full matches played end to
+end by scripted runs — throws land, damage digits show, HUD and menus render, an
+8000-frame stress run holds. Verification is byte-exact against MesenCE from boot
+through team select, and blargg's CPU suite passes 25/25 on this engine.
 
-The launcher has a **Mods** screen. Three ship with the build, all **off by default**:
+**Not tested:** a full playthrough to completion, with a human, including winning
+rounds and the level-switch screens. That is the main reason the flicker mod stays
+opt-in.
 
-- **Remove Character Flicker** — the original release flickered badly, three ways, none of them
-  the NES 8-sprites-per-line limit that emulator "remove sprite limit" options target; this game
-  throttles its own sprites, so no emulator setting can help:
+### Two open bugs
 
-  1. **Truncation** — OAM is built in place behind a cursor and the character emitter *stops*
-     once OAM's 64 slots are full, so the rest of a character is never computed. This mod keeps
-     emission going and draws every sprite the game produces, which also lifts the NES
-     8-per-scanline limit.
-  2. **Culling** — the game builds a display list each frame and deliberately leaves an object off
-     it, rotating which object, so a whole character blinks out for 4 frames in 9. Three gates on
-     that path are overridden; see `docs/research.md` §2.1.
-  3. **Orphan emitters** — the floating damage numbers and the team-select position numbers are
-     drawn by emitters with no cursor bump for a hook to sit on, so they were never captured.
-     Both are hooked per-emitter now (`docs/research.md` §2.1).
+- **Bean Ball: the sprite list shrinks while you run the length of the map.** In
+  that game mode — which lets you run across the *entire* map rather than a
+  half-width court — running from one end of the screen to the other makes the
+  flicker mod's presented sprite list decay frame by frame, **53 sprites down to 10**,
+  until a single player sprite remains, cut in half. The background stays perfect
+  (`1183 composed, 1 pillarboxed, seam diff 2 px`) so the compositor is not involved,
+  and the overflow and backstop counters both read 0, so it is not the runaway-list
+  bug. **Not established whether the game emits fewer sprites in that mode or the mod
+  drops them**, and the two need opposite fixes. Full write-up, the frame-by-frame
+  measurements and the next step are in [`docs/plan.md` 14](docs/plan.md).
 
-Game logic runs stock either way — nothing reads sprite OAM back, and sprite slot 0 never differs.
-The truncation half is presentation only (identical cycle count, 2 bytes of the OAM shadow page
-differ); the culling half is not, because making the game emit an object it had dropped *is* extra
-guest work — the picture itself is byte-identical on 899 of 910 frames. The feature is off
-unless you turn it on in the Mods screen (or pass `--remove-character-flicker` headless);
-with it off the output is byte-identical to the unmodded game.
+- **A one-frame ghost of a menu character.** A menu screen's character is retired
+  with `y=$F0`, the game then emits nothing for about 14 frames, and the mod repaints
+  it — a jumble of body parts on one frame of a screen transition, flicker mod only.
+  Four rules were built and measured; the nearest miss fixed the ghost cleanly and
+  cost 11% of sweep frames (8 players becoming 4). It needs to know *the screen
+  changed*, and it cannot currently. [`docs/plan.md` 16](docs/plan.md).
 
-> **Known issue:** with the mod on, the level-switch screen (after winning a match) briefly
-> shows white ghost sprites. Under investigation — this is why the mod stays off by default.
+### Resolved, and worth not re-investigating
 
-- **PPU Overclocking** — the game feels slower than it should, because its main loop is
-  an NMI-synced spin: it parks waiting for the next NMI, so the guest only gets 262
-  scanlines of CPU per frame. This adds **blank scanlines before the NMI**, so the guest
-  completes more of its own work each frame and the game runs faster. Nothing new is
-  drawn — the added lines render nothing and audio pauses across them, so the picture
-  stays 256×240; the effect is purely extra CPU time. Same mechanism as MesenCE's
-  *Additional scanlines before NMI* and FCEUX's post-render scanlines. The Mods screen
-  exposes the count (0–262; 262 roughly doubles the per-frame CPU budget).
+- ~~**Sprite judder while the camera pans**~~ — **it is the game's own cadence.**
+  The game updates its camera and its sprite OAM two frames apart, so a running
+  player detaches from the floor for two frames and snaps back. MesenCE reproduces it
+  exactly — same two-frame offset, same base position, same blip — so nothing here is
+  broken and a mod cannot reach it. `python3 tools/tas/judder.py RUN` re-derives the
+  whole thing in one command.
+- ~~**Widescreen cannot show more world than the game has**~~ — the bound is the
+  game's **camera window**, columns 40 to 480, not the end of the address space. And
+  with `camera = locked` there is no sliding at all.
+- ~~**Widescreen margins are background only**~~ — part of the feature now, not a
+  toggle. A margin with no players in it is not a wider game.
+- ~~**Sprites double when both display mods are on**~~ — fixed, with the invariant
+  checked rather than assumed.
+- ~~**Character flickering**~~ — fixed, all three causes.
 
-  **This deliberately changes console timing, so it is off by default and is not
-  hardware-accurate** — leave it off if you want original behaviour.
+---
 
-  Headless:
+# How it works
 
-  ```bash
-  ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 800 \
-    --input tas/vectors/sdb_throw.input --ram-init zeros --ppu-overclock 262
-  ```
+## This is a recompiler, not an emulator
 
-  It needs `patches/006_ppu_overclock_mmc1` (applied by `setup.sh`); without it the
-  backend refuses the setting on an MMC1 cartridge. Measured numbers and the
-  three-emulator comparison are in `docs/research.md` §23.
+The cartridge's 6502 machine code is translated to C at build time — one labelled
+block per ROM instruction, with every CPU cycle's bus activity written out — then
+compiled to native code and run against a cycle-accurate model of the NES: 6502,
+PPU, APU, DMAs and the MMC1 mapper. There is no interpreter in the hot path and
+nothing is decoded at runtime.
 
-- **Widescreen** — presents **16:9 / 21:9 / 32:9** (426 / 560 / 854 columns) or the
-  window's own shape, with the extra columns showing court the NES could not display.
-  The guest is never touched: the extra columns are read out of the nametable, CHR
-  and the frame's own scroll, and the stock 256-column picture stays authoritative
-  in the middle — so the centre of a wide frame is pixel-for-pixel the unmodded game.
-  Reconstruction is verified against the machine's own background every frame, and a
-  frame that fails falls back to the ordinary centred picture, which is why title
-  screens and menus just work.
+Two consequences shape everything else in this repo:
 
-  Past the court's own bounds the margin is the backdrop colour. Those bounds are
-  the game's own camera window: the camera is clamped to `[40, 224]`, so the
-  machine can only ever display world columns 40 to 480, and an 854-column
-  frame does not fit inside that. At 21:9 and 32:9 there can be a black band at
-  either end. That is deliberate — mirroring or repeating the world was tried
-  and renders the scoreboard backwards.
+**The picture is the machine's, not a reconstruction.** The verification that matters
+is state comparison against an accurate emulator, byte for byte, per video frame —
+not screenshots that happen to look similar.
 
-  It is **not** upscaled: the same chunky pixels on a wider canvas.
+**The game's own behaviour is available to be read.** RAM the guest wrote is the
+guest's, and every mod here is built by hooking the game at its own decisions rather
+than by watching pixels go by. That is also why widescreen can draw a sprite the
+NES hid: the placement was computed, and only the truncation was thrown away.
 
-  Turning it on also reveals the 8 blank columns at the left that the game hides
-  with PPUMASK — blank in every one of 2112 measured frames. That is not a second
-  toggle: the same compositor draws both, so leaving them separately switchable
-  permits the combination this feature exists to prevent, a wide frame with a
-  black band at its edge. It follows widescreen on **every** path — the flag, the
-  launcher, `--mods-root` — and `SDB_OVERSCAN=0` is the only way to see it off.
+The cost is that recompilation is one-way. The toolchain goes ROM → C and there is
+no C → ROM path. Which is also why the repository contains **no ROM and no assets
+extracted from one** — addresses, sizes and hashes are facts about a cartridge and
+are fine; bulk game bytes are not, so every hook site is keyed by CRC32 rather than
+by content.
 
-  The extra columns carry **the players too**, not just the court. Super Dodge Ball
-  places every sprite in a 16-bit screen coordinate and then hides anything
-  outside its own 256-column viewport, so **40% of the objects on the pitch are
-  off-screen at any moment** and the NES simply cannot show them. Widescreen
-  recovers the placement the game computed and draws it there — facing,
-  animation frame and palette included. This is the thing wideNES names as the
-  reason it never shipped: it warps pixels it has already been given, so a
-  sprite that was never drawn is unreachable. Here the guest still knows where
-  the object is.
+## Repository layout
 
-  It is strictly presentation: 700 frames of RAM, CIRAM, OAM, palette and picture
-  are byte-identical with it on or off, and the centre 256 columns differ by
-  zero pixels. For background-only margins, pass `--margin-sprites 0`.
-
-  Headless:
-
-  ```bash
-  ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 900 \
-    --input tas/vectors/sdb_throw.input --ram-init zeros --widescreen 32:9
-  ```
-
-  Design notes, the four reconstruction bugs the seam check caught, and the
-  overscan measurement are in `docs/research.md` §25. The margin-sprite half —
-  and the **eight** placement/boundary bugs found while auditing it — are in §26.
-
-  **To play it and record what you see**, use `tools/play_record.sh` below. Ten
-  of those eleven bugs were found by playing the game and replaying the session
-  rather than by running a script, because no hand-written vector reached the
-  states they needed. **The eighth was not**: a duplicated sprite at the seam that
-  flickered while the camera panned turned out to sit on a committed vector the
-  whole time, and was missed because the audit in use compares the margin against
-  itself and cannot see a margin that is internally consistent and a whole camera
-  step from the machine. Worth knowing before reaching for the gamepad again.
-
-- **Camera: follow, or locked** — a second setting on the widescreen feature, and
-  it is the one that changes how the game feels.
-
-  `follow` is stock: the canvas is centred on the camera, so the picture slides
-  when the camera steps. `locked` makes the canvas a **fixed window on the court**
-  and lets the game pan behind it.
-
-  The reason is arithmetic rather than taste. The court — everything the machine
-  can ever display — is world columns **40 to 480**, because the camera is clamped
-  to `[40, 224]` behind a 256-column viewport. So the court is 440 columns wide,
-  the camera slides 184 of them, and at **21:9 (560) and 32:9 (854) the entire
-  court is already on screen at every camera position play reaches** (measured:
-  the camera spans 102–180 over a match). The panning adds motion and no
-  information, and it competes with the one thing you are tracking. 16:9 is 426
-  columns and cannot hold the whole court; locked centres it and loses 7 columns
-  at each end rather than one end or the other depending on where the ball is.
-
-  It is strictly presentation. `$C3/$C4`, OAM and the machine's own 256 columns
-  are untouched — the block is simply placed elsewhere on the canvas. It is
-  off by default, and `follow` is byte-identical to a build without the setting.
-
-  Two details that are not obvious: the game's HUD stays put. This game splits its
-  scroll mid-frame, with rows 0–47 holding still for the skyline and the
-  scoreboard, so the offset is decided **per row** — anchoring the whole canvas on
-  the court would slide the HUD 6–7 px on every camera step. And the window is
-  placed with `cyc_render_set_native_origin`, which is what that engine call is
-  for and which nothing here used before.
-
-  ```bash
-  ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 900 \
-    --input tas/vectors/sdb_throw.input --ram-init zeros \
-    --widescreen 32:9 --camera locked
-  ```
-
-  Menus and title screens are **centred, not anchored** — a menu is drawn at
-  screen-space columns and its scroll is 0, so the court's window does not
-  describe it and the anchor stands down.
-
-  **Played once**, and playing found two bugs that no scripted check could see:
-  menus landing left of centre, and the health bars sliding with the camera
-  while the court sat still. Both fixed. The second is the one worth knowing
-  about — it only appears with the character-flicker mod *also* on, because with
-  it off the flicker path never touches the canvas. Any further work on the
-  compositor should be checked both ways.
-
-  A locked camera also promotes the margin from "where the camera happens to be
-  looking" to "where the players are, all the time", so the eleven margin bugs of
-  §26 all get a much bigger audience. `tools/play_record.sh` below is the way to
-  look. Measurements and the gate are in `docs/research.md` §28.
-
-For headless runs the catalog is only read when you point at it, and the feature is
-off unless you ask for it:
-
-```bash
-./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --frames 470 \
-  --input <schedule> --ram-init zeros --mods-root build-cycle/mods \
-  --remove-character-flicker \
-  --present-out out.png --present-every 1
-```
-
-`--present-out` writes what the *window* would show, which is the only path that exercises the mod —
-`--screenshot` and `--frame-log` capture the machine's native frame and ignore it.
-
-## Display
-
-The launcher's **Graphics** section has a **VSync** row. With it on, each present
-syncs to the display's refresh, so motion lands evenly at 60 Hz, 120 Hz or
-anything else. **Presentation only**: the guest keeps its stock clock either way.
-(Adaptive in that row behaves the same as On.) Needs `patches/007_window_vsync`
-(applied by `setup.sh`). See `docs/research.md` §24.
-
-## Getting MesenCE (for frame comparison)
-
-The recompiled game's frame output can be compared against an accurate NES emulator reference. **MesenCE** (`nesdev-org/MesenCE`) is used as the reference renderer. Three ways to get it:
-
-### Option A: Download pre-built binary (easiest)
-
-```bash
-wget -O /tmp/mesen.zip https://github.com/nesdev-org/MesenCE/releases/download/2.2.1/Mesen_2.2.1_Linux_x64.zip
-unzip /tmp/mesen.zip -d /tmp/mesen_extract
-cp /tmp/mesen_extract/Mesen external/mesence/Mesen
-```
-
-Fastest way to get a working Mesen binary. No build tools or .NET SDK required.
-
-### Option B: Build from source
-
-```bash
-# Prerequisites: g++/clang++, SDL2 dev, make, .NET SDK
-cd external/mesence
-USE_GCC=true make -j$(nproc)
-```
-
-`setup.sh` does this automatically if the binary doesn't already exist.
-
-**Dependencies:** C++17 compiler, SDL2 development headers, make, and a .NET SDK (8.0 available from apt; 10.0 requires `ppa:dotnet/backports`).
-
-### Option C: Let setup.sh handle it
-
-```bash
-./setup.sh
-```
-
-Clones `external/mesence` from GitHub, builds with `USE_GCC=true make -j$(nproc)`, and copies the binary to `external/mesence/Mesen`. If the binary already exists, it skips the build.
-
-## Controls
-
-| NES Button | Keyboard | Gamepad 1 |
-|---|---|---|
-| A | Z | a |
-| B | X | x |
-| Select | \ | back |
-| Start | Return | start |
-| Up | Up | d-pad Up |
-| Down | Down | d-pad Down |
-| Left | Left | d-pad Left |
-| Right | Right | d-pad Right |
-
-## Architecture
-
-Static recompilation, not an emulator. The original 6502 machine code is translated to C at build time — one block per ROM instruction with every CPU cycle's bus activity spelled out — then compiled to native code and run on a cycle-accurate console model (CPU, PPU, APU, DMAs, mappers).
-
-- **`CMakeLists.txt`** — The game project (root). Wraps the submodule's `runner/cyc/project.cmake` and adds `CXX`, `MODS`, `GAME_ID` and `HOST_EXTRAS`, which the submodule's own project file can't express — so the submodule stays pristine.
-- **`src/game.toml`** — Recompiler config: display `name` (window title), a `cycle_seed_file`, and twelve content-keyed `[[mod_function_hook]]` sites: the ten the character-flicker mod hooks, plus `$8483` and `$8302` that read the game's off-screen sprite cull for the widescreen margins. Hooks are keyed by `crc32`, never by ROM bytes. Fed to the cycle backend at configure time.
-- **`src/cycle_seeds.txt`** — Recompiler discovery roots. A mod hook site only exists in *recompiled* code, and the sprite emitters the mod hooks ran on the interpreter; these six lines make them native. Total cycle count unchanged.
-- **`src/sdb_host_extras.c`** — Our three mods: the **character-flicker mod** (captures every OAM sprite the game emits and presents them host-side, overriding the game's own object culling — research.md §2.1), the **PPU-overclocking mod** (picks a value for the backend's extra-scanlines setting — research.md §23) and the **widescreen compositor** (reads the nametable to fill a 426/560/854-column canvas, the game's own 16-bit sprite positions to fill it with players, and optionally pins the canvas to the court instead of to the camera — research.md §25, §26 and §28).
-- **`mods/`** — The mod packages (`manifest.toml` only; `.nesmod` archives can't carry native code). Off by default, toggleable in the launcher's Mods screen.
-- **`build-cycle/`** — Cycle-backend build (gitignored): per-instruction C (`game_cyc*.c`, one revision dir per ROM/config) + `nes_game` runner + the preloaded `mods/` catalog.
-- **`external/nesrecomp/`** — NESRecomp framework submodule (recompiler + runners)
-- **`external/mesence/`** — MesenCE emulator (reference rendering + oracle Lua API)
-- **`tools/frame_gen/`** — Mesen frame export Lua script + wrapper
-- **`tools/overclock/`** — PPU-overclocking oracle harness (research.md §23)
-- **`tools/blargg/`** — blargg test-ROM suite on the cycle backend (`run_blargg.py`, `manifest.json`); per-ROM builds in `build-cyc-blargg/`, ROMs in `external/nes-test-roms/` (both gitignored)
-- **`tools/tas/`** — TAS-integrated differential harness: bk2/fm2 → canonical `tas.json`, shared-input runners for MesenCE + cycle backend with full state capture, three-layer first-divergence diff (`run_tas.py`, `diff_tas.py`, `mesen_tas.lua`); vectors in `tas/vectors/`, runs in `tas/runs/` (gitignored)
-- **`tools/widescreen/`** — Measurement behind research.md §25–26 and §28: `nametable.py`, `blank_extent.py`, `objects.py`, `margin_track.py` (the per-sprite audit of the margin sprites), `band_fault.py`, `json_trace.py` (reads the `SDB_TRACE_JSON` stream), `anchor_gate.py` (the camera lock's gate — needs three runs, and **fails on a follow capture by design**), and `cycframe.py` (the shared `--frame-log` reader)
-
-## Recording a playthrough
-
-The widescreen margin bugs are found by *playing*, not by running a script: the
-court's input window opens late, a boundary artifact needs the camera to pan the
-whole width, and one bug needs the player to run across the map. None of those
-is expressible as a hand-written input schedule.
-
-```bash
-tools/play_record.sh bar-artifact 2000
-```
-
-Plays the game in a window and records the session to `tmp/bar-artifact/` as a
-replayable `--input` vector, an `SDB_TRACE=1` log, and a screenshot per frame.
-Close the window when you have what you came for — the vector records the true
-frame count.
-
-```bash
-SDB_SCALE=2 SDB_SHOT_EVERY=1 tools/play_record.sh bar-artifact   # bigger window
-```
-
-| | |
+| Path | |
 |---|---|
-| `SDB_MODS` | which mods are on — any combination of `remove-character-flicker`, `widescreen`, `ppu-overclock`. Default `remove-character-flicker,widescreen`. An unknown name is refused with the valid list rather than being passed to the catalog, whose own refusal names a *package* and leaves you guessing which feature you mistyped |
-| `SDB_ASPECT` | `16:9` (default), `21:9`, `32:9`, `stock` — used only when `widescreen` is on |
-| `SDB_CAMERA` | `follow` (default) or `locked` — used only when `widescreen` is on. The locked camera pins the canvas to the court instead of to the game's camera (research.md §28) |
-| `SDB_OVERSCAN` | `0` turns the clipped-column reveal off for the headless A/B in gate 5. The reveal is otherwise on whenever widescreen is, on every path |
-| `SDB_SCANLINES` | `ppu-overclock` scanlines, `0..262` (default 262). **Changes guest timing**, so a capture with it on compares against no stock figure in the docs |
-| `SDB_SHOT_EVERY` | **present** every N frames (default 1) — not a screenshot interval: the compositor only runs on a presented frame, so `N > 1` silently skips it and every `drawn`/`composed` count drops |
-| `SDB_UNLIMITED` | `1` runs until you close the window, ignoring `SDB_FRAMES`. Close it normally — SIGKILL skips the destructor and the vector loses its frame count |
-| `SDB_SCALE` | window scale, `1` or `2` (default 1) |
-| `SDB_FRAMES` | frame cap (default 2000) |
+| [`src/game.toml`](src/game.toml) | Recompiler config — window title, discovery roots, and twelve content-keyed hook sites |
+| [`src/sdb_host_extras.c`](src/sdb_host_extras.c) | **All three mods.** The only game-specific C in the tree |
+| [`src/cycle_seeds.txt`](src/cycle_seeds.txt) | Discovery roots that make the hooked sprite emitters recompiled rather than interpreted |
+| `mods/packages/` | One manifest-only package per mod, copied beside the executable at build time |
+| [`CMakeLists.txt`](CMakeLists.txt) | The game project. Wraps the engine's own project file and adds what that file cannot express, which is why the submodule stays pristine |
+| `external/nesrecomp/` | Pinned engine submodule. The tree is *expected* to be dirty — `setup.sh` applies `patches/*.patch` after every checkout |
+| `external/recomp-ui/` | Pinned launcher and in-game menu |
+| `external/mesence/` | MesenCE, the reference emulator |
+| `tools/` | Measurement harnesses — see [verification](#verification) |
+| `docs/` | [`research.md`](docs/research.md) (28 sections), [`plan.md`](docs/plan.md) (the open-issues list) |
+| `tas/vectors/` | Recorded input vectors, including one captured from a hand-played session |
+| `build-cycle/` | The build. Gitignored; holds the per-instruction generated C and `nes_game` |
 
-The mod set is written into `state.toml` and echoed in the run header *and* appended to `repro.input`, because the replay command has to be the one that reproduces the capture. `--widescreen` follows the mod set rather than being passed unconditionally: the flag is handled in our own option parser and installs the compositor by itself, so passing it for a flicker-only capture would quietly turn widescreen on.
-
-**The scale is not optional.** `WindowScale = 3` + `Fullscreen = 1` makes each
-screenshot a 14.87 MB 1080p encode, which drops the run to ~41 fps and the game
-*and its audio* into slow motion. The script pins it; leave it pinned. Details
-and the measurements in AGENTS.md.
-
-**Analyse a capture where it was made.** The window and headless hosts do not
-run the same guest state (frames 0-3 match, frame 4 diverges), so replaying a
-recorded vector headless describes a different game. `margin_track.py` reads the
-trace log directly and needs no replay.
-
-### Project Structure
+### Project tree
 
 ```
 Super Dodgeball Recomp/
-├── roms/                          # NES ROM files (gitignored)
-├── src/                           # Project source
-│   ├── game.toml                  # Recompiler config (display name + mod hook sites)
-│   ├── sdb_host_extras.c          # Flicker / overclock / widescreen mods
-│   └── third_party/               # Local gitignored build scratch (not shipped)
-├── mods/                          # Mod package(s), copied beside the executable at build time
-│   └── packages/
-│       ├── super-dodgeball.character-flicker/   # manifest.toml only (data-only by design)
-│       ├── super-dodgeball.ppu-overclock/       # manifest.toml only (data-only by design)
-│       └── super-dodgeball.widescreen/          # manifest.toml only (data-only by design)
-├── external/nesrecomp/            # NESRecomp submodule
-├── external/mesence/              # MesenCE emulator (reference rendering)
-├── external/nes-test-roms/        # blargg suite checkout (gitignored, via setup.sh --fetch path)
-├── build-cyc-blargg/              # blargg per-ROM cycle builds (gitignored)
-├── build-cycle/                   # Cycle-backend build (gitignored)
+├── roms/                          # your ROM goes here (gitignored)
+├── src/
+│   ├── game.toml                  # recompiler config + 12 hook sites
+│   ├── cycle_seeds.txt            # discovery roots for the hooked emitters
+│   ├── sdb_host_extras.c          # flicker / overclock / widescreen
+│   └── third_party/               # local build scratch, not shipped
+├── mods/packages/                 # manifest-only packages, one per mod
+│   ├── super-dodgeball.character-flicker/1.0.0/manifest.toml
+│   ├── super-dodgeball.ppu-overclock/1.0.0/manifest.toml
+│   └── super-dodgeball.widescreen/1.0.0/manifest.toml
+├── external/
+│   ├── nesrecomp/                 # engine (pinned submodule, dirty when patched)
+│   ├── recomp-ui/                 # launcher + in-game menu (pinned submodule)
+│   ├── mesence/                   # MesenCE (pinned submodule; binary fetched at setup)
+│   └── nes-test-roms/             # blargg suite (gitignored, via setup.sh)
 ├── tools/
-│   ├── compare_frames.py          # Mesen reference vs cycle screenshot comparison
+│   ├── widescreen/                # compositor measurement: nametable, objects,
+│   │                              #   margin audit, bounds, anchor, JSON trace
+│   ├── tas/                       # co-simulation harness (run_tas / diff_tas / judder)
+│   ├── blargg/                    # blargg suite on this engine
+│   ├── frame_gen/                 # MesenCE frame export + oracle Lua
+│   ├── overclock/                 # PPU-overclocking oracle harness
+│   ├── flicker/                   # OAM/record dumps behind the flicker analysis
+│   ├── compare_frames.py          # reference vs cycle screenshot comparison
+│   ├── dis65.py                   # dependency-free 6502 disassembler
 │   ├── rom_to_asm.py              # ROM → assembly listing helper
 │   ├── run_roundtrip.py           # ROM → asm → ROM byte-preservation check
-│   ├── dis65.py                   # Dependency-free 6502 disassembler
-│   ├── blargg/                    # blargg suite on the cycle backend (run_blargg.py, manifest)
-│   ├── tas/                       # TAS differential harness (converters, runners, diff)
-│   ├── frame_gen/                 # Mesen frame export + oracle dump + memwatch scripts
-│   ├── overclock/                 # PPU-overclocking oracle harness (research.md §23)
-│   └── widescreen/                # Nametable + blank-border measurement (research.md §25)
+│   └── play_record.sh             # play in a window, record the session
 ├── tas/
-│   ├── vectors/                   # TAS movies (.bk2 + format samples, committed)
-│   └── runs/                      # Per-TAS run artifacts (gitignored)
-├── venv/                          # Python virtual environment (gitignored)
-├── docs/
-│   ├── research.md                # Deep research notes
-│   ├── plan.md                    # Project plan
-│   └── assets/                    # README images (title screen)
-├── LICENSE.md                     # PolyForm Noncommercial 1.0.0
-├── NOTICE.md                      # Attribution, rights holders, no game content, AI disclosure
-├── .github/
-│   ├── workflows/ci.yml           # ROM-less CI (engine + scripts + config)
-│   └── raid-discord.png           # R.A.I.D. invite badge (footer)
-├── setup.sh                       # Environment setup (venv + submodules + build)
-├── build_and_run.sh               # Quick build + run (cycle backend, windowed)
-├── CMakeLists.txt                 # Game project: wraps the submodule's project.cmake + MODS/HOST_EXTRAS
-├── README.md
-└── AGENTS.md                      # Developer reference for AI coding agents
+│   ├── vectors/                   # recorded input vectors
+│   └── runs/                      # per-run artefacts (gitignored)
+├── build-cycle/                   # the build (gitignored)
+├── patches/                       # active engine patches, applied by setup.sh
+├── docs/                          # research.md, plan.md, assets/
+├── setup.sh · build_and_run.sh · CMakeLists.txt
+├── AGENTS.md                      # operating manual for coding agents
+└── README.md
 ```
 
-## Frame Comparison Pipeline
+## The three files that matter
 
-Compare cycle-backend output against an accurate NES reference using MesenCE.
+**`src/game.toml`** carries the window title, the `cycle_seed_file`, and twelve
+`[[mod_function_hook]]` sites: the ten the flicker mod needs, plus two that read the
+game's own off-screen sprite cull for the widescreen margins. Sites are keyed by
+`length` + `crc32` and never by `bytes`, so no ROM data is committed. They declare no
+`id` — they bind to plugins by address.
+
+The subtle part: **a hook site only exists in recompiled code.** Five of the
+addresses the mods need sit in routines that static discovery never reaches, so they
+ran on the interpreter — where a hook compiles, binds, and never fires. That is what
+`src/cycle_seeds.txt` is for: six roots that make them native, at an unchanged total
+cycle count. A hook declared at an address that discovery never reached looks
+completely healthy and does nothing.
+
+**`src/sdb_host_extras.c`** is the whole of the game-specific work: the flicker
+mod's sprite capture, host-side redraw and culling override; the overclocking mod,
+which is just a value handed to the engine's existing extra-scanlines setting; and
+the widescreen compositor with its margin-sprite capture. One file, three features.
+
+**`mods/packages/*/*/manifest.toml`** are declarations, not code. A `.nesmod` archive
+may not carry native code, so each package is a manifest naming features whose
+implementation is statically linked into `nes_game` and selected by a stable id.
+That is also why a package cannot carry a different licence from the code it points
+at — see [`NOTICE.md`](NOTICE.md).
+
+## Headless and scripted runs
 
 ```bash
-# Step 1: Generate reference frames with MesenCE
-./tools/frame_gen/run_frames.sh roms/Super Dodge Ball (USA).nes 100 nes_reference --start
-
-# Step 2: Generate cycle-backend frames with screenshots
-./build_and_run.sh --frames 100 --shot-every 1 --screenshot cyc_shots/shot.png
-
-# Step 3: Compare pixel-by-pixel (tolerance-based: exact RGB never matches across renderers)
-# (cyc names shots shot_00000.png; rename to the frame_XXXX.png scheme first)
-python3 -c "import glob,os; [os.rename(p,'cyc_shots/frame_%04d.png'%int(p.split('_')[-1].split('.')[0])) for p in glob.glob('cyc_shots/shot_*.png')]"
-python3 tools/compare_frames.py --ref nes_reference --recomp cyc_shots --frames 100
+./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" [flags]
 ```
 
-### TAS-integrated differential testing (`tools/tas/`)
+| Flag | |
+|---|---|
+| `--frames N` `--input FILE` `--screenshot PATH` | imply headless; `--input` takes an absolute-state schedule (`<frame> NAMES`) |
+| `--ram-init zeros` | **pass this on every comparison run.** Pattern RAM otherwise, and two runs are not comparable |
+| `--mods-root build-cycle/mods` | the mod catalog. Without it a headless run is stock and stays that way — which is the intended way to A/B a mod |
+| `--remove-character-flicker` `--ppu-overclock N` `--widescreen MODE` `--margin-sprites 0` | the features, from the command line |
+| `--present-out PATH --present-every N` | writes what the **window** would show |
+| `--shot-every N --screenshot PATH` | the machine's native frame |
+| `--frame-log-at mesen --frame-log FILE` | per-frame state snapshots (RAM, CIRAM, palette, OAM, picture indices) |
+| `--mem-frame N --mem-out FILE` `--miss-log FILE` `--align 0-3` | memory dump, interpreter-miss log, snapshot alignment |
 
-Same TAS input drives both the MesenCE oracle and the cycle backend; diffs CPU RAM, CIRAM, palette indices, and OAM byte-exact per video-frame to the first divergence (liveness → state → informational images). Vectors: TASVideos #4976 `.bk2` in `tas/vectors/` (headerless MD5 matches our ROM).
+Two of those deserve emphasis, and both have cost real time:
+
+**`--present-out` is the only path that exercises a mod.** It writes what the window
+would show. `--screenshot` and `--frame-log` capture the machine's native 256×240
+frame and cannot see any of them. If you are measuring a presentation mod with
+`--screenshot`, you are measuring nothing.
+
+**`--present-every N` is a present interval, not a screenshot density knob.** The
+compositor only runs when something presents the picture, so `N > 1` skips it —
+silently, with no warning — and every `drawn` and `composed` figure in this repo is a
+stride-1 figure. A figure taken at another stride is not a regression, it is
+meaningless. Measure at 1.
+
+A worked example: both display mods on, 900 frames, every frame presented, with the
+trace that turns "the screen looked wrong somewhere" into a frame number.
+
+```bash
+SDB_TRACE=1 ./build-cycle/nes_game ROM --frames 900 \
+  --input tas/vectors/sdb_throw.input --ram-init zeros \
+  --mods-root build-cycle/mods --remove-character-flicker --widescreen 32:9 \
+  --present-out tmp/wide/on_%05d.png --present-every 1
+```
+
+One headless gotcha: the widescreen feature's default aspect is `fit`, and `fit`
+resolves to the **stock 256 columns** when there is no window to follow — so the
+engine never calls the compositor and the feature appears to do nothing at all. Pass
+an explicit `--widescreen 16:9` on the command line.
+
+## Verification
+
+Three layers, all comparing state rather than pixels.
+
+### Co-simulation against MesenCE
+
+One input schedule drives both the cycle backend and an accurate emulator. CPU RAM,
+CIRAM, palette indices and OAM are diffed byte-exact per video frame, landing on the
+first divergence.
 
 ```bash
 python3 tools/tas/bk2_to_tas.py tas/vectors/sdb_4976.bk2 tas/sdb_4976.tas.json
@@ -421,32 +496,62 @@ python3 tools/tas/run_tas.py --tas tas/sdb_4976.tas.json --frames 400 --out tas/
 python3 tools/tas/diff_tas.py tas/runs/r400
 ```
 
-The cycle side runs with an absolute-state input schedule plus `--frame-log-at mesen` binary snapshots (RAM/CIRAM/palette/OAM/picture per frame) and `--shot-every` screenshots. Honesty is sealed: cycle snapshots are byte-identical across repeat runs, and real differences get reported (sprite entry-0 mirror bytes masked — hardware mirrors them to the backdrop, see `diff_tas.py`). Current state: RAM/OAM/palette/CIRAM match from boot; 400 TAS frames reach team-select. See `tools/tas/README.md`.
+400 frames reach team select with every byte matching. Sprite palette entry-0 mirrors
+(`$3F10/$3F14/$3F18/$3F1C`) are masked — hardware mirrors them to the backdrop and
+the engine's model does not; rendering is unaffected.
 
-### Cycle-accurate backend (`build-cycle/`, gitignored)
+The TAS is an input source more than an oracle. Super Dodge Ball is a random game, so
+RNG divergence between the two sides eventually puts them on different paths and a
+red diff may be that rather than a defect. Investigate the first divergent frame; do
+not assume a regression. **Ask before running it** — it is minutes of compute, and
+blargg is upstream's gate rather than this project's.
 
-This is the backend everything runs on: per-cycle 6502/PPU/APU/DMA with own
-mappers, via the upstream project integration. `./build_and_run.sh` and
-`./setup.sh` target it; `./build-cycle/nes_game` takes the host flags
-(`--frames`, `--input` schedule `<frame> NAMES`, `--ram-init zeros`,
-`--shot-every`, `--mem-frame`/`--mem-out`, `--miss-log`, `--align 0-3`,
-`--mods-root`, `--present-out`/`--present-every`/`--present-size`) plus the
-game's own (`--remove-character-flicker`, `--ppu-overclock N`,
-`--widescreen MODE`, `--margin-sprites 0`).
+### blargg's CPU test suite
 
-`--present-every N` sets the **present** interval, not a screenshot interval. The
-compositor only runs on a presented frame, so a stride above 1 skips it and every
-`drawn`/`composed` count in this README and in AGENTS.md is a stride-1 figure.
+Run against this engine: **25/25** — 20 RAM-text PASS (including `12-jmp_jsr` at
+99.4% native, the JSR/RTS case a less careful runtime fails) plus 5 screen-confirmed
+PASS (`branch_1/2/3`, `dummy_reads`, `timing_test6`). That is a statement about the
+engine, not about Super Dodge Ball.
 
-`--present-out` is the one that matters for mods: it writes what the *window*
-would show. `--screenshot` and `--frame-log` capture the machine's native frame
-and never see any of them.
+```bash
+python3 tools/blargg/run_blargg.py --tier cpu     # ask first — many minutes
+```
 
-Findings: 400 TAS frames reach team-select, matching Mesen; blargg cpu tier
-25/25 green (20 RAM-text PASS incl. `12-jmp_jsr` at 99.4% native, 5
-screen-confirmed PASS: branch_1/2/3, dummy_reads, timing_test6).
+### The mods' own gates
 
-### Deeper oracle work (PPU dumps, per-NMI flag logs)
+Each mod has a numbered gate list in [`AGENTS.md`](AGENTS.md), each gate naming the
+measurement that decides it — margin sprites off vs on must be byte-identical over
+700 frames, the machine's own 256 columns must differ by zero pixels, `drawn` and
+`off-edge` are pinned at 33,885 and 3,951 on the sweep vector. Read those before
+changing a mod; they encode what is easy to break silently.
+
+### Frame comparison
+
+Pixel comparison against MesenCE references is **informational only**. Cross-renderer
+RGB never matches, because palette emulation differs. State bytes decide; images are
+for eyeballing.
+
+```bash
+# 1. Reference frames from MesenCE
+./tools/frame_gen/run_frames.sh "roms/Super Dodge Ball (USA).nes" 100 nes_reference --start
+
+# 2. The same frames from the cycle backend
+./build_and_run.sh --frames 100 --shot-every 1 --screenshot cyc_shots/shot.png
+
+# 3. Rename — the backend writes shot_00000.png, MesenCE writes frame_0000.png
+python3 -c "import glob,os; [os.rename(p,'cyc_shots/frame_%04d.png'%int(p.split('_')[-1].split('.')[0])) for p in glob.glob('cyc_shots/shot_*.png')]"
+
+# 4. Compare (tolerance-based: exact RGB never matches across renderers)
+python3 tools/compare_frames.py --ref nes_reference --recomp cyc_shots --frames 100
+```
+
+Step 3 is not optional — the two renderers use different filename schemes and the
+comparison silently reads zero frames without it.
+
+### Deeper oracle work
+
+For PPU dumps and per-NMI flag logs, `tools/frame_gen/oracle_dump.lua` drives MesenCE
+directly in `--testRunner` mode:
 
 ```bash
 OUT_DIR=oracle_out DUMP_FRAME=11 MAX_FRAMES=13 HOME="$HOME/mesen-home" \
@@ -455,17 +560,236 @@ OUT_DIR=oracle_out DUMP_FRAME=11 MAX_FRAMES=13 HOME="$HOME/mesen-home" \
   tools/frame_gen/oracle_dump.lua --timeout=60
 ```
 
-Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamPowerOnState: 1`); see `docs/research.md` §16. Raw `--testRunner` + Lua only — no MCP/bridge layer.
+The isolated `HOME` needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout: 60`,
+`RamPowerOnState: 1`). Note the trap recorded in [Notes from the
+trenches](#prove-the-harness-can-see-the-effect-first) — MesenCE reads that file from
+beside its own executable, not from `$HOME`.
 
-## ROM Specifications
+## Recording a playthrough
+
+Because sometimes the gate you need is a human holding a controller. Hand-written
+vectors fail here for reasons nobody could read off the code: the game's input window
+opens at frame 594 and *silently drops* direction presses aimed before it, and one
+whole class of margin bug only appears once a character has walked clean across the
+edge rather than stepped over it once. **Ten of the eleven margin bugs were found
+this way and by no other means.**
+
+```bash
+tools/play_record.sh bar-artifact 2000
+```
+
+Plays in a window and leaves a replayable `--input` vector, an `SDB_TRACE=1` log and
+a screenshot per frame in `tmp/bar-artifact/`. Close the window when you have what you
+came for — the vector records the true frame count, but only if you close it rather
+than killing it.
+
+| | |
+|---|---|
+| `SDB_MODS` | which mods are on, from `remove-character-flicker`, `widescreen`, `ppu-overclock`. Default `remove-character-flicker,widescreen` |
+| `SDB_ASPECT` | `16:9` *(default)* · `21:9` · `32:9` · `stock`. Note this script defaults to 16:9 even though the **launcher** defaults to `fit` |
+| `SDB_CAMERA` | `follow` (default) or `locked` |
+| `SDB_OVERSCAN` | `0` forces the clipped-column reveal off, for the headless A/B |
+| `SDB_SCANLINES` | overclock scanlines, `0..262`. **Changes guest timing**, so such a capture compares against no stock figure in the docs |
+| `SDB_SHOT_EVERY` | **present** every N frames, not a screenshot interval |
+| `SDB_SCALE` · `SDB_FRAMES` · `SDB_UNLIMITED` | window scale · frame cap · run until closed |
+
+Two traps worth knowing before you read a capture:
+
+- **A replayed vector must be replayed in a window, never headless.** The windowed
+  and headless hosts do not run the same guest state — see
+  [Notes from the trenches](#notes-from-the-trenches).
+- **Analyse a capture where it was made.** `trace.log` is the ground truth and
+  `tools/widescreen/margin_track.py` reads it directly, needing no replay at all.
+
+## MesenCE, the reference emulator
+
+`setup.sh` handles this: it clones MesenCE and builds it, or uses an existing
+binary. To skip the build, grab the pre-built release instead:
+
+```bash
+wget -O /tmp/mesen.zip https://github.com/nesdev-org/MesenCE/releases/download/2.2.1/Mesen_2.2.1_Linux_x64.zip
+unzip /tmp/mesen.zip -d /tmp/mesen_extract
+cp /tmp/mesen_extract/Mesen external/mesence/Mesen
+```
+
+Building from source needs a C++17 compiler, SDL2 headers, `make` and a .NET SDK.
+.NET **8.0 is available from apt**; **10.0 needs `ppa:dotnet/backports`**. The build
+continues without it — you just get a warning and a download URL instead of a binary.
+
+```bash
+cd external/mesence && USE_GCC=true make -j$(nproc)
+```
+
+Every state claim in this repository is measured against MesenCE. If you add one,
+that is the tool you measure it with.
+
+---
+
+# Notes from the trenches
+
+The bug log here is mostly a record of instruments that reported success while
+measuring nothing, which is the failure mode AI-assisted code invites. These are the
+ones that cost the most time, written down so the next person does not pay them
+again.
+
+## A green gate that measured nothing
+
+Three separate instruments produced **a clean-looking pass over zero examined
+frames**. A hand-formatted trace line lost a newline and the per-sprite audit's regex
+matched nothing — it reported "no lines in that log" on exactly the runs where the
+trace had been switched on to run it. The fix then hit the mirror-image fault and
+matched zero of 701 lines, still reporting the same reassuring message. A bounds gate
+formatted its input filenames from an assumed pattern, read zero files, and exited
+clean.
+
+The shape is always the same: **an instrument that cannot fire is indistinguishable
+from one reporting nothing wrong.** Check that a gate *ran* — it should print a
+per-object table, not silence — before believing it. The structural fix was to stop
+parsing a hand-formatted trace at all and emit one JSON object per line, which cannot
+care where a closer was printed.
+
+## Windowed and headless are not the same game
+
+Two windowed runs of one schedule are byte-identical to each other, which is what
+makes a played session reproducible. **A headless replay of that same recorded vector
+is not.** Frames 0–3 match; frame 4 diverges (scroll 32 against 256) and the run ends
+on a different game state — 2,666 against 2,121 off-edge captures, 32,200 against
+15,504 margin sprites drawn, 769 against 752 frames composed.
+
+Pacing cannot cause it, and it is not the input: the recorded frames are exactly the
+frames the schedule fired on, and the divergence starts four frames *before* the first
+press. **Cause is unattributed. Do not guess.** What it does establish is a rule:
+analyse a windowed capture where it was made, and never validate a windowed feature
+by replaying it headless.
+
+## Screenshots can slow the game down
+
+Capturing with `--present-out` does a full-renderer readback per frame, so the cost
+scales with the window's pixel count. At `WindowScale = 3` fullscreen it measures
+**41 fps instead of 60**, and at 720p capturing every frame, **29 fps** — and
+because audio is generated per emulated frame, **the game goes into slow motion with
+the sound**, which is very hard to mistake for a performance bug.
+
+It is not vsync (identical either way) and it is not the PNG encode (compressing
+first barely helps — the readback dominates). Pin the capture resolution to
+`WindowScale = 1` and the problem disappears. It is a correctness non-issue: the guest
+state is identical, and two runs are comparable on state — but wall clock and audio
+are both wrong, which makes the run unplayable and the timings meaningless.
+
+## 386 "content mismatches" that were the point
+
+Hook sites report ~386 content mismatches and the flicker sites report zero. That is
+the mechanism working, not a defect. MMC1 maps a different 16 KB bank at the same
+address at different times, and the hook layer tests the address *bit* alone before
+checking the bytes in the currently mapped bank. The declared CRC is confirmed correct
+by the fact that 4,150 callbacks fire — a wrong key could never fire at all — and the
+rejections are the other banks, with the guest byte-identical throughout.
+
+**Do not "fix" this by changing the CRC.** A mismatched site is the content key doing
+its job.
+
+## The wrong question, asked three times
+
+The recurring mistake in this repository is asking live OAM whether the machine
+currently holds a given sprite. Three separate fixes were built on that question — a
+ghost filter in the overscan band, a band anchor, and a basis choice — and all three
+acted on the answer "the machine did not emit it this frame".
+
+That is **exactly the truncation the flicker mod exists to undo**, and the PPU could
+not have painted those columns anyway, so every skip left a hole that nothing else
+filled. Two of the three were introduced *as* fixes for artifacts they could not
+explain, and one of them suppressed 129 legitimate parts and was then credited with
+fixing 129 others.
+
+The rule that came out of it: **match on world column, vote with at least two parts,
+and never let a missing sprite become a reason to draw less.**
+
+## The art is not a fact about the limits
+
+Widescreen's margin originally ended where the *nametable art* suggested the world
+ended — by measuring how many tiles in from the edge repeated that edge column. That
+was right on the stadium by luck, because its end wall happens to be a uniform band.
+On the London course, whose edge column varies immediately, it collapsed to a
+one-tile floor and produced **no bound at all** — drawing past the court's own edge
+for a whole 4,355-frame played session, and only being caught because the backdrop
+there is a dark blue rather than black, so a scan for "not black" reports a full
+backdrop as content.
+
+The bound was in the game's code the whole time: two immediate operands at the camera
+clamp, giving world columns 40 to 480. No per-level table, no measurement, and both
+ends of the evidence agreed with the disassembly rather than being fitted to it.
+
+**The art of an end wall is not a fact about the game's limits; the camera is.**
+
+## Prove the harness can see the effect first
+
+The first PPU-overclocking measurement concluded that overclocking changed nothing.
+It had changed nothing because the setting had never reached the emulator — the
+sandbox put `settings.json` in `$HOME`, and MesenCE reads it from beside its own
+executable.
+
+The control that caught it was wall clock: a setting that quadruples PPU work *must*
+change how long a run takes, and 0.606 s against 0.612 s says it didn't. The same
+class of bug hit the mod itself — the engine zeroes the extra-scanlines field
+*after* mods activate, so the feature reported itself active while running stock
+timing.
+
+**A negative result from a tool never tested against a known positive is not a
+negative result.** Ask what result would prove the instrument works, then go and get
+it.
+
+## Play it
+
+Ten of the eleven margin-sprite bugs were found by recording and replaying a played
+session. They survived the sweep vector, the pan vector, the idle vector and an
+8,000-frame throw stress run, because every one of them needs a state a script cannot
+be talked into — the court input window opens at frame 594, a boundary artifact needs
+the camera to pan the whole width, one bug needs the player to actually run.
+
+The eleventh was **not**, and it is the instructive one: a duplicated sprite at the
+seam that flickered while the camera panned sat on a committed vector the whole time,
+because the audit in use compares the margin against *itself* and cannot see a margin
+that is internally consistent and a whole camera step away from the machine.
+
+Worth knowing before you reach for the gamepad again — and worth knowing before you
+trust a green audit.
+
+## Rules that are not negotiable
+
+- **Never commit ROM-derived bytes.** No tile, CHR, nametable, attribute or palette
+  arrays, no `.db` dumps, no multi-line disassembly excerpts. Addresses, sizes and
+  hashes are facts and are fine. Hook sites are keyed by `crc32` for exactly this
+  reason.
+- **Ask before installing packages, deleting the venv, or committing.**
+- **One `nes_game` per mods directory.** `build-cycle/mods/state.toml` is shared
+  mutable state; two concurrent runs can leave the feature disabled and the whole run
+  silently go native.
+- **A `state.toml` naming a feature this build does not have hard-fails the whole
+  catalog**, rather than degrading to stock. Delete it and let the launcher rewrite
+  it.
+- **Never edit `generated/`.** Fix the recompiler or `game.toml`.
+- **Pin the submodules.** The launcher's C ABI is append-only and heavily churned;
+  headers and sources must come from one revision.
+- Every third-party addition ships with provenance and a licence posture recorded at
+  add time, in [`NOTICE.md`](NOTICE.md) or the nearest README — never as later
+  cleanup.
+
+---
+
+# ROM, references and notices
+
+## ROM specifications
+
+No ROM ships here and no assets are extracted from one. You supply your own legally
+obtained copy, and the build reads it without ever committing it.
 
 | Property | Value |
 |---|---|
-| **ROM** | `roms/Super Dodge Ball (USA).nes` |
+| **Path** | `roms/Super Dodge Ball (USA).nes` |
 | **Format** | iNES 2.0 |
 | **Mapper** | 1 (MMC1 / NES-SLROM PCB, MMC1B2) |
-| **PRG ROM** | 128 KB (8 × 16KB banks) |
-| **CHR ROM** | 128 KB (16 × 8KB banks) |
+| **PRG ROM** | 128 KB (8 × 16 KB banks) |
+| **CHR ROM** | 128 KB (16 × 8 KB banks) |
 | **Mirroring** | Horizontal |
 | **Battery** | None |
 | **TV System** | NTSC |
@@ -473,79 +797,74 @@ Isolated HOME needs a `settings.json` (`AllowIoOsAccess`, `ScriptTimeout`, `RamP
 | **SHA-1** | `42f954e9bd3256c011aba14c7e5b400abe35fde3` |
 | **File size** | 262,160 bytes (16-byte header + 262,144 data) |
 
-## Known Limitations (current state)
+## Developer docs
 
-- **Menus work to team-select** — 400 TAS frames (TASVideos #4976) reach `CHANGE POSITION?` with rosters and courts rendering; state matches Mesen byte-exact (RAM/OAM/palette/CIRAM).
-- **Matches play end-to-end** — scripted throw runs (`tas/vectors/sdb_throw.input`, 8000 frames) play full matches: throws land, damage digits show, HUD and menus render, no hangs. Full playthrough to completion (winning rounds, level-switch screens) is untested.
-- **Mod off by default** — the flicker mod needs a full-playthrough test first. Known issue with it on: white ghost sprites on the level-switch screen (under investigation).
-- ~~**Sprite flickering**~~ — **fixed, all causes.** Not emulator sprite-limit removal: the game (1) stops emitting once OAM's 64 slots fill, (2) deliberately culls one object off its own display list each frame, rotating which, so a character blinks out 4 frames in 9, and (3) draws its damage numbers and menu digits through emitters no bump hook could see. Characters now stay whole with the opt-in `super-dodgeball.character-flicker` mod — toggleable in the launcher's **Mods** screen. See `docs/research.md` §2 and §2.1.
-- **Palette mirrors** — sprite entry-0 bytes (`$3F10/$3F14/$3F18/$3F1C`) read stale in cycle snapshots (upstream model keeps power-on bytes; hardware mirrors the backdrop). Masked in the TAS diff; rendering unaffected.
-- ~~**Widescreen cannot show more world than the game has**~~ — the court is a 512-pixel-wide loop, so at 21:9 and 32:9 the extra columns run off the end and are filled with the backdrop. Expect a black band at whichever end the camera has reached; 16:9 usually fits.
-  **Superseded on both counts.** The bound is not the end of the address space but the game's own camera window: columns **40 to 480**, because the camera is clamped to `[40, 224]` behind a 256-column viewport (`docs/research.md` §25). And with `camera = locked` there is no sliding at all — the court is centred on the canvas and sits still. What remains true is that the margin past column 480 is the backdrop colour, at both ends, on purpose.
-- ~~**Widescreen margins are background only**~~ — **fixed, and it is part of the `widescreen` feature, not a toggle.** A margin with no players in it is not a wider game, so the players the game placed outside its own viewport (40% of them at any moment) are drawn there too. `--margin-sprites 0` still exists, but only as the headless A/B switch. **Eleven** placement/boundary bugs were found and fixed while auditing this — the last three a whole character blinking on the culling flag, a 4 px seam join with the camera still, and a 1 px row leapfrog; see `docs/research.md` §26.
-- ~~**Sprites double when two mods are on**~~ — **fixed.** With character-flicker and
-  widescreen both enabled, every sprite was drawn twice: once by the compositor (whose native
-  256 columns are the machine's finished picture) and once by the flicker mod's captured list.
-  The two copies sat 1-2 px apart, because the captured list is published only once a sprite-list
-  build completes, and a character is two 8-wide halves. Found by playing on the game-mode menu;
-  no single-feature gate could have caught it. The wide path now presents exactly what the
-  flicker-only path presents, byte for byte. See `docs/research.md` §26.
-- **Bean Ball loses sprites while running across the full map** — **open, not fixed.** In that game mode (which lets you run the length of the map rather than a half-width court), running from one end of the screen to the other makes the character-flicker mod's presented sprite list shrink frame by frame — 53 sprites down to 10 — until one player sprite remains, cut in half. The background stays perfect, so it is not the widescreen compositor. It is **not yet known** whether the game emits fewer sprites in that mode or the mod drops them; the two need opposite fixes. Full write-up, measurements and the next step in `docs/plan.md` item 14.
+**[AGENTS.md](AGENTS.md)** — the operating manual for coding agents on this repo, and
+the canonical document for constraints, verification procedures, known issues and
+every gate that has to pass before a change lands. Start here before touching
+anything.
 
-## Developer Docs
+**[docs/research.md](docs/research.md)** — 28 sections of deep research: the flicker
+analysis and all three of its causes (§2, §2.1), the framework and how discovery
+works (§3), the NMI dispatcher and the game's fixed bank (§13), the MesenCE oracle
+(§16), PPU overclocking (§23), VSync (§24), widescreen (§25), the eleven margin-sprite
+bugs and why ten needed a human (§26), the pan judder and its proof (§27), and the
+camera anchor (§28).
 
-**[AGENTS.md](AGENTS.md)** — Developer reference with present-tense constraints, codegen notes, submodule workflow, MesenCE testrunner API, verification procedures, and current-known issues. The canonical document for AI coding agents.
+**[docs/plan.md](docs/plan.md)** — the living project plan and the open-issues list,
+including the two open bugs and exactly what the next measurement should be.
 
-**[docs/research.md](docs/research.md)** — Deep research: ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map, MesenCE oracle, NMI survey, current build state, PPU overclocking (§23), VSync (§24), widescreen (§25), margin sprites (§26), the pan judder (§27), the camera anchor (§28).
+**[patches/active-patches.md](patches/active-patches.md)** — the two active engine
+patches, why they are strictly additive, and what they are for upstream.
 
 ## References
 
-### Toolchain and framework
+### Toolchain
 
-- **NESRecomp** — the recompiler and cycle backend this builds on —
-  <https://github.com/mstan/nesrecomp>
-- **RetroPortingToolKit docs** — house invariants, verification rituals, mod
-  manifest and agent guidance — <https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/main/data/docs>
-- **recomp-ui** — the launcher and in-game menu — <https://github.com/RetroPortingToolKit/recomp-ui>
-- **NESRecomp Discord (R.A.I.D.)** — `discord.gg/Ad9BwSzctP`
+- **[NESRecomp](https://github.com/mstan/nesrecomp)** — the recompiler and cycle
+  backend this is built on
+- **[RetroPortingToolKit docs](https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/main/data/docs)** —
+  house invariants, verification rituals, mod manifest format, agent guidance
+- **[recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui)** — the launcher
+  and in-game menu
+- **[NESRecomp Discord (R.A.I.D.)](https://discord.gg/Ad9BwSzctP)**
 
 ### Other NESRecomp ports
 
-- **Zelda NES Recomp** — <https://github.com/mstan/LegendOfZeldaNESRecomp> — the
-  worked MMC1 comparison in `docs/research.md` §4
-- **Super Mario Bros NES Recomp** — <https://github.com/mstan/SuperMarioBrosNESRecomp>
-  — comparison in §5; its `docs/WIDESCREEN.md` reads enemy records in world
-  coordinates out of game RAM and is the only other NES widescreen that renders
-  margin sprites, which is the whole premise of §26
+- **[Zelda NES Recomp](https://github.com/mstan/LegendOfZeldaNESRecomp)** — the
+  worked MMC1 comparison
+- **[Super Mario Bros NES Recomp](https://github.com/mstan/SuperMarioBrosNESRecomp)** —
+  its `docs/WIDESCREEN.md` reads enemy records in world coordinates out of game RAM,
+  and is the only other NES widescreen that renders margin sprites — the whole
+  premise of §26 here
 
-### Oracle, test ROMs and hardware reference
+### Oracle, test ROMs and hardware
 
-- **MesenCE** — <https://github.com/nesdev-org/MesenCE> — reference renderer and
+- **[MesenCE](https://github.com/nesdev-org/MesenCE)** — the reference renderer and
   oracle; every state claim in this repo is measured against it
-- **blargg's NES test ROMs** — <https://github.com/christopherpow/nes-test-roms> —
-  the engine gate (`tools/blargg/`); fetched at setup time, never committed
-- **NESdev Wiki** — <https://www.nesdev.org/wiki/Tools>, and the FDS BIOS
-  `$0100`/`$0101`/`$0102` convention this cart's RESET follows:
-  <https://www.nesdev.org/wiki/FDS_BIOS>
-- **NESdev Forum** — <https://forums.nesdev.org/>
-- **RetroReversing (NES)** — <https://www.retroreversing.com/nes>
+- **[blargg's NES test ROMs](https://github.com/christopherpow/nes-test-roms)** — the
+  engine gate, fetched at setup and never committed
+- **[NESdev Wiki](https://www.nesdev.org/wiki/Tools)** and the
+  [FDS BIOS](https://www.nesdev.org/wiki/FDS_BIOS) `$0100`/`$0101`/`$0102`
+  convention this cartridge's RESET follows
+- **[NESdev Forum](https://forums.nesdev.org/)** ·
+  **[RetroReversing (NES)](https://www.retroreversing.com/nes)**
 
 ### This game
 
-- **SNES port** (Rumbleminze) — <https://github.com/rumbleminze/super-super-dodgeball>
-  — the closest existing reference and the only public annotated source for this
-  game's fixed bank: it supplied §13's NMI dispatcher, RESET and title-writer
-  notes, and its `RTS ; disable sprite flickering` comment is what identified the
-  second flicker (§2.1)
-- **Partial NES disassembly** (aj_187, 2012) — <https://ajworld.net/sdb/> —
+- **[SNES port (Rumbleminze)](https://github.com/rumbleminze/super-super-dodgeball)** —
+  the closest existing reference and the only public annotated source for this game's
+  fixed bank. Its `RTS ; disable sprite flickering` comment is what identified the
+  second flicker.
+- **[Partial NES disassembly (aj_187, 2012)](https://ajworld.net/sdb/)** —
   incomplete and not byte-identical to stock, so a lead rather than a reference
-- **wideNES** — <https://github.com/daniel5151/ANESE> ·
-  <https://prilik.com/blog/post/widenes/> — the standard "NES widescreen" answer
-  and deliberately *not* the approach here; §25 explains the difference
-- **TASVideos submission #4976** — <https://tasvideos.org/4976> — the source of
-  `tas/vectors/sdb_4976.bk2` and the co-simulation input
-- **Romhacking.net** — <https://www.romhacking.net/games/814>
-- **StrategyWiki** — <https://strategywiki.org/wiki/Super_Dodge_Ball_(NES)>
+- **[wideNES](https://github.com/daniel5151/ANESE)** ·
+  [background](https://prilik.com/blog/post/widenes/) — the standard "NES widescreen"
+  answer and deliberately *not* the approach here
+- **[TASVideos submission #4976](https://tasvideos.org/4976)** — the co-simulation
+  input
+- **[Romhacking.net](https://www.romhacking.net/games/814)** ·
+  **[StrategyWiki](https://strategywiki.org/wiki/Super_Dodge_Ball_(NES))**
 
 ## Legal and project notices
 
@@ -579,18 +898,18 @@ used for the game-specific mods, the analysis and verification tooling, the mod
 manifests, and substantial parts of this documentation. `AGENTS.md` is the developer
 reference for AI coding agents that this project works from.
 
-The human maintainer directs the work, reviews the output, decides what ships, and
-is responsible for the contents of this repository. The verification gates are not
+The human maintainer directs the work, reviews the output, decides what ships, and is
+responsible for the contents of this repository. The verification gates are not
 decoration: this project's bug log is largely a record of instrumentation that
-reported success while measuring nothing — the failure mode AI-assisted code
-invites, and the reason every claim here is backed by a measurement rather than by
-reading the code.
+reported success while measuring nothing — the failure mode AI-assisted code invites,
+and the reason every claim here is backed by a measurement rather than by reading the
+code.
 
 The upstream projects this builds on — [NESRecomp](https://github.com/mstan/nesrecomp),
 [recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui),
 [MesenCE](https://github.com/nesdev-org/MesenCE) and the RetroPortingToolKit
-documentation — carry their own authorship and licensing and are not covered by
-this statement.
+documentation — carry their own authorship and licensing and are not covered by this
+statement.
 
 ### No game content
 

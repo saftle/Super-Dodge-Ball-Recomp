@@ -2913,12 +2913,15 @@ next measurement, and how to get a fresh capture.
   block copier (`$A36C`) have no position accumulator and no such cull; they
   are HUD-ish and never strayed off-screen in any measured frame.
 - **Past the stadium's end there is nothing.** §25's limit stands, and it is now
-  enforced rather than accepted: the world's own bounds are `[32,480)` — the
-  512-pixel address space with the 32-pixel `$C0` end wall at each end, which the
-  camera never reaches — and a margin sprite wholly outside them is not drawn
-  while one straddling them is clipped at them. The earlier note here that "the
-  sprite is drawn where the game put it, which may be over black" described the
-  same bound applied to nothing; see §25 for the measurement and the gate.
+  enforced rather than accepted: the world's own bounds are **`[40,480)`**, which is
+  the game's camera window (`$C3/$C4` clamped at `$E6AB` to `[40,224]`) plus the
+  256-column viewport — not the 512-pixel address space, and not the court's drawn
+  extent of `[32, 480)`, which is a different quantity that happens to be 8 columns
+  wider at one end. A margin sprite wholly outside the bound is not drawn while one
+  straddling it is clipped at it. The earlier note here that "the sprite is drawn
+  where the game put it, which may be over black" described the same bound applied to
+  nothing; see §25 for the measurement, the two captures that decided it, and the
+  gate.
 - **The 8-per-scanline limit is still not modelled** in the margin (nor in the
   flicker mod — research §2 open item 11).
 - **A margin sprite's part set is the last list's, not this frame's.** The game
