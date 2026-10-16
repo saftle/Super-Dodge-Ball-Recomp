@@ -297,6 +297,31 @@ a `--virtual-pad` replay needs `Player1Source = 2` in the config or the guest
 never sees the input and the run sits at the title screen — which looks exactly
 like "the feature does nothing".
 
+### Four facts about the margin seam that cost a rebuild each (research §29)
+
+- **The compositor cannot paint inside the native 256 — `sdb_present` undoes it.**
+  `sdb_present` stamps `s_picture` over `[native_x0+keep, native_x0+256)` *after*
+  `cyc_render_present` has run the compositor. Anything the compositor drew there
+  is discarded. Never fix a seam there; fix it in `sdb_ws_margin_pass`, which runs
+  after the stamp. Three compositor-side fixes measured **0 differing pixels over
+  890 frames** before that was found.
+- **OAM is not where sprites are painted.** `cyc_render_sprites` takes a
+  `CycSpritePlaceFn` `place` callback and the flicker mod moves sprites onto their
+  published list's positions. Build any "did the machine paint this" map from the
+  **rendered frame** against `s_ws_native_bg`, never from OAM — an OAM map marks
+  columns owned that the machine left as background, which is the wrong way round.
+- **The PPU clips at column 255 and does not wrap.** `visible = max(0, 256 - X)`
+  and **X=248 is fully visible**; clipping starts at 249. The game's cull admits
+  OAM X 0..251, so on a wide canvas a sprite starting at 249/250/251 loses 7/6/5
+  columns *in the middle of the court*. The "X ≥ 252 is not displayed" folklore is
+  one ambiguous sentence on the NESdev PPU_OAM page and is wrong.
+- **Never read `cyc_render_line_scroll_x` at capture time to mirror the draw
+  site's test.** It is a different value at a different moment. Doing so costs a
+  left-margin player 82 of 149 ink pixels at frame 817, on lag-zero frames too.
+  And never widen the capture either: 12 wrong frames against 2, because the
+  margin's copy and the machine's sit a column apart and ownership reads those
+  columns unowned.
+
 ### Three instrumentation bugs that all made a gate silently blind
 
 - **The `sdbw` trace line had no newline before `sdbm`.** The per-sprite entries

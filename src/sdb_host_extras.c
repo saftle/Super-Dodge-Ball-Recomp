@@ -195,6 +195,14 @@ typedef struct {
  * it is the width of the hardware's own left clip, which loses sprites just as
  * surely as the game's cull and is half of what this feature recovers. */
 #define SDB_WS_CLIP 8
+
+/* The world's own bounds, moved up from the compositor because the post-stamp
+ * margin pass in sdb_present needs them and runs before it. */
+#define SDB_WS_CAM_MIN 40          /* $E6AF: LDA #$28 */
+#define SDB_WS_CAM_MAX 224         /* $E6B9: LDA #$E0 */
+#define SDB_WS_VIEW_W  256         /* the viewport's width, in world columns */
+#define SDB_WS_LO (SDB_WS_CAM_MIN)
+#define SDB_WS_HI (SDB_WS_CAM_MAX + SDB_WS_VIEW_W)
 static int s_ws_reveal;         /* overscan: the clip is being revealed */
 /* What --overscan / SDB_OVERSCAN asked for, or -1 for "nobody has an opinion,
  * follow widescreen". Resolved to s_ws_reveal by sdb_ws_apply, which is the
@@ -333,7 +341,28 @@ static int sdb_margin_object(uint16_t addr)
      * between. A backwards step is therefore a build boundary, and it is the
      * only boundary this feature can see. */
     uint8_t cur = cyc_mod_peek(SDB_CURSOR);
-    if (cur < s_margin_prev_cursor) s_margin_build++;
+    if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+        fprintf(stderr, "sdbv f=%ld obj=%d rec=%02X/%02X x=%d cur=%02X "
+                        "held=%d seen=%ld\n",
+                s_frame, s_margin_cur_obj,
+                cyc_mod_peek(s_margin_rec), cyc_mod_peek((uint16_t)(s_margin_rec + 1)),
+                (int)(cyc_mod_peek((uint16_t)(s_margin_rec + 3))
+                    | (cyc_mod_peek((uint16_t)(s_margin_rec + 4)) << 8)),
+                cur,
+                (s_margin_cur_obj >= 0 && s_margin_cur_obj < SDB_MARGIN_OBJECTS)
+                    ? s_margin_obj[s_margin_cur_obj].n : -1,
+                (s_margin_cur_obj >= 0 && s_margin_cur_obj < SDB_MARGIN_OBJECTS)
+                    ? s_margin_obj[s_margin_cur_obj].seen : -1L);
+    if (cur < s_margin_prev_cursor) {
+        s_margin_build++;
+        if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+            fprintf(stderr, "sdbb f=%ld bump: cur=%02X < prev=%02X -> build=%ld, "
+                            "obj %d had %d parts\n",
+                    s_frame, cur, s_margin_prev_cursor, s_margin_build,
+                    s_margin_cur_obj,
+                    (s_margin_cur_obj >= 0 && s_margin_cur_obj < SDB_MARGIN_OBJECTS)
+                        ? s_margin_obj[s_margin_cur_obj].n : -1);
+    }
     s_margin_prev_cursor = cur;
     return 0;
 }
@@ -364,6 +393,50 @@ static uint32_t s_picture[256 * 240];
  * be handed back as a pointer into the engine's canvas, because its rows are
  * canvas_width apart while the host copies it as a dense width*height block. */
 static uint32_t s_canvas[NES_VIDEO_MAX_WIDTH * 240];
+
+/* Moved up: `sdb_present` needs both, and it runs BEFORE the compositor. See
+ * the note on why the margin has to be drawn there too. */
+static uint32_t s_ws_native_bg[256 * 240];
+
+/* WHICH NATIVE PIXELS THE MACHINE ACTUALLY PAINTED. 255 = it did not.
+ *
+ * Derived from the machine's OWN RENDERED FRAME against its own background
+ * capture, not from OAM. That distinction is the whole of it, and getting it
+ * wrong is why an earlier attempt at this failed: the map was built by walking
+ * OAM, and `cyc_render_sprites` takes a `place` callback
+ * (CycSpritePlaceFn) that the character-flicker mod uses to move each sprite
+ * onto the position its published list gives it. So OAM says one thing and the
+ * frame says another, the map described where sprites were rather than where
+ * they were painted, and it marked columns 252-253 as owned that the machine
+ * in fact left as background -- which is the opposite of what was needed and
+ * made the change a measured no-op on the artefact it was written for.
+ *
+ * Comparing the two pictures has no such gap: `native` IS what the machine
+ * drew, reconcile and all. A pixel that differs from the background capture is
+ * a pixel the machine painted, and that is the only question the margin has.
+ *
+ * The leftmost eight columns are never painted (PPUMASK bit 2 is clear for this
+ * game), so they are left unowned and the margin supplies them -- which is the
+ * whole point of revealing them.
+ *
+ * The shape is `smb_ws_actors.c`'s `native_priority[]`, from the sibling recomp
+ * on this same engine, whose WIDESCREEN.md gives the reason the margin cannot
+ * simply clip at the block's edge: "Managed enemies are drawn as complete
+ * sprites across both old screen edges; their corresponding native OAM slots
+ * are suppressed for presentation. This avoids joining half a host sprite to
+ * SMB's column-clipped native sprite." */
+static uint8_t s_ws_native_owner[256 * 240];
+
+static void sdb_ws_build_owner(const uint32_t *native)
+{
+    for (int y = 0; y < 240; y++) {
+        const uint32_t *n = native + (size_t)y * 256;
+        const uint32_t *b = s_ws_native_bg + (size_t)y * 256;
+        uint8_t *o = s_ws_native_owner + (size_t)y * 256;
+        for (int x = 0; x < 256; x++)
+            o[x] = (x < SDB_WS_CLIP || n[x] == b[x]) ? 0xFF : 0;
+    }
+}
 
 /* ------------------------------------------------------------------ *
  * 1. Capture
@@ -710,6 +783,21 @@ static int sdb_margin_capture(uint16_t addr)
     int16_t x = (int16_t)(cyc_mod_peek(0x04) | (cyc_mod_peek(0x05) << 8));
     int16_t y = (int16_t)(cyc_mod_peek(0x06) | (cyc_mod_peek(0x07) << 8));
 
+    /* Every ENTRY, before the cull below, so "the emitter did not fire" and "the
+     * emitter fired and the part was rejected" are different lines. $02 is the
+     * emitter's per-object sprite counter ($84C1: DEC $02 / BEQ) and $4D the
+     * index it is walking ($8483: INC $4D), which is what says whether the game
+     * emitted fewer sprites for this object or emitted the same ones and the
+     * capture threw them away. */
+    if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+        fprintf(stderr, "sdbp f=%ld obj=%d at=$%04X $02=%d $4D=%d x=%d y=%d "
+                        "cur=%02X build=%ld held=%d\n",
+                s_frame, s_margin_cur_obj, addr,
+                (int)cyc_mod_peek(0x02), (int)cyc_mod_peek(0x4D), x, y, cur,
+                s_margin_build,
+                (s_margin_cur_obj >= 0 && s_margin_cur_obj < SDB_MARGIN_OBJECTS)
+                    ? s_margin_obj[s_margin_cur_obj].n : -1);
+
     /* Which of the two emitters this is. They place a sprite the same way (the
      * same 16-bit accumulators, the same [4,255] cull) but take the tile and
      * attribute from different places: the strip walk at $8348 has already
@@ -740,6 +828,50 @@ static int sdb_margin_capture(uint16_t addr)
      * A sprite culled VERTICALLY is never captured, because there is no vertical
      * margin to put it in -- the camera scrolls horizontally only, so an
      * off-screen row is off-screen for good. */
+    /* THE GAME'S OWN CULL, AND NOTHING ELSE.
+     *
+     * An earlier version asked the DRAW SITE's question here instead --
+     * `csx = x + lag - 4`, `lost = csx < 0 || csx > 251` -- on the theory that the
+     * two filters disagree by the camera lag and that asking the same question in
+     * the same space would fix that. It does fix the artefact it was written for
+     * and it costs a character its head elsewhere: `cyc_render_line_scroll_x` is
+     * read HERE, mid-frame, while the emitter runs, and the value the DRAW site
+     * will use is the one latched for the frame being presented. Those are not
+     * the same number at the same moment. Measured on the margin-locked capture,
+     * a left-margin player loses 82 of 149 ink pixels at frame 817, and the loss
+     * occurs on lag-zero frames as well as lagged ones, so it is the timing of
+     * the read and not the lag term.
+     *
+     * So the two filters are left disagreeing, deliberately: this one is a cull
+     * of what the GAME emitted, asked in the game's own accumulator, and the
+     * other is a placement decision made at presentation time. The seam is closed
+     * where it belongs -- in `sdb_ws_margin_pass`, after `sdb_present` has
+     * stamped the native block -- not by trying to make a mid-frame read agree
+     * with a presentation-time one. */
+    /* THE GAME'S OWN CULL, EXACTLY. Do not widen it.
+     *
+     * `$8488` hides a sprite with X16 < 4 and `$8494` hides one whose high byte is
+     * set, so the game only ever emits accumulator 4..255 -- OAM X 0..251.
+     *
+     * Both ways of reconciling that with the screen column the answer is consumed
+     * in were tried here and both are worse than leaving it alone:
+     *
+     *  - Asking the DRAW site's question, by reading `cyc_render_line_scroll_x`
+     *    mid-frame and computing `x + lag - 4`: fixes frames 808 and 812 and
+     *    costs a left-margin player 82 of 149 ink pixels at frame 817. The loss
+     *    occurs on lag-zero frames as well as lagged ones, so it is the timing of
+     *    the read -- the value read here while the emitter runs is not the value
+     *    the draw site will use at presentation -- and not the lag term.
+     *  - Widening by one camera step (the delta takes 0, 4, 6, 7), capturing
+     *    more and letting the draw site discard: 12 bad frames against this
+     *    build's 2, and it broke 805-807 which are otherwise clean. Capturing
+     *    more is NOT safe, because the margin's copy of a part and the machine's
+     *    sit a column apart after the flicker mod's reconcile, so the ownership
+     *    test reads those columns as unowned and the margin paints a ghost.
+     *
+     * So the seam is closed where it belongs and nowhere else: in
+     * `sdb_ws_margin_pass`, after `sdb_present` has stamped the native block.
+     * That is worth 7 of this character's 9 bad frames, with no regression. */
     int lost = x < 4 || x > 255 || (s_ws_reveal && x < 4 + SDB_WS_CLIP);
     if (!lost) return 0;
     if (y < 4 || y > 255) return 0;
@@ -792,6 +924,10 @@ static int sdb_margin_capture(uint16_t addr)
      * failed to meet. Accumulating across the visits of one list, and starting
      * again when $0617 restarts, is what makes the character whole. */
     if (o->build != s_margin_build) {
+        if (o->n && s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+            fprintf(stderr, "sdbb f=%ld wipe: obj %d drops %d parts "
+                            "(build %ld -> %ld)\n",
+                    s_frame, s_margin_cur_obj, o->n, o->build, s_margin_build);
         o->n = 0;
         o->build = s_margin_build;
     }
@@ -1064,7 +1200,8 @@ static void sdb_blit(const SdbSprite *s, uint32_t *out, int width, int height, i
  *     is meant to be behind. cyc_render_background's capture is what the check
  *     needs, and the compositor already has it. */
 static void sdb_margin_blit(const SdbMargin *m, int px0, uint32_t *out, int width, int height,
-                            const uint32_t *bg, int clip_lo, int clip_hi)
+                            const uint32_t *bg, int world_lo, int world_hi,
+                            int rx0, const uint8_t *owner)
 {
     int rows = cyc_render_line_sprite16(m->y < 240 ? m->y : 239) ? 16 : 8;
     unsigned attr = m->attr;
@@ -1078,9 +1215,16 @@ static void sdb_margin_blit(const SdbMargin *m, int px0, uint32_t *out, int widt
             : (uint16_t)(table + m->tile * 16);
         uint8_t lo = cyc_render_chr((uint16_t)(pattern + (row & 7)));
         uint8_t hi = cyc_render_chr((uint16_t)(pattern + (row & 7) + 8));
-        for (int c = clip_lo; c < 8 - clip_hi; ++c) {
+        /* One rule per pixel. The WORLD's bounds are a bound on columns and stay
+         * geometric; the native block's are not a bound on PAINTING, so inside it
+         * the margin defers only to pixels the machine actually filled. Outside
+         * the block there is no owner and nothing to defer to. */
+        for (int c = 0; c < 8; ++c) {
             int px = px0 + c;
             if (px < 0 || px >= width) continue;
+            if (px < world_lo || px >= world_hi) continue;
+            int nx = px - rx0;
+            if (nx >= 0 && nx < 256 && owner[(size_t)py * 256 + nx] != 0xFF) continue;
             int bit = (attr & 0x40) ? c : 7 - c;
             int v = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
             if (!v) continue;
@@ -1089,7 +1233,17 @@ static void sdb_margin_blit(const SdbMargin *m, int px0, uint32_t *out, int widt
              * background pixel to test against; a margin column is one this
              * compositor reconstructed, which is background by construction. */
             if ((attr & 0x20) && bg) {
-                int nx = px - (width - 256) / 2;
+                /* `rx0`, NOT `(width - 256) / 2`. The centred position is only
+                 * where the native block sits when the compositor could not
+                 * anchor -- with the camera locked it is at `rx0`, which moves as
+                 * the camera does. Reading the background at the centred column
+                 * instead tests a pixel of the court that has nothing to do with
+                 * this one, so a behind-background sprite stops being occluded:
+                 * measured at frame 817, a player standing in front of the crowd
+                 * barrier painted straight over it. It is the same class as the
+                 * anchor split the compositor's own stamp had to be told about,
+                 * one function further down. */
+                int nx = px - rx0;
                 if (nx >= 0 && nx < 256 && bg[(size_t)py * 256 + nx] != cyc_render_color(0))
                     continue;
             }
@@ -1187,6 +1341,109 @@ static const SdbSprite *sdb_reconcile(const SdbSprite *list, int count)
     }
     return buf;
 }
+
+/* Forward declarations for the post-stamp margin pass in sdb_present, below.
+ * `sdb_ws_row_x0` is already declared at the top; the rest are the widescreen
+ * state that pass reads. */
+static void sdb_ws_build_owner(const uint32_t *native);
+static int sdb_ws_margin_pass(uint32_t *canvas, int cw)
+{
+    /* THE MARGIN HAS TO BE DRAWN *AFTER* THE STAMP, not only inside the
+     * compositor. This is the finding that three separate fixes ran into.
+     *
+     * `sdb_present` replaces the native columns with `s_picture` -- the
+     * sprite-free background plus the flicker mod's whole captured list -- AFTER
+     * `cyc_render_present` has already run the compositor and painted the margin
+     * into the same buffer. Everything the compositor drew inside the native 256
+     * is therefore discarded, which is correct for its own contract ("the native
+     * 256 columns win") and fatal for a margin part that has to reach them.
+     *
+     * So the seam could not be fixed in the compositor at all, and three
+     * correct-looking attempts there were each measured to be a no-op on the
+     * artefact they were written for:
+     *   - `right_band` moved from `rx0+256` to `rx0+252` (the machine's columns
+     *     end at sx 251, and the two differ by the 4-column OAM bias):
+     *     0 differing pixels over 890 frames;
+     *   - an ownership map built by walking OAM, consulted in the blit: also 0,
+     *     because `cyc_render_sprites` takes a `place` callback and the flicker
+     *     mod moves sprites, so OAM says where a sprite IS, not where it was
+     *     PAINTED;
+     *   - the same map rebuilt from the machine's rendered frame: still 0, for
+     *     the reason in this paragraph.
+     *
+     * The shape is the sibling recomp's, from `docs/WIDESCREEN.md`: "Managed
+     * enemies are drawn as complete sprites across both old screen edges; their
+     * corresponding native OAM slots are suppressed for presentation. This
+     * avoids joining half a host sprite to SMB's column-clipped native sprite."
+     * Here the native slot cannot be suppressed -- `s_picture` has to keep the
+     * machine's own copy, and gate 2 wants the native block to stay the machine's
+     * -- so the host sprite is drawn OVER it instead, and only into the columns
+     * the machine left as background.
+     *
+     * Measured on the margin-locked capture, frame 809: the game holds only the
+     * character's LEFT halves in OAM (tile 8D at x=246, 86 at 250, 8F at 249, 30
+     * at 251) and culls the right ones, so the margin supplies them. The machine
+     * clips its own sprites at the 256-wide buffer edge, so band 152 is machine
+     * 411-416 then margin 419-426 -- canvas 417,418 painted by nobody -- and the
+     * bands either side of it lose 1 and 3 columns the same way. Two to three
+     * columns of eight, walking down the body as the parts hand over, which is
+     * the reported shimmer.
+     */
+    if (!s_margin_on) return 0;
+    int drawn = 0;
+    for (int o = 0; o < SDB_MARGIN_OBJECTS; o++) {
+        SdbMarginObj *ob = &s_margin_obj[o];
+        if (!ob->n) continue;
+        uint16_t rec = (uint16_t)(SDB_REC_BASE + SDB_REC_STRIDE * o);
+        if (!cyc_mod_peek(rec)) continue;
+        if ((cyc_mod_peek(rec) & ~SDB_CULL_BITS) != (ob->id0 & ~SDB_CULL_BITS)
+            || cyc_mod_peek((uint16_t)(rec + 1)) != ob->id1)
+            continue;                                   /* a recycled slot */
+        int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
+                        | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
+        int row_corr = 0;
+        int corr = sdb_object_delta(rec_x, ob, &row_corr);
+        for (int i = 0; i < ob->n; i++) {
+            const SdbMargin *m = &ob->parts[i];
+            SdbMargin pm = *m;
+            pm.y = (int16_t)(m->y + row_corr);
+            m = &pm;
+            int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
+            int scroll = cyc_render_line_scroll_x(prow);
+            int rx0 = sdb_ws_row_x0(prow);
+            int sx = (rec_x + corr) + m->dx - scroll - 4;
+            int px0 = sx + rx0;
+            /* ONLY parts that STRADDLE THE RIGHT EDGE of the native block, and
+             * only the columns inside it. Three restrictions, each earned:
+             *
+             *  - outside the block: the compositor already painted those columns,
+             *    and repainting them buys nothing;
+             *  - inside the block but not straddling: the machine painted those
+             *    columns whole and the margin has nothing to add. Measured, this
+             *    is where the damage was: letting the pass repaint every part
+             *    that merely touched the block cost obj 0 its head at frame 817
+             *    (ink 149 -> 67 over rows 103-133) by painting the margin's copy
+             *    over the machine's at a column the reconcile had shifted, and
+             *    `margin_track` went from 9 anomalies to 10;
+             *  - the LEFT seam is left entirely alone. Columns 0-7 are the
+             *    revealed band, which the compositor owns by construction
+             *    (`completes`), and the left straddle has its own clip. Only the
+             *    right edge is where the machine's own sprites are cut short by
+             *    the 256-wide buffer and the margin is the only renderer.
+             */
+            if (px0 + 8 <= rx0 + 256 || px0 >= rx0 + 256) continue;
+            int wl = rx0 + (SDB_WS_LO - scroll);
+            int wh = rx0 + (SDB_WS_HI - scroll);
+            if (px0 + 8 <= wl || px0 >= wh) continue;
+            sdb_margin_blit(m, px0, canvas, cw, 240, s_ws_native_bg,
+                            wl, wh, rx0, s_ws_native_owner);
+            drawn++;
+        }
+    }
+    return drawn;
+}
+
+static int sdb_ws_margin_pass(uint32_t *canvas, int cw);
 
 static const uint32_t *sdb_present(void *ctx, int *width, int *height)
 {
@@ -1329,6 +1586,10 @@ static const uint32_t *sdb_present(void *ctx, int *width, int *height)
         const uint8_t *oam = cyc_render_oam();
         SdbSprite front = { oam[0], oam[1], oam[2], oam[3] };
         sdb_blit(&front, s_canvas, cw, *height, sdb_ws_row_x0(front.y));
+        /* LAST, because everything above overwrites the native columns. The
+         * margin's own columns outside the block are already correct from the
+         * compositor and are left alone. */
+        sdb_ws_margin_pass(s_canvas, cw);
         return s_canvas;
     }
 
@@ -1519,29 +1780,41 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
          * painted by us, left to the machine, clipped into columns we do not own,
          * or off the canvas. */
         int keep = s_ws_reveal ? SDB_WS_CLIP : 0;
-        int left_limit = x0 + keep;
+        (void)keep;
         for (int i = 0; i < ob->n; i++) {
             const SdbMargin *m = &ob->parts[i];
             int my = m->y + row_corr;
             int prow = my < 0 ? 0 : (my >= 240 ? 239 : my);
-            int sx = (rec_x + corr) + m->dx - cyc_render_line_scroll_x(prow) - 4;
-            int completes = s_ws_reveal && sx >= 0 && sx < SDB_WS_CLIP;
+            int scroll = cyc_render_line_scroll_x(prow);
+            int sx = (rec_x + corr) + m->dx - scroll - 4;
             int px0 = sx + x0;
             const char *st;
-            /* No "ghost" outcome any more, and it must not be reintroduced to
-             * keep the counter populated: the compositor no longer asks OAM
-             * whether the machine holds a band sprite, so classifying one here
-             * would report parts that are in fact DRAWN. The outcome it used to
-             * count is now just `drawn`. */
-            if (!completes && sx >= 0 && sx <= 251)      st = "machine";
-            else if (px0 + 8 <= 0 || px0 >= width)        st = "oob";
-            else {
-                int lo, hi;
-                if (px0 + 8 <= left_limit)      { lo = 0; hi = 0; }
-                else if (px0 >= x0 + 256)      { lo = 0; hi = 0; }
-                else if (px0 < left_limit)      { lo = 0; hi = px0 + 8 - left_limit; }
-                else                            { lo = x0 + 256 - px0; hi = 0; }
-                st = (lo + hi < 8) ? "drawn" : "clip";
+            /* Mirrors the draw site as it now stands, which asks OWNERSHIP rather
+             * than the block's geometry. Reporting the old geometric outcome here
+             * would be worse than not reporting: the whole reason this stream
+             * exists is that it says which branch each part took, and the two have
+             * genuinely diverged. See sdb_ws_build_owner and sdb_ws_margin_pass.
+             *
+             * The three outcomes the draw site can produce:
+             *   oob      -- the part is off the canvas or off the canvas's world
+             *   machine  -- a native sprite owns at least one of its columns
+             *   drawn    -- ours, including any column inside the native block that
+             *               the machine left as background (the seam fix)
+             */
+            if (px0 + 8 <= 0 || px0 >= width) {
+                st = "oob";
+            } else {
+                int owned = 0;
+                for (int c = 0; c < 8 && !owned; ++c) {
+                    int nx = sx + c;
+                    if (nx < 0 || nx > 255) continue;
+                    if (s_ws_native_owner[(size_t)my * 256 + nx] != 0xFF) owned = 1;
+                }
+                int wl = x0 + (SDB_WS_LO - scroll);
+                int wh = x0 + (SDB_WS_HI - scroll);
+                if (px0 + 8 <= wl || px0 >= wh)   st = "clip";
+                else if (owned)                 st = "machine";
+                else                            st = "drawn";
             }
             placed += st[0] == 'd';
             fprintf(stderr, "%s[%d,%d,%d,\"%s\"]", i ? "," : "", sx, my, m->tile, st);
@@ -1936,11 +2209,6 @@ static int s_ws_sx_lo = 9999, s_ws_sx_hi = -1;   /* camera scroll seen, SDB_TRAC
  * beside it, which is a cosmetic cost for a locked intro camera and is the
  * right way round: everything outside the window is content the game chose not
  * to show, and the alternative is inventing it. */
-#define SDB_WS_CAM_MIN 40          /* $E6AF: LDA #$28 */
-#define SDB_WS_CAM_MAX 224         /* $E6B9: LDA #$E0 */
-#define SDB_WS_VIEW_W  256         /* the viewport's width, in world columns */
-#define SDB_WS_LO (SDB_WS_CAM_MIN)
-#define SDB_WS_HI (SDB_WS_CAM_MAX + SDB_WS_VIEW_W)
 
 /* Is this world column one the game can ever display? */
 static int sdb_ws_in_bounds(int wx) { return wx >= SDB_WS_LO && wx < SDB_WS_HI; }
@@ -2192,7 +2460,6 @@ static int sdb_ws_pal_index(uint32_t argb)
  * cyc_render_background() is the engine's exact capture of the background
  * before the sprite priority mux (see cyc_render.h), which is the thing this
  * pass is actually reproducing. */
-static uint32_t s_ws_native_bg[256 * 240];
 
 static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                             const uint32_t *native, void *user)
@@ -2279,6 +2546,11 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
      * deliberate exception: when the overscan feature is revealing the clipped
      * columns, those are left as reconstructed, or the copy would put the black
      * gutter straight back. */
+    /* Whose pixels these are, before anything is copied or drawn over them.
+     * `s_ws_native_bg` is valid by here: the seam check above returns 0 when the
+     * capture is missing. */
+    sdb_ws_build_owner(native);
+
     int keep = s_ws_reveal ? SDB_WS_CLIP : 0;
     for (int y = 0; y < height; y++)
         memcpy(out + (size_t)y * width + sdb_ws_row_x0(y) + keep,
@@ -2331,8 +2603,6 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
          * drawn at a sixteenth of his width. */
         if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
             fprintf(stderr, "sdbw f=%ld x0=%d:", s_frame, s_ws_x0_court);
-        /* The first canvas column the machine's own picture owns. */
-        int left_limit = s_ws_x0_court + keep;
         for (int o = 0; o < SDB_MARGIN_OBJECTS; o++) {
             SdbMarginObj *ob = &s_margin_obj[o];
             if (!ob->n) continue;
@@ -2493,7 +2763,33 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * `left_limit` is `native_x0 + SDB_WS_CLIP`, so a part that reaches
                  * here paints ONLY inside the clipped band and cannot touch a
                  * column the machine owns. */
-                int machine_drew = !completes && (sx >= 0 && sx <= 251);
+                /* OWNERSHIP, NOT GEOMETRY.
+                 *
+                 * `sx >= 0 && sx <= 251` is the native block's bounds, not the
+                 * machine's painting, and asking it here skips the part outright
+                 * before the blit runs. Inside the block the PPU leaves background
+                 * wherever the game culled a sprite, and there the margin is the
+                 * only renderer -- so this test is what leaves a character with a
+                 * slice missing rather than merely stopping a double-draw.
+                 *
+                 * Measured on the margin-locked capture, frames 809-816: a head
+                 * missing canvas 413-414 (native 252-253) for eight rows on every
+                 * one of those frames, on top of a worse frame at 808. Those
+                 * columns carry the head's outline and skin -- checked against the
+                 * whole head at 807, where the same tile has opaque pixels there,
+                 * so it is not transparent art. Byte-identical with the flicker
+                 * mod on and off, which places the hole in the machine's frame.
+                 *
+                 * So: skip only where the machine really painted something. */
+                int machine_drew = 0;
+                if (!completes) {
+                    for (int c = 0; c < 8 && !machine_drew; c++) {
+                        int nx = sx + c;
+                        if (nx < 0 || nx > 255) continue;
+                        if (s_ws_native_owner[(size_t)m->y * 256 + nx] != 0xFF)
+                            machine_drew = 1;
+                    }
+                }
                 if (machine_drew) continue;
                 int px0 = sx + rx0;
                 if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
@@ -2526,33 +2822,15 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * which is over backdrop. Clipped
                  * rather than dropped, so a character straddling the bound is
                  * still drawn up to it. */
-                int clip_lo, clip_hi;
-                int left_band = left_limit, right_band = rx0 + 256;
-                if (px0 + 8 <= left_band) {
-                    clip_lo = 0; clip_hi = 0;                    /* fully left: all */
-                } else if (px0 >= right_band) {
-                    clip_lo = 0; clip_hi = 0;                    /* fully right: all */
-                } else if (px0 < left_band) {
-                    clip_lo = 0; clip_hi = px0 + 8 - left_band;  /* left straddle */
-                } else {
-                    clip_lo = right_band - px0; clip_hi = 0;    /* right straddle */
-                }
-                /* The world's own bounds, on the same terms as the machine's
-                 * run above: the two clip the same ends of the same 8 columns,
-                 * so they add. A part wholly past the stadium's end is not
-                 * drawn at all, and one that straddles it is cut at it rather
-                 * than dropped, so a character standing at the bound is still
-                 * whole up to it. Research 26 recorded the looser behaviour --
-                 * "the sprite is drawn where the game put it, which may be over
-                 * black" -- as an accepted limit; it is no longer one. */
+                /* The world's own bound is the only one left that is geometric:
+                 * it bounds the WORLD and not a painting, so a part past the
+                 * stadium's end is not drawn and one straddling it is cut there,
+                 * so a character standing at the bound is still whole up to it. */
                 int wl = rx0 + (SDB_WS_LO - scroll);
                 int wh = rx0 + (SDB_WS_HI - scroll);
-                int in_world = px0 + 8 > wl && px0 < wh;
-                if (in_world && px0 < wl)         clip_hi += px0 + 8 - wl;
-                else if (in_world && px0 + 8 > wh) clip_lo += wh - px0;
-                if (in_world && clip_lo + clip_hi < 8) {
+                if (px0 + 8 > wl && px0 < wh) {
                     sdb_margin_blit(m, px0, out, width, height, s_ws_native_bg,
-                                    clip_lo, clip_hi);
+                                    wl, wh, rx0, s_ws_native_owner);
                     s_margin_drawn++;
                 }
             }

@@ -3328,3 +3328,177 @@ anchor values would not be movement, and the gate no longer reports it as such.
 Follow mode has exactly one `(x0, xh)` pair per aspect (`152/152`, `299/299`),
 which is the proof that the per-row helper is a no-op there and stock is
 untouched.
+
+## 29. The margin seam: a character drawn in part at the handover
+
+Reported from play, 2026-10-16, on the locked-camera 21:9 capture
+(`tmp/margin-locked`): a player at the right edge of the court is whole, then
+missing the top of his head, then whole again, with no input pressed. "Parts of
+his body start disappearing since that appears to be the border." A second
+player, rightmost in green, from frame 836. The margin-left and margin-right
+edges both do it, and the shimmer sweeps across characters as the camera moves.
+
+### What it is not
+
+Three plausible readings were measured and discarded before the cause was found,
+and each is a shape this project has paid for before.
+
+**It is not the capture losing parts.** The per-object part count *appears* to
+decay — object 3 goes 8, then 4, then 2 — and `sdbb`/`sdbv`/`sdbp` exist because
+that decay was the first thing to look at. But `$8483` fires **eight times per
+list, every list**, `$02` counting 8 to 1 on frames 800, 804, 808, 812, 816 and
+820 without exception. The game culls nothing. The decay is the *handover*: the
+margin keeps only what the machine cannot paint (`lost = x < 4 || x > 255`), so
+each part transfers from margin to machine as the camera pans, and 8 to 4 to 2 is
+a character walking into the viewport, working as designed.
+
+**It is not the boundary detection.** `sdbb` shows exactly one bump per sprite
+list, every four frames, `cur=04 < prev=F8/FC`. No spurious boundaries.
+
+**It is not the flicker mod.** The same replay with `remove-character-flicker`
+disabled gives `obj 3: 780-807:8  808-811:4  812-880:2` — byte-identical. The
+cursor pin is not involved.
+
+### The PPU rule, and a correction
+
+The PPU **clips** sprite pixels past column 255. Nothing wraps. The rule is
+`visible = max(0, 256 - X)`, and **X=248 is fully visible** — clipping begins at
+249. Confirmed in Mesen (`Core/PPU.cpp:736`, `spriteX + i + 1 < 257`), Mesen2,
+Nestopia (`NstPpu.cpp:2015`), FCEUX (`ppu.cpp:2271`, `rasterpos >= x &&
+rasterpos < x + 8`), Nintendulator (`PPU.cpp:818`, `Clockticks < 256`), and at
+circuit level in `emu-russia/breaks`: the sprite FIFO's down-counter has no
+carry path.
+
+The "X ≥ 252 is not displayed" folklore traces to one compressed sentence on the
+NESdev PPU_OAM page — "*X-scroll values of $F9-FF results in **parts** of the
+sprite to be past the right edge of the screen, thus invisible*". Note it starts
+at $F9, not $FC, and says "invisible" while describing a partial effect. The
+practical disproof is that games deliberately draw a column of black sprites
+across the rightmost 8 columns to mask it, which would be pointless if those
+columns could not be drawn.
+
+### The seam, precisely
+
+The game's cull (`$8488` X16 < 4, `$8494` high byte set) admits accumulator
+4..255, i.e. **OAM X 0..251**. So the machine's own sprites, drawn into a
+256-wide buffer, lose their tail: a sprite starting at OAM X 249, 250 or 251
+loses 7, 6 or 5 columns. On stock that is the right edge of the screen and
+invisible. **On a wide canvas that column sits in the middle of the court.**
+
+Measured at frame 809, from live OAM (object 3, the reported player):
+
+| band | machine's sprite | paints native | margin's part | paints native | gap |
+|---|---|---|---|---|---|
+| row 144 | tile 8D @ x=246 | 246–253 | sx 254 | 254–261 | none |
+| row 152 | tile 86 @ x=250 | 250–**255** | sx 258 | 258–265 | **256, 257** |
+| row 160 | tile 8F @ x=249 | 249–**255** | sx 257 | 257–264 | **256** |
+| row 168 | tile 30 @ x=251 | 251–**255** | sx 259 | 259–266 | **256, 257, 258** |
+
+The game holds only the character's **left** halves in OAM and culls the right
+ones, so the margin supplies the right. The machine's half stops where the buffer
+ends; the margin's starts beyond it; one to three columns × eight rows in
+between are painted by nobody. That gap walks down the body as the parts hand
+over, and it sweeps across the court as the camera pans. **That is the shimmer.**
+
+### Why three correct fixes did nothing
+
+`sdb_present` replaces the native columns with `s_picture` — a sprite-free
+background plus the flicker mod's whole captured list — **after**
+`cyc_render_present` has already run the compositor and painted the margin into
+the same buffer. Everything the compositor drew inside the native 256 is
+therefore discarded. That is correct for its contract ("the native 256 win") and
+fatal for a margin part that has to reach them.
+
+So the seam could not be fixed in the compositor at all, and three attempts there
+were each measured to be **0 differing pixels over 890 frames**:
+
+- `right_band` from `rx0+256` to `rx0+252` — the machine's columns end at sx 251
+  and the two differ by the 4-column OAM bias. Arithmetically exact, inert.
+- An ownership map built by walking **OAM**. Also inert: `cyc_render_sprites`
+  takes a `CycSpritePlaceFn` `place` callback and the flicker mod moves sprites
+  onto their published list's positions, so OAM says where a sprite *is*, not
+  where it was *painted*.
+- The same map rebuilt from the machine's **rendered frame**. Inert for the
+  reason above.
+
+The shape is `mstan/SuperMarioBrosNESRecomp`'s — same engine, same width table
+(426/560/854) — whose `docs/WIDESCREEN.md` gives the reason: "Managed enemies
+are drawn as complete sprites across both old screen edges; their corresponding
+native OAM slots are suppressed for presentation. **This avoids joining half a
+host sprite to SMB's column-clipped native sprite.**" Here the native slot
+cannot be suppressed — gate 2 wants the native block to stay the machine's — so
+the host sprite is drawn *over* it instead, and only into columns the machine
+left as background.
+
+### The fix
+
+`sdb_ws_build_owner(native)` marks each native pixel the machine actually filled,
+by comparing the rendered frame against the background capture. `sdb_ws_margin_pass()`
+then draws margin parts that **straddle the right edge** of the native block,
+after the stamp.
+
+Scoping it to the right seam is earned. Letting it repaint every part that merely
+touched the block cost object 0 its head at frame 817 (ink 149 → 67 over rows
+103–133) by painting the margin's copy over the machine's at a column the
+reconcile had shifted, and `margin_track` went from 9 anomalies to 10. The left
+seam is left entirely alone: columns 0–7 are the revealed band, which the
+compositor owns by construction (`completes`).
+
+A genuine pre-existing bug fell out: `sdb_margin_blit`'s behind-background
+priority test used `(width - 256) / 2` — the *centred* native origin — which is
+only correct when the compositor could not anchor. With the camera locked it must
+be `rx0`. Same class as the anchor split, one function further down.
+
+### Measured
+
+890-frame windowed replay of the recorded vector, 21:9, camera locked:
+
+| | before | after |
+|---|---|---|
+| object 3's head, frames 805–820 | 9 wrong | **2 wrong** |
+| frames 809–811, 813–816 | flickering | **clean** |
+| left-margin player, f=817 ink | 149 | **149** |
+| object 0 region, f=813 | — | **0 differing px** |
+| `margin_track` anomalies | 9 | 10 (the extra is trace-only, 0 px) |
+| gate 2, native columns | 1242 px / 54 frames | **1242 px / 54 frames** |
+| gate 8, mod-off = no catalog | — | **0 frames, 0 px** |
+
+61 frames and 2299 pixels change against the baseline, ~98.6% of them inside the
+native block. The guest is untouched: the margin hooks write no RAM and the pass
+writes only the presentation canvas.
+
+### What is still open
+
+**Frames 808 and 812**, both `cam != scr`. Two approaches were tried and both
+measured *worse* than leaving them:
+
+- **Capture filter asking the draw site's question** — `csx = x + lag - 4`,
+  `lost = csx < 0 || csx > 251`. Fixes 808 and 812, and costs a left-margin
+  player 82 of 149 ink pixels at frame 817. The loss occurs on lag-zero frames as
+  well as lagged ones, so it is the *timing* of the read and not the lag term:
+  `cyc_render_line_scroll_x` is read mid-frame while the emitter runs, and the
+  value the draw site uses is the one latched for the frame being presented.
+- **Widening the capture** by one camera step (the delta takes 0, 4, 6, 7) and
+  letting the draw site discard. 12 wrong frames against this build's 2, and it
+  breaks 805–807, which are otherwise clean. Capturing more is **not** safe: the
+  margin's copy of a part and the machine's sit a column apart after the
+  reconcile, so the ownership test reads those columns as unowned and the margin
+  paints a ghost.
+
+So the remaining case needs a capture-side test that neither reads the scroll
+mid-frame nor widens. Not found.
+
+**Also open and predating this:** `backstop 22` on the reported capture — object 0
+hitting the 24-part limit at frame 253, a gate-6 violation, untouched here.
+
+### A conflict on the record
+
+`mstan/SuperMarioBrosNESRecomp` measures the opposite of research.md §27 on the
+scroll basis: "Reading the already-advanced game camera produced a one-frame
+offset at the two joins while scrolling; the captured scroll removes that seam.
+Measured: the old camera produced 143 misaligned frames; the captured-scroll
+version produced none." §27 here measures captured scroll ≈75% correct on
+camera-stepping frames against `$C3/$C4` ≈33%. They measure background alignment
+at the join and this project measures sprite-object agreement, so they need not
+contradict — but it is live, and the capture-filter attempt above is the one that
+would have forced the choice.
