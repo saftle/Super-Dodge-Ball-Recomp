@@ -3597,3 +3597,103 @@ camera-stepping frames against `$C3/$C4` ≈33%. They measure background alignme
 at the join and this project measures sprite-object agreement, so they need not
 contradict — but it is live, and the capture-filter attempt above is the one that
 would have forced the choice.
+
+## 30. Why the seam fix cannot ship: the follow-camera doubling
+
+§29 ends with frames 808 and 812 open, their cause found, and a fix that works.
+This section is why that fix does not ship. **It trades two frames for a player
+drawn at twenty-four positions**, and it only showed up when someone played it
+with the camera following.
+
+### What it looked like
+
+Reported from play, 2026-10-16, on a follow-camera capture (`tmp/follow1`):
+player 1 running left is doubled. Not a gap this time — the seam artefact is
+gone — a ghost silhouette down the player's left side and a hole in the torso.
+
+Frame 958, cropped and differenced against the committed build, candidate on the
+right: **808 differing pixels**, the magenta falling along the left edge and legs
+of the body and pooling at the waist. The committed build at the same frame is a
+single clean player. So it is not an older regression; the seam fix causes it.
+
+### The cause, and it is not placement
+
+Object 11 is player 1 (`id=01/00`). Its captured part count, per frame:
+
+| | f950 | f954 | f956 | f958 | f962 |
+|---|---|---|---|---|---|
+| committed | 9 | 8 | 8 | 8 | 9 |
+| the §29 fix | 17 | 17 | **24** | **24** | **24** |
+
+Twenty-four is `SDB_MARGIN_PARTS`, the per-object cap, and the capture's
+`backstop` fires 3 times — so parts are being *refused*, not just mis-placed.
+
+The mechanism is the part identity, which is `(dx, row)`:
+
+```
+f=954   row 158: col -59  row 159: col -60      <- 1 px apart, correct
+f=956   row 158: col -59  row 158: col -59      <- impossible: same row
+        row 156: col -59  row 158: col -59
+f=958   row 156: col -67  row 158: col -67      <- identical column AND tile
+```
+
+A **running** player's animation moves the ROW between builds. The replacement
+therefore cannot match the part it replaces, appends instead, and the old row-part
+survives the eight-frame expiry. The object accumulates until it is pinned at the
+cap. `dupes.py` names each one: `obj 11 col -67: row 156/158 tiles 01/01` — the
+same sprite at two rows.
+
+### Both knobs are column thresholds, and row drift is not a column drift
+
+`SDB_PART_TTL` and `SDB_PART_NEAR` were each tuned until they worked, and each
+works only while the object is still:
+
+| | locked capture | follow capture |
+|---|---|---|
+| stacked parts, committed | 367 | 37 |
+| stacked parts, §29 fix | **3114** | **1668** |
+
+The `NEAR = 7` derivation in §29 is **sound and its scope is narrow**: every
+same-row pair the game emits is exactly 8 apart (15717 pairs, one histogram
+bucket), so a 7-column window reaches every stale copy and cannot reach a
+distinct part. That is a true statement about *column* spacing, measured on a
+capture whose objects were largely stationary. Nothing in it bounds the ROW axis,
+and for a moving player that is the axis that drifts. **A correct measurement
+carried one step too far is the failure, not a wrong constant** — the 1-pixel
+version and the 7-pixel version both "worked" and both ship the same bug at a
+different magnitude.
+
+So there is no threshold that has both. The lazy boundary is the wrong mechanism
+for the seam and cannot be rescued by tuning it.
+
+### Four instruments that were wrong, and one that was not
+
+Every one of these passed on a build that was visibly broken, which is the whole
+point of listing them.
+
+1. **`margin_track.py`'s `ghost`** fires only for parts *within one pixel* on a
+   row. The locked-mode doubling sat 2–7 px away and was called clean.
+2. **`dupes.py`, first version**, widened that to 8 but kept the *same-row*
+   restriction, so it reported **0 drifting on the build that doubles here** — the
+   artefact is the mirror image, same column and different rows. It now checks
+   both shapes and fails the broken build on both.
+3. **Part-count gates** were green throughout (`backstop 0` on the locked
+   capture, peak and drawn all plausible). Only the per-object count against the
+   game's own 8 exposed it.
+4. **A recorded-vector replay** said candidate and committed were **byte-identical
+   in follow mode — 0 frames, 0 pixels** over 1263 frames. The played capture of
+   the same configuration differs on **267 frames / 243912 px**. This is the
+   windowed/headless divergence of §29's close, and it is worse than that note
+   implies: it is not that a replay is *nearly* faithful, it is that it is
+   confidently wrong about the exact thing under test. **Analyse a capture where
+   it was made, and do not use a replay to decide whether a margin change is
+   safe.**
+5. The one instrument that did work: **the per-object part count against the
+   game's own**. Eight is a character. Twenty-four is a slot that filled up.
+
+### A host detail worth one line
+
+`NESRECOMP_NO_LAUNCHER=1` skips the launcher, which is what applies
+`[feature.values]` — so `aspect` and `camera` must be passed as CLI flags. A
+`state.toml` saying `camera = "follow"` was silently ignored and the trace
+reported `camera locked`, which is a wasted run if you believe the file.
