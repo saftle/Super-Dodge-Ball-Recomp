@@ -775,7 +775,14 @@ line means the capture is off, not that there is nothing to capture.**
 8. **Mod off = stock** — the catalog present with every feature disabled must be
    byte-identical to no `--mods-root` at all. The launcher's real `state.toml` is
    the reference; a hand-written one silently drops `[feature.values]` if it is not
-   attached to the feature it belongs to.
+   attached to the feature it belongs to. **And `[feature.values]` are applied
+   whether or not the feature is `enabled`** — an all-off catalog carrying
+   `aspect = "fit"` / `camera = "locked"` still runs a locked-camera,
+   widescreen-configured game (`s_ws_lock=1`, `s_ws_aspect=4`, every feature
+   `false`). **An all-off catalog needs `aspect = "stock"` and `camera = "follow"`
+   to be stock at all**, or the comparison is between two equally non-stock runs
+   and passes vacuously. Gate 8 is the gate most easily satisfied by measuring
+   nothing (research §29).
 9. **Cadence and continuity — the two checks that actually catch things.** This
    game emits its sprite list over two frames and then leaves OAM alone for three
    to six more, so anything assuming a per-frame rebuild is wrong.

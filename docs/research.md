@@ -3485,11 +3485,106 @@ measured *worse* than leaving them:
   reconcile, so the ownership test reads those columns as unowned and the margin
   paints a ghost.
 
-So the remaining case needs a capture-side test that neither reads the scroll
-mid-frame nor widens. Not found.
+### The cause of 808 and 812, found, and why the obvious fix is not shippable
+
+Both frames have the same cause, and it is neither of the two above. The JSON
+mirror settles it in one dump. At **trace frame 808** object 3 holds only its
+four **right** halves (`sx` 261, 265, 264, 266) while the machine holds neither
+half — and `sdbb` says why, on the line above:
+
+```
+sdbb f=808 boundary: obj 3 drops 8 parts (build 191 -> 192)
+```
+
+`$0617` restarting a list **wipes the object's captured parts**, and the game
+rebuilds its list over *two* frames. At the boundary the object has been emitted
+in the list that ended and not yet in the one starting. The four left halves were
+wiped, and they were not re-captured because they sit **inside** the machine's
+columns and so do not pass the capture filter — while the machine's own list was
+not yet carrying them either. Neither side drew them.
+
+**Leaving the boundary lazy and expiring parts on a TTL fixes it completely.**
+Stamping each part with the frame it was last emitted in, not clearing the slot
+on a build bump, and dropping parts not re-emitted within eight frames:
+
+| | committed | lazy boundary |
+|---|---|---|
+| object 3's head, frames 805–820 | 2 wrong | **0 wrong** |
+| `backstop` (per-object part limit) | 22 | **0** |
+| `margin_track` | 9 | 9 |
+
+The backstop falls because a slot is no longer emptied and refilled at every
+boundary. Eight frames is measured, not chosen: the game leaves OAM alone for
+three to six frames between builds, so anything older is not coming.
+
+**And it is still not shippable, because of ghosts.** With the boundary lazy, a
+part that stops being emitted survives alongside its replacement, and
+`find-or-append` keys on an exact `(dx, row)` while the game's part offset moves
+with the camera. The same logical part is re-emitted a pixel or two away each
+build and **both** are kept — 125+ `ghost`s on object 8 alone, "two parts on row
+160 at columns 289 and 290". That is the documented failure of keeping stale
+parts, and it is worse than the two frames it buys.
+
+So a part must be identified by its **row, within one pixel**. That is not the
+band anchor §26 removed — that matched on *tile*, which every player shares, and
+reported thousands of false hits; this matches on the row and reaches one pixel,
+which cannot cross to a neighbour's part (parts of one character are eight apart).
+Together the two are clean:
+
+| | committed | lazy + row-tolerant |
+|---|---|---|
+| object 3's head, 805–820 | 2 wrong | **0 wrong** |
+| `margin_track` | 9 (9 `shift`) | 10, **no ghosts** |
+| `backstop` | 22 | **0** |
+| gate 2, native columns | 1242 px / 54 frames | **1242 px / 54 frames** |
+| left-margin player, f=817 ink | 149 | **152** |
+| f=813 object 0 region | 0 px | **0 px** |
+
+Every widescreen gate passes. **Gate 8 does not**: with the catalog all off the
+new build puts **331 pixels on the stock 256 frame across 42 frames**, against a
+reference it must equal. That is not a margin artefact and it is not explained:
+
+- guest state is **byte-identical** over the same 890 frames (`--frame-log`,
+  `cmp`), so it is not drift;
+- `sdb_ws_margin_pass` is **never called** at stock width (instrumented, and the
+  engine does not reach the compositor at 256), and its three consumers are the
+  pass, `sdb_json_frame` (trace-only) and `sdb_ws_composite` (not called);
+- adding the `long f` field alone, with no logic change, measures **0 px**, so it
+  is not struct layout.
+
+What is left is the hook path itself, and unexplained is left as unexplained. The
+change was reverted rather than shipped: two frames are not worth a gate that
+cannot be accounted for.
+
+### A gate-8 trap worth more than the fix
+
+Measuring that failure took five runs, and the first three were measuring the
+wrong thing. **`[feature.values]` are applied whether or not the feature is
+`enabled`.** A hand-written all-off `state.toml` carrying `aspect = "fit"` and
+`camera = "locked"` still runs a **locked-camera, widescreen-configured** game —
+`SDB_TRACE` confirms `camera locked` and the `sdbws` probe shows `s_ws_lock=1`,
+`s_ws_aspect=4` with every feature `enabled = false`.
+
+That is the same file AGENTS.md already warns about from the other side (values
+attached to the wrong feature are silently dropped). Both halves are needed: the
+wrong attachment drops the value, and a *correct* attachment applies it even
+though the feature is off. **An all-off catalog must have `aspect = "stock"` and
+`camera = "follow"` to be stock at all.** With that corrected, the committed
+build measures 0 px against no-catalog, which is gate 8 properly established;
+without it, the comparison is between two equally non-stock runs and passes
+vacuously.
+
+One thing found along the way is worth recording even though it did not ship:
+`sdb_ws_margin_pass`'s only guard is `s_margin_on`, and the `--margin-sprites`
+option **defaults on**, so it is 1 even with every feature off. Its correct gate
+is the canvas width (`cw <= 256`) — no margin, no seam. Today that is unreachable
+rather than harmless: the pass sits behind an early return in `sdb_present` that
+the stock-width path takes first, so it is never called at 256. But the guard is
+one refactor away from mattering, and nothing else in the function would stop it.
 
 **Also open and predating this:** `backstop 22` on the reported capture — object 0
-hitting the 24-part limit at frame 253, a gate-6 violation, untouched here.
+hitting the 24-part limit at frame 253, a gate-6 violation. The lazy boundary
+above clears it, but that change is not shippable for the gate-8 reason.
 
 ### A conflict on the record
 
