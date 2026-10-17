@@ -3697,3 +3697,71 @@ point of listing them.
 `[feature.values]` — so `aspect` and `camera` must be passed as CLI flags. A
 `state.toml` saying `camera = "follow"` was silently ignored and the trace
 reported `camera locked`, which is a wasted run if you believe the file.
+
+### Two implementations, both measured, neither shippable
+
+The premise above was then tested rather than assumed, and it holds. An
+`SDB_PROBE_FRAME` / `SDB_PROBE_ROWS` dump of the ownership map for native
+columns 240-255 reads, at the two frames that matter:
+
+```
+f=808 row 152 cols 240..255: ................   free everywhere, rows 144-176
+f=809 row 152 cols 240..255: ............####  cols 252-255
+f=809 row 160 cols 240..255: .........#######  cols 249-255
+f=809 row 165 cols 240..255: ..............##  cols 254-255
+```
+
+At 808 the machine has painted **nothing**, so nobody is drawing the player. At
+809 it owns the character — and every `#` run terminates at column 255, which is
+§29's PPU clip rule visible directly in the machine's own output. Ownership flips
+on exactly the frame the handover completes, so it is the discriminator the
+design needed.
+
+So two full implementations were built and measured. Neither ships, and they
+trade places almost exactly:
+
+| | locked: obj 3 head 805–820 | f=817 ink | f=813 | backstop | gate 2 | follow: drifting | follow: stacked |
+|---|---|---|---|---|---|---|---|
+| committed | 2 bad | 149 | 0 px | 22 | 54 fr / 1242 px | 0 | 37 |
+| **v1**, grace = one build | **0 bad** | **152** | 222 px | **0** | 54 fr / 1242 px | **6 FAIL** | 439 |
+| **v2**, no grace | 1 bad | 330 | 320 px | 2 | 54 fr / 1242 px | **0** | **46** |
+
+v1 — carry the previous build, retire anything not refreshed that the machine
+has not taken over — is the better build on the locked capture on every axis,
+and fails the follow one with six drifting clusters. v2 is the same code with the
+carry removed, and it is the reverse: follow is spotless, locked picks up 34
+`ghost`s and 812 comes back.
+
+Both were reverted. `src/` is at the committed build.
+
+Two rules came out of writing them and are worth keeping whatever happens next:
+
+- **THE CLIP BAND IS NOT AN ANSWER TO "IS THIS OWED".** `sdb_ws_build_owner`
+  writes `o[x] = (x < SDB_WS_CLIP || n[x] == b[x]) ? 0xFF : 0`, so columns 0-7
+  are marked free *unconditionally* — PPUMASK clips them and the machine can
+  never paint them. Testing them therefore says every band part is owed on every
+  frame, and a retained band part never retires. Measured with the clip included:
+  f=817's left-margin player goes 149 → 244 ink pixels and f=813 picks up 295, all
+  of it stale copies the retirement step could not reach. A part is owed only
+  where the machine **could** have painted and did not. Correcting this took v1's
+  f=817 from 244 back to 152 and is the single reason its numbers are good.
+- **RETIREMENT MUST BE DRIVEN BY THE OBJECT'S OWN CAPTURES.** The game's display
+  list does not contain most off-screen objects (§26), so retiring on age rather
+  than on the object's activity empties precisely the margin sprites this feature
+  exists to draw. An object the game has dropped from the list is never captured,
+  never reaches the retirement step, and keeps its parts — which is what stops the
+  margin blinking.
+
+### What the symmetry means, and why this stopped
+
+v1 and v2 differ in one bit: whether the previous build's parts are carried. They
+trade places almost exactly, which is the useful result. It says the remaining
+question is not a threshold, a window or a grace period — "this part is still
+owed" and "this part is superseded" are simply not separable by **age**, by
+**column**, by **row**, or by the **ownership map** as it stands. Every attempt so
+far has picked one of those axes and moved the trade rather than removing it.
+
+Something outside the capture has to disambiguate them, and no candidate is
+recorded here. The honest position is that frames 808 and 812 remain open, that
+four attempts have each fixed one case and broken the other, and that the committed
+build is correct on both captures — locked and follow — as measured.
