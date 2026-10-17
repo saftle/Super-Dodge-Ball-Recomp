@@ -2414,9 +2414,175 @@ restored. Both figures have since moved (current: **33885 / 104769**); the
 one-build staleness was the last open half of it and is fixed by `sdb_reconcile`
 above — plan.md 15.
 
-### The menu ghost: a stale sprite list outliving the screen it belongs to — OPEN
+### The menu ghost: a stale sprite list outliving the screen it belongs to — RESOLVED
 
-Found by playing, twice, and **not fixed**. From two captures in `tmp/`: the
+**The rule that works is the one the table below already called correct and
+rejected: stand the presentation down when the game's OAM page is entirely
+hidden.** It was rejected for missing a frame. That frame does not occur, and why
+it does not is the finding.
+
+`tmp/mysession` is a played session (level 1 into the between-rounds screen) with
+its save state, and the guest says exactly what happens at the transition:
+
+    window   sdb peak   presented list   OAM slots hidden
+      867        60           60                 3
+      868         0           60                64      <- the clear
+      ...
+      956         0           60                64
+      957        20           20                64      <- the next screen's build
+      958        20           20                43      <- and its page
+
+So the page goes from **3 hidden to 64 hidden in one frame** and stays at 64 for
+**90 consecutive frames** while `peak` is 0 on every one of them. The mod's list
+is frozen at the 60 sprites captured on frame 867 and it repaints them for a
+second and a half: the whole level-1 roster standing around a menu whose own text
+is half covered by a player's head.
+
+    $0200 at frame 873:  F0 FF 23 FA | F0 9E 41 56 | F0 DF 41 4E | ...
+
+All sixty-four slots say y=$F0 — 240, the first row the PPU will not draw — with
+the tile, attribute and X of the sprites being repainted still in place. That is
+the game retiring its roster, and a page with nothing visible in it is not "the
+game is quiet": it is the machine's own answer to "is anything on screen at all".
+If nothing is, the mod has no dropped sprite to recover and can only invent one.
+
+**The gap the old rejection named does not exist here.** It predicted a frame with
+"1 live sprite, 8 stale" as the machine starts the new screen. In this capture
+there is no such frame: the page is either 3 hidden (play) or 64 hidden (the
+menu), never in between, and the next screen arrives already carrying its own
+20-entry list. The intermediate state is not observed. It stays theoretically
+possible — a screen putting one sprite on an otherwise cleared page would get the
+stale list for that frame — and that is the honest limit of this fix: one frame of
+ghost instead of ninety.
+
+`cyc_render_oam()`, the page the PPU is reading. **Not `$0200`, and that is a trap
+worth its own line**: $0200 is the DMA *source*, so it runs a frame ahead of the
+picture being presented. Asking it measured 6 frames of title screen blanked at
+the start of every run — throw-vector frames 45-50, where $0200 was all-$F0 while
+live OAM held 21 visible sprites and the mod was holding a 20-entry list. The live
+page has no such lag: it crosses from 61 visible sprites to 0 between window
+frames 867 and 868, the frame the transition starts.
+
+**Also not a per-entry test on the entry's own OAM slot**, which is the obvious
+refinement and is wrong. Measured on this capture it fires on **slot 63 alone for
+107 frames of ordinary play**, and the picture is a character losing its legs.
+Slot 63 is where the mod's own cursor pin parks the game, so the game's tail-hide
+of the slot it did not fill lands on entries the mod has every reason to draw.
+
+The same page test gates the **margin** half of the compositor, which had the same
+ghost from the other direction. The margin reads liveness from the display record
+rather than from OAM, and the game leaves those records standing across the
+transition — so object 7 (screen column 309, 8 parts) was repainted in the margin
+of a screen with no sprites on it, and it was the only ink the margin contributed
+to the whole menu. `s_margin_on` is deliberately not consulted, so the test holds
+with the character-flicker feature off.
+
+Gates, all measured on this session and on the four 3000-frame vectors:
+
+| gate | result |
+|---|---|
+| ghost gone, window frames 867-957 | presented frames differ from the pre-fix build only on 867-868 (64 px, one tile lost on the black wipe) and 870-899 (3117 px, the ghost) |
+| the match, window frames 605-866 | **262 of 262 frames bit-identical** to the pre-fix build |
+| `hid == 64` while a list is held | 90 consecutive frames here, all of them the menu; on throw / sweep / idle / pan (3000 frames each) **1 entry in total**, at frame 40, where the machine's page is empty |
+| max hidden slots after frame 60 | 43 (throw), 21 (idle, pan), 63 (sweep, on 4 frames where the mod held no list) |
+| margin parts withheld on a match | **0** on all four vectors |
+| mod off is stock | `--frame-log` byte-identical with an all-off catalog and with no `--mods-root` |
+| `margin_track.py` | still produces its per-object table |
+
+`sdbq f=<n> ret=<d> hid=<h>` is the per-frame line this is read from, under
+`SDB_TRACE=1`. The exit line is `flicker: <withheld> of <seen> presented list
+entries withheld`, and `margin sprites:` carries `withheld (page cleared)`.
+
+**One trap in the tooling, because it cost a pass here:** `--load-state` does not
+resume `s_frame`, it restarts it at **0**, so `SDB_TRACE_CAPTURES=<from>-<to>` and
+`SDB_TRACE_JSON=<from>-<to>` are relative to the *loaded* frame and not to the host
+frame number. Asking for 600-900 on a run loaded at frame 605 prints nothing and
+`margin_track.py` reports `no sdbw lines in that log` — the instrument-broken
+signature, not a clean picture.
+
+### The margin's menu ghost: a stale object outliving its screen — PARTLY FIXED
+
+The page-clear rule above fixed the flicker mod's half of the between-rounds
+ghost. The **margin** had the same ghost from the other side and needed a
+different signal, because on that screen the page is not clear: the game is
+emitting 19 legitimate menu sprites the whole time.
+
+Measured on `tmp/mysession2`, a played session (level 1 into the between-rounds
+screen), where the right margin carried two figures from frame ~1250 to 1547:
+
+    object      last emission   next      gap    screen columns
+        6               1053      1557    504    271..290
+        7               1053      1557    504    310..329
+        8               1053      1557    504    439..449 (off canvas)
+       12               1205      1557    352    322..330
+
+**The whole roster goes quiet and the margin keeps drawing it.** The display
+records stay valid throughout — the game rewrites them every frame — so the
+identity test passes and the margin repaints objects the game retired, from a
+capture 504 frames old.
+
+Their geometry is *not* the mod's fault, and this is worth saying because it looks
+like corruption: object 6's part set is a sheared 8-sprite cluster, identical for
+479 frames. At frame 1053 the game emitted object 6 itself as 8 sprites at columns
+235-254 (`$4D` 0..7), the same shape, and the margin carries what it was given.
+The set is clean again at frame 1557, the frame the game re-emits the object.
+
+**The rule: stand an object down once the game has stopped emitting it**
+(`SDB_MARGIN_STALE`). The number is measured, because a threshold is only worth
+having if the two states are separated:
+
+    largest gap between two emissions of one object, in play
+      sdb_sweep / sdb_throw / sdb_idle / sdb_pan, 3000 frames each    140
+      tmp/mysession2, 1905 frames                                      144
+    smallest gap that spans a menu, tmp/mysession2                      352
+
+Every in-play maximum is object 8 — the object research 26 already names as
+emitted least often and as one of the two standing in the margins — so this is
+measured on all four vectors and not on one. **240 sits 71% above the in-play
+maximum and 32% below the menu minimum.** Gate: **0 stand-downs over 12000 frames
+of the four vectors**, with `drawn` at 124719 / 146443 / 121225 / 126573 — the
+pre-rule figures, to the digit.
+
+This is NOT the freshness threshold the table below warns about, which was about
+the flicker mod's whole published list and its age in frames. That quantity cycles
+every three or four frames and a sweep publishes at ages 4-8, so it had no
+separation to find. This one does.
+
+**What it does not fix.** The rule fires 240 frames *after* the last emission and
+one object outlives it: object 12 is silent for 131 frames at host frame 1336 and
+is only stood down at 1445. So the right margin is plain blue from frame 1296
+except for a 5-part fragment between 1296 and 1444 — **149 frames of a ~350-frame
+menu**. Lowering the threshold to reach it is not free: the in-play floor is 144,
+so 150 leaves 4% of margin. The design that would close it without that risk is a
+**per-object** age — stand down when an object has been silent longer than *it*
+has ever been silent, since object 12's own in-play maximum is 36 while object 8's
+is 144. Not attempted; it needs the same four-vector gate and its own warm-up
+rule.
+
+#### The bug the first attempt at that rule exposed
+
+Worth recording, because it is a trap in a field whose name says what it means.
+`SdbMarginObj.seen` is documented as "frame the parts were last written" and it was
+stamped at the *bottom* of `sdb_margin_capture`, after the not-culled branch
+(`if (!lost) return 0`) and the vertical-cull branch had already returned. So it
+only ever advanced on a part the game **culled**: an object standing on the pitch,
+emitting eight sprites every four frames with all eight on screen, never moved it.
+
+Measured on the sweep vector: object 0 is emitted at frames 382, 386, 390 ... 622
+and `seen` still read **382** on frame 623. The liveness gate built on it stood
+objects down **26,676 times over 3000 frames of an ordinary match**.
+
+The `sdbp` line prints *before* all of those branches, so the emission-gap
+measurement taken from it was right all along — only the field the code kept was
+wrong. A rule built on a trace line and a rule built on the field it prints are
+not the same rule, and only one of them was measuring the game.
+
+#### The four rules that did not ship, and why
+
+**A fifth shipped, for the MARGIN half, and it is the one the menu needed.** See
+"The margin's menu ghost" below.
+
+Found by playing, twice. From two captures in `tmp/`: the
 GAME MODE menu ends with an 8-sprite character in OAM slots 1-8; the next screen
 retires it by writing `y=$F0` over the y byte and leaves tile/attr/x intact; the
 game then emits nothing for 14 frames. `s_build_count` is deliberately never reset
@@ -2432,7 +2598,7 @@ for a worse one**, which is why none shipped:
 | rule | what it fixed | what it broke |
 |---|---|---|
 | reject the list when any entry disagrees with OAM | the ghost | **87 of 128 disagreements are the attribute byte alone** — the game flipping a sprite's palette mid-build. Suppressed the mod through a whole super-throw capture: a character lost body parts on 8 frames |
-| reject when OAM is entirely empty | the ghost | correct, but only catches the case where the machine has drawn *nothing*; it misses the frame the machine has already started the new screen (1 live sprite, 8 stale) |
+| reject when OAM is entirely empty | the ghost | correct, and it is the fix that shipped; the objection was that it "misses the frame the machine has already started the new screen (1 live sprite, 8 stale)". **No such frame exists in `tmp/mysession`** — the page reads 3 hidden or 64 hidden, never in between, and the next screen arrives with its own list |
 | reject when the presented list exceeds the machine's live sprite count | the ghost | **structurally impossible**: the mod presents up to 77 sprites and OAM holds 64, so exceeding it is the truncation fix working. Fired on 34 sweep frames |
 | `sdb_publish` stamps the frame the list was CAPTURED, not handed over | the ghost | correct in isolation, and it fixes the blob — but it also refuses the stale fallback on ordinary build transitions, where the published list is the right thing to show |
 
@@ -2443,11 +2609,11 @@ before, 4 after. The fallback it suppresses is not a nicety — it is what stops
 half-built list from blanking the pitch, and 64 sprites is simply more correct
 than the 32 half of it that remains.
 
-So the two cases are **not separable by any signal tried**: the ghost's published
-list is 14 frames old and the healthy fallback's is 5, and a sweep also publishes
-at ages 4-8, so no age threshold separates them either. What the ghost needs is to
-know *the screen changed*, and the mod has no notion of a screen. Until something
-does, the ghost stays: one frame on a menu transition, and no worse than stock.
+So the two cases are **not separable by age**: the ghost's published list is 14
+frames old and the healthy fallback's is 5, and a sweep also publishes at ages
+4-8. Nor by *content*, because every player shares tiles. What did separate them
+was a third thing neither table had: not how old the list is or what is in it, but
+**whether the machine is painting anything at all**.
 
 What did ship is the `build-list` column on the `sdb` trace line, because
 `peak-list == 0 && build-list > 0` is the fingerprint of every frame in this
@@ -3891,7 +4057,9 @@ supplied until the frame it stops straddling. It reads as a doubled sprite becau
 the two halves become separately visible at 721. Same shape as the right bug, one
 boundary over, and untouched.
 
-**Also still open from §26:** the menu ghost (plan.md 16).
+**Also closed from §26:** the menu ghost (plan.md 16) — see "The menu ghost" at
+the head of that section. Fixed by standing the presentation down when the game's
+OAM page is entirely hidden, in both the flicker list and the margin.
 
 ## 32. Cheats: the `.cht` engine, the team's memory layout, and four refuted ways to win a stage
 

@@ -111,7 +111,7 @@ Three options (setup.sh uses Option C by default):
 - **Reveal follows widescreen.** The clipped-column reveal is on by default whenever widescreen is, on **every** path — `--widescreen`, the launcher, `--mods-root`. It used to be set only by `sdb_ws_enable` (the activation plugin), so a bare `--widescreen` presented an 8-column black gutter the launcher did not. One resolver, `sdb_ws_reveal_ask`, consulted by `sdb_ws_apply`, with the precedence **explicit `--overscan` → `SDB_OVERSCAN` → on**; stock width resolves to off. Both obvious shapes of the fix are wrong: stamping it from the `--widescreen` handler makes the flags order-dependent, and reading `SDB_OVERSCAN` in the plugin regresses the A/B on the CLI path (280 of 701 frames). Measured 0/701 CLI-vs-launcher, 280/701 default-vs-`SDB_OVERSCAN=0`. Research §28.
 - **Overscan**: revealed automatically with `widescreen`; there is no separate feature. It has no effect at width 256, because at that width the engine never calls the compositor. `SDB_OVERSCAN=0` in the environment forces the clip back for the headless A/B in gate 5; the launcher cannot turn it off.
 - **Cheats**: `--cheat AAAA:VV` arms one code now, repeatable, several joined with `;`. `--cheats FILE` loads a `.cht` (supersedes any `--cheat`); `--no-cheats` drops the set and restores every byte a freeze was holding. In the window, `Escape` → **Cheats** is a section with one toggle per entry, applied on the spot. **The menu pauses the game** (`cyc_sdl.c:1451`: a frame only runs when the menu is closed), so a toggle takes effect on the first frame after you close it — not while you sit in the menu. Rows are built once at `cyc_ui_menu_create()`, so cheats must be parsed before the menu is built; they are, at session start.
-- **Presentation**: `--present-out` saves what the *window* would show — the only path that exercises the character-flicker mod. `--screenshot`/`--frame-log` capture the machine's native frame and ignore it. `--present-every N` sets the **present** interval, not a screenshot interval: the compositor only runs on a presented frame, so `N > 1` skips it and every `drawn`/`composed` count drops accordingly. Measure at `N = 1` (see the stride warning under Known Issues).
+- **Presentation**: `--present-out` saves what the *window* would show — the only path that exercises the character-flicker mod. `--screenshot`/`--frame-log` capture the machine's native frame and ignore it. `--present-every N` sets the **present** interval, not a screenshot interval: the compositor only runs on a presented frame, so `N > 1` skips it and every `drawn`/`composed` count drops accordingly. Measure at `N = 1` (see the stride warning under Known Issues). **The PNG's size is the window's output size, not the picture's** — a window the WM has constrained short (a played session produced 1905 captures at 426x239 for a 426x240 picture) is a capture, not a picture change: check whether the odd columns hold picture colours before believing a screen artefact. **A letterboxed window's outer columns are the window's black edge, not the picture**, so a 1-2px dark line at the extreme left or right of a capture is not something the player sees and is not a bug in the presentation. (`present_shot()` does `SDL_RenderReadPixels(NULL)`, which reads the viewport rather than the drawable, into a `malloc`'d buffer sized from `SDL_GetRendererOutputSize` — so on that geometry the unwritten columns are uninitialised heap. It is a real capture-path defect and it is upstream's; it changes no pixel anyone sees.)
 
 ## Critical Rules
 
@@ -298,20 +298,45 @@ run, and **our own mods put nothing in the save state** — `CycHostExtras` has 
 savestate hook and `src/sdb_host_extras.c` registers none, so the flicker mod's
 published sprite list arrives empty and rebuilds over the first frame or two.
 
-### The menu ghost — OPEN, and four fixes that each cost more than they fixed
+### The menu ghost — RESOLVED. The signal is "is anything on screen at all", not "did the screen change"
 
-A menu screen's character is retired with `y=$F0` and the game then emits nothing
-for ~14 frames; `s_build_count` is never reset per frame, so the flicker mod keeps
-repainting it. One frame of jumbled body parts on a menu transition, flicker mod
-only. **Do not "fix" it by tightening the list's freshness or by comparing it to
-OAM** — both were tried and both suppress the mod across whole matches (11% of
-sweep frames, 8 players becoming 4). The table of four measured attempts is in
-research 26 and the open item is plan.md 16. What it actually needs is a signal
-that *the screen changed*; the mod has none.
+A menu screen's roster is retired by the game writing `y=$F0` over every OAM slot
+and then emitting nothing. `s_build_count` is not reset per frame (the build spans
+two), so the flicker mod repainted its frozen list for as long as the silence —
+**90 frames** on `tmp/mysession`, the whole level-1 roster around a between-rounds
+menu. The margin repainted one of them too, from the display records it never
+re-checks against OAM.
 
-**`--present-out` indexes one frame ahead of the trace's frame counter** — replay
-frame *f* is capture frame *f+1*. Both captures above were misread for several
-passes because of it.
+`src/sdb_host_extras.c:sdb_page_clear()` — all 64 OAM slots hidden means the
+machine is painting nothing, so present nothing. Gates the flicker list, the
+margin blit and the right-seam pass. Gates: the match is 262/262 frames
+bit-identical to the pre-fix build; `hid == 64` with a list held happens once in
+3000 frames on each of throw/sweep/idle/pan; margin withheld on a match is 0.
+`SDB_TRACE=1` prints `sdbq f= n= ret= hid=` per frame.
+
+**Traps, each of which cost a real bug or a false pass here.**
+
+- **Read `cyc_render_oam()`, never `$0200`.** `$0200` is the DMA *source*, so it is
+  a frame ahead of the presented picture: at throw-vector frames 45-50 it is
+  all-$F0 while live OAM holds 21 visible sprites, and asking it blanked six frames
+  of title screen at the start of every run.
+- **Never make it per-entry, on the entry's own OAM slot.** That fires on slot 63
+  alone for 107 frames of ordinary play — slot 63 is where the mod's own cursor pin
+  parks the game, so the game's tail-hide lands on entries the mod must draw — and
+  the picture is a character losing its legs. The global test reads 64 or it reads
+  1..63; on `tmp/mysession` the only 64s are the 90 menu frames.
+- **`--load-state` restarts `s_frame` at 0**, so `SDB_TRACE_CAPTURES=a-b` and
+  `SDB_TRACE_JSON=a-b` are relative to the *loaded* frame, not the host frame
+  number. Asking for 600-900 on a run loaded at 605 prints nothing and
+  `margin_track.py` reports `no sdbw lines in that log`.
+- **`--present-out` indexes one frame ahead of the trace's frame counter** — replay
+  frame *f* is capture frame *f+1*. Both captures above were misread for several
+  passes because of it.
+- **Never run two `nes_game` against one mods dir**, not even two `--mods-root`
+  copies of the same catalog state. Four concurrent gate runs left
+  `tmp/mysession/mods/state.toml` with all three features `enabled = false` and the
+  next replay ran stock — a different guest, so the diff reported 77 frames
+  "changed" that had not. Copy the catalog per run.
 
 ### A played session is the only way to find the band bugs — `--record-input`
 
@@ -569,6 +594,12 @@ Gates:
    8000-frame stress: max list 77, 0 overflow, 0 backstop). See research.md §2.1.
 6. **Numbers present** — damage digits drawn every frame the guest holds them in OAM
    (108/108 steady, throw vector); menu position digits pixel-identical (menu frames 100-400).
+7. **No ghost on a menu transition** — the page-clear gate (see the Known Issues
+   section). `SDB_TRACE=1` prints `sdbq f= n= ret= hid=`; on a match `hid` must stay
+   below 64 on every frame that holds a list, and the exit line must read
+   `flicker: 1 of N presented list entries withheld` (frame 40, machine empty) and
+   `margin sprites: ... 0 withheld (page cleared)`. A `hid=64` frame in the middle
+   of a match is a regression: it means a sprite the machine is drawing was withheld.
 
 Comparison numbers must come from the *same* schedule and `--ram-init`; a different input changes the match and the figures are meaningless.
 
@@ -865,7 +896,11 @@ line means the capture is off, not that there is nothing to capture.**
 7. **The revealed columns carry sprites** — with the reveal on, the 8 columns the
    PPU hides must differ from a `--margin-sprites 0` run on some frames (344 of
    1200, mean 74 px, max 627). Zero means the band is showing the reconstructed
-   background only, i.e. the capture's PPUMASK branch is inverted again.
+   background only, i.e. the capture's PPUMASK branch is inverted again. The
+   `withheld (page cleared)` field on the `margin sprites:` line must be **0** on a
+   match: the page-clear gate stands the margin down only when the machine is
+   painting nothing, and a non-zero count mid-match means a sprite the machine owns
+   was dropped.
 8. **Mod off = stock** — the catalog present with every feature disabled must be
    byte-identical to no `--mods-root` at all. The launcher's real `state.toml` is
    the reference; a hand-written one silently drops `[feature.values]` if it is not
@@ -906,7 +941,6 @@ line means the capture is off, not that there is nothing to capture.**
 11. **Play it** — off-screen players are most of the pitch, so this is visible on every
    match frame; but the *interesting* states are the culls at the very edge of the
    512-pixel world, where a sprite legitimately lands over backdrop.
-
 ### Four traps in the margin placement, each producing a *different* artefact
 
 All four are the same mistake wearing different clothes, and all four were made

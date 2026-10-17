@@ -280,6 +280,8 @@ static long s_json_from = -1, s_json_to;
 static long s_margin_drawn;         /* sprites actually painted */
 static long s_margin_lost;          /* captures dropped on the per-object limit */
 static long s_margin_off_edge;      /* sprites the game culled */
+static long s_margin_cleared;       /* parts withheld: the game's OAM page was cleared */
+static long s_margin_stale;         /* objects stood down: the game stopped emitting them */
 static long s_margin_frames;        /* frames the trace counted */
 static int  s_margin_on;            /* feature active */
 static int  s_margin_captured;      /* a capture fired this frame */
@@ -326,6 +328,39 @@ static int  s_margin_peak;          /* most sprites painted in one frame */
  * still owed (see sdb_margin_capture). Two lists of a 16-sprite object
  * have to fit, and 16 + slack is 40. */
 #define SDB_MARGIN_PARTS 40
+/* HOW LONG THE GAME MAY BE SILENT ABOUT AN OBJECT before the margin stops
+ * drawing it. This is the menu-ghost rule, and the number is measured rather
+ * than guessed, because a threshold is only worth having if the two states
+ * are actually separated.
+ *
+ * Liveness was already read from the display record rather than from OAM
+ * (research 26: the game's display list does not contain most off-screen
+ * objects, so anything measured in list membership blinks objects 2 and 8).
+ * The record is the wrong thing for this question, though: the between-rounds
+ * screens leave every record standing while the game stops emitting the whole
+ * roster, so the margin keeps repainting whatever stood off the right edge of
+ * the pitch. Measured on a played session (`tmp/mysession2`), the object list
+ * goes quiet between frames 1041-1205 and resumes at 1557 -- objects 6, 7 and
+ * 8 stand in the right margin at screen columns 271-330 for that whole
+ * stretch, drawn from a capture the game made 504 frames earlier and has not
+ * touched since.
+ *
+ *     largest gap between two emissions of one object, in play:
+ *       sdb_sweep / sdb_throw / sdb_idle / sdb_pan, 3000 frames each    140
+ *       tmp/mysession2, 1905 frames                                   144
+ *     smallest gap that spans a menu, tmp/mysession2                   352
+ *
+ * Every one of those in-play maxima is object 8 -- the object research 26
+ * already names as emitted least often and as one of the two that stand in the
+ * margins -- so this stands down exactly the objects whose silence is hardest
+ * to read, which is why it is measured on all four vectors and not on one.
+ * 240 sits 71% above the in-play maximum and 32% below the menu minimum.
+ *
+ * This is NOT the freshness threshold research 26 warns about, which was about
+ * the flicker mod's whole published list and its age in frames: that quantity
+ * cycles every three or four and a sweep publishes at ages 4-8, so it had no
+ * separation to find. This one does. */
+#define SDB_MARGIN_STALE 240
 
 typedef struct {
     SdbMargin parts[SDB_MARGIN_PARTS];
@@ -412,6 +447,13 @@ static int s_culled_restored;       /* objects put back on the display list */
 static long s_done_frame = -100;    /* frame the published list was finished */
 static int s_cap_run;                /* consecutive frames with captures */
 static int s_on;                             /* feature active */
+/* List entries withheld at presentation because the game's OAM page was cleared.
+ * Per frame for the JSON record, cumulative for the exit line: a healthy match
+ * withholds nothing, and a non-zero total is the gate reporting it fired. */
+static int s_retired_frame;
+static long s_retired_total;
+static long s_cap_total;             /* entries captured, for the same line */
+static int s_hidden_slots;           /* OAM slots hidden at the last present */
 
 /* Requested PPU-overclock lines, re-applied at power_on (see section 5). */
 static int s_oc_lines;
@@ -493,6 +535,7 @@ static void sdb_take(uint16_t at)
         s->attr = cyc_mod_peek((uint16_t)(at + 2));
         s->x    = cyc_mod_peek((uint16_t)(at + 3));
         if (s_build_count > s_build_peak) s_build_peak = s_build_count;
+        s_cap_total++;
     } else {
         s_overflow++;
     }
@@ -828,6 +871,25 @@ static int sdb_margin_capture(uint16_t addr)
                 (s_margin_cur_obj >= 0 && s_margin_cur_obj < SDB_MARGIN_OBJECTS)
                     ? s_margin_obj[s_margin_cur_obj].n : -1);
 
+    /* `seen` IS "THE FRAME THE GAME LAST EMITTED THIS OBJECT", and it is stamped
+     * HERE, before any of the cull branches below.
+     *
+     * It used to be stamped at the bottom of this function, after the not-culled
+     * branch and the vertical-cull branch had already returned, so it only ever
+     * advanced on a part the game CULLED. An object standing on the pitch,
+     * emitting eight sprites every four frames with all eight on screen, never
+     * moved it at all. Measured on the sweep vector: object 0 is emitted at frames
+     * 382, 386, 390 ... 622 and `seen` was still reading 382 on frame 623, because
+     * every one of those emissions took the `!lost` exit.
+     *
+     * That is invisible while `seen` is only a trace field, and it is why the
+     * liveness gate built on it (SDB_MARGIN_STALE) stood objects down 26,676 times
+     * over 3000 frames of an ordinary match. The `sdbp` line prints ahead of all
+     * of these branches, so the emission-gap measurement taken from it was the
+     * true one all along; only the field the code kept was wrong. */
+    if (s_margin_cur_obj >= 0 && s_margin_cur_obj < SDB_MARGIN_OBJECTS)
+        s_margin_obj[s_margin_cur_obj].seen = s_frame;
+
     /* Which of the two emitters this is. They place a sprite the same way (the
      * same 16-bit accumulators, the same [4,255] cull) but take the tile and
      * attribute from different places: the strip walk at $8348 has already
@@ -1122,7 +1184,6 @@ static int sdb_margin_capture(uint16_t addr)
         }
     }
     if (!m) m = &o->parts[o->n++];
-    o->seen = s_frame;
     m->keyed = (uint8_t)strip_key;
     m->id = (int16_t)widx;
     m->b = s_margin_build;
@@ -1430,6 +1491,67 @@ static void sdb_margin_blit(const SdbMargin *m, int px0, uint32_t *out, int widt
  *
  * Returns NULL (the host presents the native frame) whenever the flicker mod
  * has nothing to draw and nothing about the picture needs repacking. */
+/* The page is CLEAR: every one of the 64 OAM slots is hidden.
+ *
+ * This is the menu-transition ghost, and it is not a placement question at all.
+ * The mod's list is a build old by construction (research 26: one to three
+ * frames during play), which is a price worth paying -- but the game is allowed
+ * to stop emitting entirely, and then "one build old" is a lie that lasts as
+ * long as the silence. Measured on a played session (`tmp/mysession`): the last
+ * capture is frame 867 with 60 sprites, `peak` is 0 on every one of frames
+ * 868-956, and the mod repaints those same 60 for all 89 of them -- the whole
+ * level-1 roster standing around a between-rounds menu for a second and a half.
+ * That is the "menu ghost" in AGENTS.md, and the four fixes recorded there all
+ * tried either to notice the SILENCE (tightening the list's freshness) or to
+ * match the list against OAM by content. Neither can work, for reasons measured
+ * on that same capture: the game's cadence leaves 3 quiet frames inside every 4
+ * during play (11% of sweep frames), and every player shares tiles, so a content
+ * match against OAM is ambiguous thousands of times over.
+ *
+ * What the machine says needs no threshold and no identity. The game's way of
+ * retiring a sprite is to push its row off the screen and change nothing else,
+ * and when it clears the screen it clears EVERY slot:
+ *
+ *     $0200 at frame 873:  F0 FF 23 FA | F0 9E 41 56 | F0 DF 41 4E | ...
+ *
+ * All sixty-four say y=$F0, with the tile, attribute and X of the very sprites
+ * the mod is repainting still in place. A page with nothing visible in it is not
+ * "the game is quiet", it is the machine's own answer to "is anything on screen
+ * at all" -- and if nothing is, the mod has no dropped sprite to recover and can
+ * only invent one. So present nothing.
+ *
+ * The count is measured rather than assumed, because a rule like this is only
+ * worth having if the two states are actually distinguishable. Over that
+ * replay's 395 frames: 90 read 64, and they are exactly frames 868-957, the
+ * whole silence; every other frame reads 1 to 43. Nothing in between. A partially
+ * hidden page is the game's ordinary tail-hide -- the slots this build did not
+ * fill -- and is NOT treated as a clear. That is also why this is not the
+ * per-entry version of the same idea: dropping each entry whose own slot is
+ * hidden was measured firing on slot 63 alone for 107 frames of ordinary play,
+ * taking the legs off a player. Over 3000 frames of throw / sweep / idle / pan
+ * this test withholds exactly one entry, at frame 40, where the machine's own
+ * page is empty.
+ *
+ * `cyc_render_oam()`, the page the PPU is reading, and not $0200. $0200 is the
+ * DMA SOURCE, so it is a frame AHEAD of the picture being presented, and during
+ * a level's opening it is emptied to start the next build while the current
+ * frame's sprites are still on screen -- measured on the throw vector, frames
+ * 45-50: $0200 all-$F0 while live OAM held 21 visible sprites and the mod was
+ * holding a 20-entry list. Asking $0200 there withheld all 20, blanking six
+ * frames of a title screen the machine was drawing perfectly well. The live page
+ * has no such lag: at the menu wipe it goes from 61 visible sprites to 0 between
+ * window frames 867 and 868, which is the frame the transition starts. */
+static int sdb_page_clear(void)
+{
+    const uint8_t *oam = cyc_render_oam();
+    int hidden = 0;
+    if (oam)
+        for (int j = 0; j < 64; j++)
+            if (oam[j * 4] >= 0xEF) hidden++;
+    s_hidden_slots = hidden;
+    return oam && hidden == 64;
+}
+
 /* Take the machine's X for any list entry that is UNAMBIGUOUSLY the same sprite
  * in OAM; leave the rest alone.
  *
@@ -1713,6 +1835,9 @@ static int sdb_ws_margin_pass(uint32_t *canvas, int cw)
      * the reported shimmer.
      */
     if (!s_margin_on) return 0;
+    /* Same cleared page as the compositor's margin loop: nothing to complete when
+     * the hardware is painting nothing. See the blit site for the measurement. */
+    if (sdb_page_clear()) return 0;
     int drawn = 0;
     for (int o = 0; o < SDB_MARGIN_OBJECTS; o++) {
         SdbMarginObj *ob = &s_margin_obj[o];
@@ -1722,6 +1847,17 @@ static int sdb_ws_margin_pass(uint32_t *canvas, int cw)
         if ((cyc_mod_peek(rec) & ~SDB_CULL_BITS) != (ob->id0 & ~SDB_CULL_BITS)
             || cyc_mod_peek((uint16_t)(rec + 1)) != ob->id1)
             continue;                                   /* a recycled slot */
+        /* The same "the game stopped emitting it" gate as the compositor's loop,
+         * and for the same reason: a right-seam completion of a part the guest
+         * retired is the same ghost. */
+        if (s_frame - ob->seen > SDB_MARGIN_STALE) {
+            s_margin_stale++;
+            if (SDB_CAP_TRACE)
+                fprintf(stderr, "sdbx f=%ld obj %d (seam) stale %ld frames since its "
+                                "last emission at %ld; not completed\n",
+                        s_frame, o, s_frame - ob->seen, ob->seen);
+            continue;
+        }
         int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
                         | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
         int row_corr = 0;
@@ -1805,6 +1941,19 @@ static const uint32_t *sdb_present(void *ctx, int *width, int *height)
     int stale = run == 1 && fresh && s_done_count;
     const SdbSprite *list = stale ? s_done : s_build;
     int count = stale ? s_done_count : s_build_count;
+
+    /* A cleared page means there is nothing to recover, so present nothing. See
+     * sdb_page_clear. Counted per frame for the trace, because a rule that never
+     * fires and a rule that is not there look the same from the outside. */
+    s_retired_frame = 0;
+    if (count && sdb_page_clear()) {
+        s_retired_frame = count;
+        s_retired_total += count;
+        count = 0;
+    }
+    if (s_trace)
+        fprintf(stderr, "sdbq f=%ld n=%d ret=%d hid=%d\n", s_frame,
+                s_retired_frame ? s_retired_frame : count, s_retired_frame, s_hidden_slots);
 
     /* Put every entry that can be matched to a sprite the machine is holding
      * at that sprite's X. See sdb_reconcile for why moving it beats dropping
@@ -2013,11 +2162,13 @@ static void sdb_json_frame(void)
     const uint8_t *oam = cyc_render_oam();
     fprintf(stderr, "{\"k\":\"f\",\"f\":%ld,\"scr\":%d,\"cam\":%d,"
                     "\"cur\":\"$%02X\",\"peak\":%d,\"ovf\":%d,\"pub\":%d,"
-                    "\"reset\":%d,\"lost\":%d,\"mcap\":%d,\"moff\":%ld,\"oam\":[",
+                    "\"reset\":%d,\"lost\":%d,\"ret\":%d,\"rtot\":%ld,"
+                    "\"mcap\":%d,\"moff\":%ld,\"oam\":[",
             s_frame, cyc_render_line_scroll_x(160),
             (int)(cyc_mod_peek(SDB_CAM_LO) | (cyc_mod_peek(SDB_CAM_HI) << 8)),
             cyc_mod_peek(SDB_CURSOR), s_build_peak, s_overflow, s_done_count,
-            s_saw_reset, s_list_lost, s_margin_captured, s_margin_off_edge);
+            s_saw_reset, s_list_lost, s_retired_frame, s_retired_total,
+            s_margin_captured, s_margin_off_edge);
     int live = 0;
     for (int j = 0; j < 64; j++) {
         if (oam[j * 4] >= 0xEF) continue;          /* the game's hidden slot */
@@ -2236,6 +2387,9 @@ static void sdb_power_on(void *ctx)
     s_saw_reset = 0;
     s_prev_cursor = 0;
     s_list_lost = 0;
+    s_retired_frame = 0;
+    s_retired_total = 0;
+    s_cap_total = 0;
     s_done_frame = -100;
     s_frame = 0;
     const char *t = getenv("SDB_TRACE");
@@ -2967,6 +3121,7 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
          * drawn at a sixteenth of his width. */
         if (SDB_CAP_TRACE)
             fprintf(stderr, "sdbw f=%ld x0=%d:", s_frame, s_ws_x0_court);
+        int page_clear = sdb_page_clear();
         for (int o = 0; o < SDB_MARGIN_OBJECTS; o++) {
             SdbMarginObj *ob = &s_margin_obj[o];
             if (!ob->n) continue;
@@ -2998,6 +3153,32 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
             if (!r0 || (r0 & ~SDB_CULL_BITS) != (ob->id0 & ~SDB_CULL_BITS) ||
                 cyc_mod_peek((uint16_t)(rec + 1)) != ob->id1)
                 continue;
+            /* THE GAME STOPPED EMITTING THIS OBJECT.
+             *
+             * The record above says the slot is in use and the game keeps
+             * rewriting it, so the identity test passes for as long as the slot
+             * lives -- which is longer than the object does. A between-rounds
+             * screen leaves every record standing and stops emitting the whole
+             * roster, and the margin then repaints whatever stood off the right
+             * edge of the pitch for the length of the menu. Measured on
+             * `tmp/mysession2`: objects 6, 7 and 8 held screen columns 271-330
+             * from frame 1250 to 1547 off a capture made at frame 1053, 504
+             * frames earlier and never touched since.
+             *
+             * `ob->seen` is the frame the game last emitted this object, so this
+             * is the one liveness question the record cannot answer and the
+             * capture can. SDB_MARGIN_STALE carries the measurement; in play no
+             * object anywhere in 12000 frames of the four vectors went 140
+             * frames without an emission, so nothing that is being played is
+             * dropped by this. */
+            if (s_frame - ob->seen > SDB_MARGIN_STALE) {
+                s_margin_stale++;
+                if (SDB_CAP_TRACE)
+                    fprintf(stderr, "sdbx f=%ld obj %d stale %ld frames since its last "
+                                    "emission at %ld; not drawn\n",
+                            s_frame, o, s_frame - ob->seen, ob->seen);
+                continue;
+            }
             /* The anchor, read live. */
             int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
                             | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
@@ -3213,6 +3394,30 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * so a character standing at the bound is still whole up to it. */
                 int wl = rx0 + (SDB_WS_LO - scroll);
                 int wh = rx0 + (SDB_WS_HI - scroll);
+                /* A CLEARED PAGE STANDS THE MARGIN DOWN TOO.
+                 *
+                 * The margin exists to finish sprites the machine computed and
+                 * then CULLED, so it reads liveness from the display record rather
+                 * than from OAM. But the game's between-rounds screen retires its
+                 * roster by pushing every OAM row to $F0 and leaving the records
+                 * standing, so the records still say "live, off-screen" and the
+                 * margin repaints a level's player in the margin of a menu with no
+                 * sprites on it -- the same ghost as the flicker mod's list, from
+                 * the other half of the compositor. Measured on the same capture,
+                 * frame 873: object 7, screen column 309, 8 parts, the only ink
+                 * the margin contributed to the whole screen.
+                 *
+                 * The test is the machine's, and it is the gameer's state rather
+                 * than ours: when all 64 OAM slots are hidden the hardware paints
+                 * nothing, so there is no culled sprite to complete. `s_margin_on`
+                 * is deliberately NOT consulted, so this holds with the
+                 * character-flicker feature off, where the page is cleared by the
+                 * same game code.
+                 *
+                 * `n` above still counts the parts: the `sdbw` line has to keep
+                 * describing the whole list or `margin_track.py` reads the change
+                 * as an empty log rather than as what it is. */
+                if (page_clear) { s_margin_cleared++; continue; }
                 if (px0 + 8 > wl && px0 < wh) {
                     sdb_margin_blit(m, px0, out, width, height, s_ws_native_bg,
                                     wl, wh, rx0, s_ws_native_owner);
@@ -3444,9 +3649,19 @@ static void sdb_ws_report(void)
                 s_ws_anchor + (s_ws_fixed ? s_ws_fixed : 0), s_ws_x0_court);
     if (s_trace && s_margin_on)
         fprintf(stderr, "margin sprites: %ld captured (%ld off-edge), %ld drawn, "
-                        "peak %d, backstop %ld\n",
+                        "peak %d, backstop %ld, %ld withheld (page cleared), "
+                        "%ld stood down (game stopped emitting)\n",
                 s_margin_frames, s_margin_off_edge, s_margin_drawn,
-                s_margin_peak, s_margin_lost);
+                s_margin_peak, s_margin_lost, s_margin_cleared, s_margin_stale);
+    /* Printed whenever the run did anything with sprites, not only under
+     * SDB_TRACE: it is the number that says whether the retirement filter ever
+     * fired, and a filter that never fires is indistinguishable from one that is
+     * not there. Zero over a whole match is the expected reading; a non-zero
+     * number on a menu transition is the ghost fix reporting its work. */
+    if (s_on && (s_retired_total || s_trace))
+        fprintf(stderr, "flicker: %ld of %ld presented list entries withheld (the "
+                        "game's OAM page was cleared)\n",
+                s_retired_total, s_retired_total + s_cap_total);
     /* The same totals as a record, so a run's verdict is readable without
      * scraping prose. Printed whenever the JSON stream is on, not only under
      * SDB_TRACE: it is one line and it is the line that says whether the
@@ -3454,10 +3669,12 @@ static void sdb_ws_report(void)
     if (s_json_from >= 0)
         fprintf(stderr, "{\"k\":\"r\",\"frames\":%ld,\"composed\":%ld,\"pillarboxed\":%ld,"
                         "\"diff\":%ld,\"mframes\":%ld,\"mcap\":%ld,\"moff\":%ld,"
-                        "\"mdrawn\":%ld,\"mpeak\":%d,\"mlost\":%ld}\n",
+                        "\"mdrawn\":%ld,\"mpeak\":%d,\"mlost\":%ld,\"mcleared\":%ld,"
+                        "\"mstale\":%ld,\"retired\":%ld}\n",
                 s_frame, s_ws_composed, s_ws_pillarboxed, s_ws_last_diff,
                 s_margin_frames, s_margin_frames, s_margin_off_edge,
-                s_margin_drawn, s_margin_peak, s_margin_lost);
+                s_margin_drawn, s_margin_peak, s_margin_lost, s_margin_cleared,
+                s_margin_stale, s_retired_total);
 }
 
 static int sdb_ws_aspect_from(const char *env, const char *option)
