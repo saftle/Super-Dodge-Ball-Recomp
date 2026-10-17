@@ -655,10 +655,15 @@ this way and by no other means.**
 tools/play_record.sh bar-artifact 2000
 ```
 
-Plays in a window and leaves a replayable `--input` vector, an `SDB_TRACE=1` log and
-a screenshot per frame in `tmp/bar-artifact/`. Close the window when you have what you
-came for — the vector records the true frame count, but only if you close it rather
-than killing it.
+Plays in a window and leaves a replayable `--input` vector, a **save state**, an
+`SDB_TRACE=1` log and a screenshot per frame in `tmp/bar-artifact/`. Close the
+window when you have what you came for — the vector records the true frame count,
+but only if you close it rather than killing it.
+
+The save state is the part that makes a capture *replayable* rather than merely
+re-runnable: a vector carries the inputs to a run, not the run, and this game is
+random. `tools/state/state_check.py` compares a replay taken from the state
+against the capture's own second state.
 
 | | |
 |---|---|
@@ -669,12 +674,34 @@ than killing it.
 | `SDB_SCANLINES` | overclock scanlines, `0..262`. **Changes guest timing**, so such a capture compares against no stock figure in the docs |
 | `SDB_SHOT_EVERY` | **present** every N frames, not a screenshot interval |
 | `SDB_SCALE` · `SDB_FRAMES` · `SDB_UNLIMITED` | window scale · frame cap · run until closed |
+| `SDB_ANCHOR` | frame to take the save state at *(default 600)*; `0` for none |
+| `SDB_ANCHOR_PROBE` | frames later to take a second state to check the replay against. **Off by default, measured**: two states cannot be taken closer than ~6 frames apart, so a probe never reaches the frames where the machines still agree — see [research §33](docs/research.md) |
+| `SDB_VECTOR` | replay a recorded vector through the window unattended, so a capture needs no person |
+
+**To record a session with a cheat on, drive `nes_game` directly** — the script
+has no cheat flag, and the in-game Cheats menu is a mouse widget:
+
+```bash
+mkdir -p tmp/mysession
+python3 tools/state/state_anchor.py --port 9091 --frame 600 --probe 9 --out tmp/mysession &
+NESRECOMP_NO_LAUNCHER=1 ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" \
+  --config tmp/p2flat/config.ini --ram-init zeros \
+  --widescreen 16:9 --ppu-overclock 262 --remove-character-flicker \
+  --cheat '043B:00;0403:00;03CB:00' \
+  --record-input tmp/mysession/repro.input --tcp 9091
+```
+
+`--record-input` is the vector, `--tcp 9091` is what lets the anchor helper take
+the state, and `NESRECOMP_NO_LAUNCHER=1` skips the settings dashboard. Omit
+`--window-input` to play it yourself.
 
 Two traps worth knowing before you read a capture:
 
 - **A replayed vector must be replayed in a window, never headless.** The windowed
   and headless hosts do not run the same guest state — see
-  [Notes from the trenches](#notes-from-the-trenches).
+  [Notes from the trenches](#notes-from-the-trenches). Loading the capture's save
+  state is the way out, and it is measured to hold: the guest matched byte for byte
+  nine frames past the anchor on a played session.
 - **Analyse a capture where it was made.** `trace.log` is the ground truth and
   `tools/widescreen/margin_track.py` reads it directly, needing no replay at all.
 
@@ -738,6 +765,16 @@ frames the schedule fired on, and the divergence starts four frames *before* the
 press. **Cause is unattributed. Do not guess.** What it does establish is a rule:
 analyse a windowed capture where it was made, and never validate a windowed feature
 by replaying it headless.
+
+### A save state gets you back onto the same machine
+
+A capture taken with `tools/play_record.sh` also writes a save state, and loading it
+puts a headless replay **exactly** back on the played run — CPU, RAM, PPU, picture
+and the mods' records, byte for byte. Measured on a played session: the guest matched
+at 9 frames past the anchor, having diverged 85 bytes by 9 on a scripted one. **The
+drift onset is content-dependent, so it is not a frame count** — and nothing here
+explains the frame-4 divergence, only bounds where it lands. Details and the ruled-out
+explanations (index, APU, input timing) are in [research §33](docs/research.md).
 
 ## Screenshots can slow the game down
 

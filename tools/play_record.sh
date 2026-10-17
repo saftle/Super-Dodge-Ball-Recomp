@@ -17,9 +17,47 @@
 #   trace.log     SDB_TRACE=1, the per-frame sprite/margin/widescreen lines
 #   w_*.png       a screenshot every SDB_SHOT_EVERY frames, AS THE WINDOW SHOWS IT
 #   mods/         a private copy of the mod catalog, so no run can share state.toml
+#   state.bin     a save state at SDB_ANCHOR, so the run can be REPLAYED rather
+#                 than merely re-executed
+#   probe.bin     a second save state, SDB_ANCHOR_PROBE frames later: the machine
+#                 the replay has to come back to, as a file to compare
+#   anchor.json   the frame numbers, so nothing downstream recomputes them
+#   anchor.log    what the anchor helper had to say
 #
 # Then it prints the headless replay command, which is the useful half: the
 # window is for finding the artifact, the replay is for measuring it.
+#
+# WHY THERE IS A SAVE STATE AND NOT ONLY A VECTOR
+# ------------------------------------------------
+# This game is random, and a vector does not carry a run -- it carries the
+# INPUTS to one. A headless replay of a recorded windowed vector is a different
+# machine from frame 4 (AGENTS.md, "Windowed and headless run different guest
+# state"), and AGENTS.md's own verdict on the old plan is the reason this is
+# worth building: a replay comparison "reported 0 differing pixels over 1263
+# frames" on a build that visibly doubled a running player. A green replay is
+# not weak evidence here, it is evidence of nothing.
+#
+# A save state pins the whole machine at one frame -- CPU, RAM, PPU, mapper,
+# APU, the host's frame counter, the mods' records -- so the game's RNG, which
+# is ordinary guest RAM, is pinned with the rest. Loading it makes the headless
+# replay BE the windowed run from that frame on.
+#
+# MEASURED 2026-10-17, and it is worth stating before anyone builds on this.
+# The anchor does its job -- the state carries the RNG, the frame offset is
+# right, and the replay's guest state is bit-for-bit the window's. What it does
+# NOT do is stay bit-for-bit forever, and how long it lasts is NOT a frame count:
+# measured at +9 past the anchor, a scripted sdb_throw capture had drifted by 85
+# guest bytes and a played session had drifted by ZERO. Both were exact at +3.
+# The onset depends on what the guest is doing when the two machines part
+# company. So this fixes the frame-4 divergence long enough to be a real gate,
+# but it does NOT make a replay a substitute for a capture, which is what that
+# divergence costs. See tools/state/README.md for the whole measurement.
+#
+# What it also does not give you: everything BEFORE the anchor is still a
+# different run, and our own mods put nothing in the save state
+# (CycHostExtras has no savestate hook, and src/sdb_host_extras.c registers
+# none), so the flicker mod's published sprite list starts empty at the anchor
+# and takes a frame or two to rebuild.
 #
 # Environment knobs, all optional:
 #
@@ -81,17 +119,74 @@
 #                     instruction told the reader to export it.
 #                     (default: the whole run, passed inline so the caller's
 #                     environment is untouched)
+#   SDB_VECTOR     replay a recorded `--input` schedule through the WINDOW
+#                  instead of waiting for a human (default: off, play it
+#                  yourself). The window is where a capture has to be made
+#                  (AGENTS.md: a headless replay is a different machine), so an
+#                  unattended capture has to be a WINDOWED one -- and this is
+#                  also how the anchor is checked without a person in the loop.
+#
+#                      SDB_VECTOR=tas/vectors/sdb_throw.input \\
+#                      SDB_ANCHOR=600 tools/play_record.sh anchor-check 900
+#
+#                  Unlike --virtual-pad this does NOT go through the bindings:
+#                  cyc_host_window_replay writes the NES controller bytes
+#                  directly, so Player1Source is irrelevant here. That is what
+#                  makes it usable for a gate; a --virtual-pad replay needs
+#                  Player1Source = 2 or the guest sees nothing at all.
 #   SDB_LAUNCHER    1 keeps the recomp-ui launcher; 0 skips it  (default 0)
 #   SDB_UNCAPPED    1 runs as fast as the machine can    (default 0, frame-paced)
 #   SDB_TCP         port for the host's debug server, so a tap can sample the
-#                   RUNNING WINDOW's RAM (default: off). The windowed host has no
-#                   --frame-log -- that is the headless host -- so capturing RAM
-#                   where it was made means asking the live window over this
-#                   port. Worth it whenever the question is about machine state:
-#                   a headless replay of this vector is a DIFFERENT machine from
-#                   frame 4 (see the replay note this script appends), so a diff
-#                   taken there is a diff of the wrong thing.
+#                   RUNNING WINDOW's RAM (default: off unless SDB_ANCHOR is on).
+#                   The windowed host has no --frame-log -- that is the headless
+#                   host -- so capturing RAM where it was made means asking the
+#                   live window over this port. Worth it whenever the question is
+#                   about machine state: a headless replay of this vector is a
+#                   DIFFERENT machine from frame 4 (see the replay note this
+#                   script appends), so a diff taken there is a diff of the wrong
+#                   thing.
 #                       tools/cheats/ram_tap.py --port <port> --out tmp/<name>/ram.csv &
+#   SDB_ANCHOR      frame to write state.bin at (default 600; 0 = off).
+#                   600 is not arbitrary: the court appears at 412 and the input
+#                   window opens at 594 (AGENTS.md), so it is the first frame
+#                   from which input can do anything at all. Lower it to study a
+#                   menu, higher it to shorten the anchored tail.
+#                   The frame you ASK for is not the frame you GET: the window
+#                   dispatches the request on a later host loop than the ping
+#                   that preceded it. anchor.json holds the frame the server
+#                   reported, and every later number is derived from that one.
+#   SDB_ANCHOR_PROBE  frames after the anchor to take a SECOND save state at, so
+#                   the anchor can be CHECKED rather than merely taken.
+#                   DEFAULT 0 (off) -- a measured choice, not laziness.
+#
+#                   Two save states cannot be closer than about 6 frames apart on
+#                   a 16.6 ms host loop: each is 449508 bytes and writing one
+#                   costs the window 3-6 frames (the first save lands 3 late, the
+#                   second 6). So a probe lands at +6 or beyond, and whether the
+#                   machines still agree there is NOT predictable -- measured at
+#                   +9, a scripted vector had drifted by 85 guest bytes and a
+#                   played session by ZERO, both exact at +3. A check that
+#                   reports drift every single time is not a gate, it is noise,
+#                   and a capture that prints a red verdict by default teaches
+#                   you to ignore it.
+#
+#                   Turn it on when the drift is the question:
+#                     SDB_ANCHOR_PROBE=9 tools/play_record.sh name
+#
+#                   It is a state and not a RAM dump because a dump cannot be
+#                   labelled honestly: `ping` then `read_ram` is two round trips
+#                   inside a 16.6 ms frame, so the RAM belongs 2-3 frames past
+#                   the label (measured: consistently 3). The first version of
+#                   this did that and reported 160-460 differing RAM bytes at
+#                   every frame, which reads as "different machine" and is
+#                   actually a mislabelled sample. A save state REPLIES with the
+#                   frame it saved at, so both frame numbers are authoritative.
+#   SDB_ANCHOR_PORT  port for the anchor helper (default 9091).
+#                   ONE CLIENT AT A TIME: the host's debug server holds a single
+#                   connection (cyc_tcp.c: s_client), so this cannot share a port
+#                   with a RAM tap. If SDB_TCP is set, that port is used and you
+#                   get a warning; run the tap after the anchor has been taken,
+#                   or give the anchor its own port here.
 #
 # WHY --ram-init zeros is passed HERE and not only in the replay: the flag does
 # not imply headless (cyc_host.c:1044), so the windowed run can take it too --
@@ -170,11 +265,54 @@ if [ "$SCANLINES" -gt 262 ]; then
     echo "play_record: SDB_SCANLINES must be 0..262, got $SCANLINES" >&2
     exit 2
 fi
+VECTOR="${SDB_VECTOR:-}"
 SHOT_EVERY="${SDB_SHOT_EVERY:-1}"
 SCALE="${SDB_SCALE:-1}"
 LAUNCHER="${SDB_LAUNCHER:-0}"
 UNCAPPED="${SDB_UNCAPPED:-0}"
 TCP="${SDB_TCP:-}"
+
+# The anchor. Note the `-` and not `:-` again, for the same reason as SDB_MODS:
+# SDB_ANCHOR=0 has to mean "no state", and ${VAR:-default} fires on an empty
+# string as well as an unset one, so it would silently capture a state anyway.
+ANCHOR="${SDB_ANCHOR-600}"
+ANCHOR_PROBE="${SDB_ANCHOR_PROBE-0}"
+ANCHOR_PORT="${SDB_ANCHOR_PORT:-9091}"
+
+for kv in "SDB_ANCHOR:$ANCHOR" "SDB_ANCHOR_PROBE:$ANCHOR_PROBE" "SDB_ANCHOR_PORT:$ANCHOR_PORT"; do
+    case "${kv#*:}" in
+        ''|*[!0-9]*)
+            echo "play_record: ${kv%%:*} wants a whole number, got '${kv#*:}'" >&2
+            exit 2 ;;
+    esac
+done
+
+# One debug server, one client at a time (cyc_tcp.c). Sharing a port with a RAM
+# tap would have them fight over the socket, and the loser is whichever one the
+# project notices least -- so say it rather than let it look like a flaky tap.
+if [ "$ANCHOR" != "0" ] && [ -n "$TCP" ] && [ "$TCP" != "$ANCHOR_PORT" ]; then
+    echo "    note: SDB_TCP=$TCP is also the anchor's port. The host's debug"
+    echo "          server holds ONE connection, so a RAM tap cannot run"
+    echo "          alongside the anchor. Start the tap after the anchor is"
+    echo "          taken, or set SDB_ANCHOR_PORT to something else."
+fi
+# A fixed-length run knows its own length, so an anchor past the end is caught
+# here rather than reported as a failure after a capture that was perfectly
+# good. UNLIMITED cannot know, so it is left to the helper's exit code.
+# This runs BEFORE the port defaulting below: zeroing ANCHOR after TCP had been
+# assigned leaves a listening socket and a "start a RAM tap here" prompt for a
+# run that has no anchor to take.
+if [ "$ANCHOR" != "0" ] && [ "$UNLIMITED" != "1" ] && [ "$ANCHOR" -ge "$FRAMES" ]; then
+    echo "play_record: SDB_ANCHOR=$ANCHOR is past the end of a $FRAMES-frame run," >&2
+    echo "             so there would be no anchor. Lower it, raise the frame" >&2
+    echo "             count, or SDB_ANCHOR=0 to stop asking." >&2
+    ANCHOR=0
+fi
+
+# The anchor needs the debug server, so it gets a port. Only then: with
+# SDB_ANCHOR=0 the window must not open a port it never used to, or "no anchor"
+# quietly becomes "a listening socket nobody is using".
+if [ "$ANCHOR" != "0" ] && [ -z "$TCP" ]; then TCP="$ANCHOR_PORT"; fi
 
 # --uncapped is rejected by the engine unless --exit-after is positive
 # (cyc_sdl.c:1238), so the two are mutually exclusive. Fail here rather than let
@@ -203,7 +341,12 @@ mkdir -p "$OUT"
 # Clear only what this script writes, so re-running the same name cannot leave
 # last run's screenshots interleaved with this one's -- a half-old, half-new
 # frame sequence is worse than either, because it looks like a real artifact.
-rm -f "$OUT"/w_*.png "$OUT"/trace.log "$OUT"/repro.input
+# The anchor files are in the same line for the same reason and more sharply: a
+# leftover state.bin replays as this run's anchor and answers questions about
+# a session that is gone.
+rm -f "$OUT"/w_*.png "$OUT"/trace.log "$OUT"/repro.input \
+      "$OUT"/state.bin "$OUT"/probe.bin "$OUT"/replay.bin \
+      "$OUT"/anchor.json "$OUT"/anchor.log
 
 # PIN THE RESOLUTION, or the screenshots make the game run in slow motion.
 #
@@ -307,10 +450,19 @@ if [ "$WS_ON" = "true" ]; then
     echo "    camera: $CAMERA"
 fi
 echo "    vector  -> $OUT/repro.input"
+if [ "$ANCHOR" != "0" ]; then
+    if [ "$ANCHOR_PROBE" = "0" ]; then
+        echo "    anchor  -> $OUT/state.bin at frame $ANCHOR (no probe: SDB_ANCHOR_PROBE=0)"
+    else
+        echo "    anchor  -> $OUT/state.bin at frame $ANCHOR, probe +$ANCHOR_PROBE"
+    fi
+fi
 echo "    captures-> $CAPTURES (sdbw/sdbc/sdbv/sdbb/sdbp in trace.log)"
 echo "    trace   -> $OUT/trace.log"
 echo "    shots   -> $OUT/w_<frame>.png (every $SHOT_EVERY)"
-if [ -n "$TCP" ]; then
+if [ "$ANCHOR" != "0" ]; then
+    echo "    tcp     -> 127.0.0.1:$TCP (the anchor helper; it connects and waits)"
+elif [ -n "$TCP" ]; then
     echo "    tcp     -> 127.0.0.1:$TCP (a RAM tap can sample this live window)"
     echo
     echo "Start the tap in another terminal, in either order -- it waits for the port:"
@@ -353,6 +505,32 @@ if [ "$WS_ON" = "true" ]; then ARGS+=( --widescreen "$ASPECT" ); fi
 if [ "$UNLIMITED" != "1" ]; then ARGS+=( --exit-after "$FRAMES" ); fi
 if [ "$UNCAPPED" = "1" ]; then ARGS+=( --uncapped ); fi
 if [ -n "$TCP" ]; then ARGS+=( --tcp "$TCP" ); fi
+# --window-input, not --virtual-pad: the first writes the NES controller bytes
+# through cyc_host_window_replay, so it needs no bindings and no physical pad.
+# The second injects SDL events and would be dropped by a keyboard-bound port 1.
+if [ -n "$VECTOR" ]; then
+    if [ ! -f "$VECTOR" ]; then
+        echo "play_record: SDB_VECTOR names no file: $VECTOR" >&2
+        exit 2
+    fi
+    ARGS+=( --window-input "$VECTOR" )
+    echo "    vector  -> $VECTOR (played through the window, unattended)"
+fi
+
+# The anchor helper starts FIRST and waits for the port, so the two do not have
+# to be started in a particular order -- and starting it first is what makes the
+# anchor land early enough to be worth having. It holds the host's single TCP
+# client slot until it has what it asked for, which is why it cannot share a
+# port with a RAM tap.
+ANCHOR_PID=""
+if [ "$ANCHOR" != "0" ]; then
+    python3 tools/state/state_anchor.py --port "$TCP" --frame "$ANCHOR" \
+        --probe "$ANCHOR_PROBE" --out "$OUT" > "$OUT/anchor.log" 2>&1 &
+    ANCHOR_PID=$!
+    # If the script dies now the helper would outlive it and keep the port, so
+    # the trap is armed before the wait rather than after it.
+    trap 'kill "$ANCHOR_PID" 2>/dev/null || true' EXIT
+fi
 
 set +e
 SDB_TRACE=1 SDB_TRACE_CAPTURES="$CAPTURES" \
@@ -360,6 +538,51 @@ NESRECOMP_NO_LAUNCHER=$( [ "$LAUNCHER" = "1" ] && echo 0 || echo 1 ) \
 "$GAME" "${ARGS[@]}" > "$OUT/trace.log" 2>&1
 RC=$?
 set -e
+
+# Collect the anchor. `wait` reports the helper's exit status, which is 0/1/2/3
+# and each means something different (see state_anchor.py) -- so it is captured,
+# not tested for truthiness: 3 is a state that exists and was never verified,
+# which is not the same as no state, and collapsing the two is how a capture
+# ends up quoting a replay that cannot be trusted.
+ANCHOR_RC=0
+A_FRAME=""; P_FRAME=""; P_MEM=""; STATE_BYTES=""; P_GAP=""
+if [ -n "$ANCHOR_PID" ]; then
+    if wait "$ANCHOR_PID"; then ANCHOR_RC=0; else ANCHOR_RC=$?; fi
+    trap - EXIT
+    ANCHOR_PID=""
+    if [ -s "$OUT/anchor.json" ]; then
+        # anchor.json is written by our own tool, and python3 is already a
+        # dependency of everything here, so read it properly rather than
+        # grepping for a number out of a JSON document.
+        while IFS='=' read -r k v; do
+            case "$k" in
+                anchor_frame)   A_FRAME="$v" ;;
+                probe_frame)    P_FRAME="$v" ;;
+                probe_mem_frame) P_MEM="$v" ;;
+                probe_gap)      P_GAP="$v" ;;
+                state_bytes)    STATE_BYTES="$v" ;;
+            esac
+        done <<EOF
+$(python3 - "$OUT/anchor.json" <<'PY'
+import json, sys
+try:
+    rec = json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"anchor.json unreadable: {e}", file=sys.stderr)
+    sys.exit(0)
+for k in ("anchor_frame", "probe_frame", "probe_mem_frame", "probe_gap", "state_bytes"):
+    if rec.get(k) is not None:
+        print(f"{k}={rec[k]}")
+PY
+)
+EOF
+    fi
+    if [ ! -s "$OUT/state.bin" ]; then
+        A_FRAME=""; P_FRAME=""; P_MEM=""
+    fi
+fi
+ANCHOR_OK=0
+[ -n "$A_FRAME" ] && ANCHOR_OK=1
 
 if [ ! -s "$OUT/repro.input" ]; then
     echo
@@ -427,6 +650,66 @@ cat >> "$OUT/repro.input" <<EOF
 # tools/widescreen/margin_track.py audits trace.log directly.
 EOF
 
+if [ "$ANCHOR_OK" = "1" ]; then
+if [ -n "$P_MEM" ]; then
+cat >> "$OUT/repro.input" <<EOF
+#
+# --- replay FROM THE ANCHOR (the reproducible one) ---
+#   anchor frame $A_FRAME   probe frame $P_FRAME, $P_GAP frames later
+#
+#   cd "$PWD" && SDB_TRACE=1 ./build-cycle/nes_game "$ROM" \\
+#       --load-state $OUT/state.bin --frames $REC_FRAMES \
+#       --input $OUT/repro.input --ram-init zeros \\
+#       --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG \
+#       --save-state $P_MEM:$OUT/replay.bin
+#
+#   python3 tools/state/state_check.py $OUT
+#
+# --save-state is $P_MEM: the window probe frame $P_FRAME MINUS ONE. The window's
+# TCP counter counts frames COMPLETED, while --save-state M saves after frame M
+# has RAN. anchor.json records that conversion so it happens once, in one place.
+#
+# What the comparison will say: the guest (CPU, RAM, PPU, picture, the mods'
+# records) is byte-identical at the anchor and at +3 frames from it, and the two
+# machines part company a few frames after that -- WHERE is content-dependent,
+# not a fixed horizon (measured at +9: 85 guest bytes of drift on a scripted
+# vector, ZERO on a played session). At this gap state_check.py will normally
+# report DRIFTED. That is the windowed and headless machines parting company
+# again (AGENTS.md), NOT a broken anchor: a save state IS the machine, so the load
+# put the replay exactly on this run's state. Two 450 KB states cannot be taken
+# closer than about 6 frames apart on a 16.6 ms host loop, which is why the probe
+# cannot reach the clean window at all.
+#
+# --frames is still the TOTAL ($REC_FRAMES), not the frames after the anchor: the
+# save state carries the host's frame counter and --load-state continues from it
+# (cyc_host.c: s_loaded_frame = cyc_ring_frame at save time).
+#
+# What the anchor does NOT buy: a state cannot undo a divergence that already
+# happened, so everything before frame $A_FRAME is still a different run. And our
+# own mods put nothing in the save state -- CycHostExtras has no savestate hook
+# and src/sdb_host_extras.c registers none -- so the flicker mod's published
+# sprite list arrives empty and rebuilds over the first frame or two.
+EOF
+else
+cat >> "$OUT/repro.input" <<EOF
+#
+# --- replay FROM THE ANCHOR ---
+#   anchor frame $A_FRAME (SDB_ANCHOR_PROBE was 0, so there is no probe state
+#   and nothing to check the replay against -- see tools/state/README.md)
+#
+#   cd "$PWD" && SDB_TRACE=1 ./build-cycle/nes_game "$ROM" \\
+#       --load-state $OUT/state.bin --frames $REC_FRAMES \
+#       --input $OUT/repro.input --ram-init zeros \\
+#       --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG
+#
+# --frames is still the TOTAL ($REC_FRAMES), not the frames after the anchor: the
+# save state carries the host's frame counter and --load-state continues from it.
+# A state cannot undo a divergence that already happened, so everything before
+# frame $A_FRAME is still a different run.
+EOF
+fi
+fi
+
 echo
 echo "=== recorded $REC_FRAMES frames, $REC_STEPS input steps (exit $RC) ==="
 grep -E "^(widescreen|margin sprites):" "$OUT/trace.log" || true
@@ -436,3 +719,71 @@ echo "  SDB_TRACE=1 ./build-cycle/nes_game \"$ROM\" \\"
 echo "      --frames $REC_FRAMES --input $OUT/repro.input --ram-init zeros \\"
 echo "      --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG \\"
 echo "      --present-out $OUT/r_ --present-every 1 2> $OUT/replay.log"
+
+if [ "$ANCHOR_OK" = "1" ]; then
+    echo
+    echo "Anchor: frame $A_FRAME, $STATE_BYTES bytes -> $OUT/state.bin"
+    echo "  From frame $A_FRAME on, a replay that loads it starts from EXACTLY"
+    echo "  this run's machine -- the game's RNG included. Reproduce it with:"
+    echo
+    echo "  SDB_TRACE=1 ./build-cycle/nes_game \"$ROM\" \\"
+    echo "      --load-state $OUT/state.bin --frames $REC_FRAMES \\"
+    echo "      --input $OUT/repro.input --ram-init zeros \\"
+    echo "      --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG \\"
+    if [ -n "$P_MEM" ]; then
+        echo "      --save-state $P_MEM:$OUT/replay.bin \\"
+    fi
+    echo "      --present-out $OUT/r_ --present-every 1"
+    echo
+    echo "  --frames is still the TOTAL ($REC_FRAMES), not the frames after the anchor:"
+    echo "  the save state carries the host's frame counter and --load-state continues"
+    echo "  from it (cyc_host.c: s_loaded_frame = cyc_ring_frame at save)."
+    if [ -n "$P_MEM" ]; then
+        echo
+        echo "  That command also writes the replay's own state to $OUT/replay.bin."
+        echo "  This capture holds the WINDOW's state for that same frame (frame"
+        echo "  $P_FRAME, $P_GAP frames past the anchor), so the two can be compared:"
+        echo
+        echo "    python3 tools/state/state_check.py $OUT"
+        echo
+        echo "  ($P_MEM is the window probe frame $P_FRAME minus one: the window counts"
+        echo "   frames COMPLETED, the headless host saves after a frame RAN."
+        echo "   state_check.py reads that out of anchor.json rather than repeating it.)"
+        echo
+        echo "  Expect DRIFTED at this gap, but not because the gap is over any fixed"
+        echo "  horizon: the two hosts part company a few frames past the anchor and"
+        echo "  WHERE is content-dependent -- measured at +9, a scripted vector had"
+        echo "  drifted by 85 guest bytes and a played session by ZERO, both exact at"
+        echo "  +3. Two 450 KB states cannot be taken closer than about 6 frames apart"
+        echo "  on a 16.6 ms host loop, so a probe cannot reach the clean window at"
+        echo "  all. The state is sound; the drift is the open engine question, and"
+        echo "  this tool says which of the two you are"
+        echo "  looking at rather than collapsing them into one red line."
+    fi
+elif [ "$ANCHOR" != "0" ]; then
+    echo
+    echo "Anchor: NONE (helper exit $ANCHOR_RC) -- see $OUT/anchor.log"
+    case "$ANCHOR_RC" in
+        1) cat <<'EOT'
+  The debug port never opened. If SDB_TCP named a port something else was
+  holding it, or the run died before the server came up.
+EOT
+            ;;
+        2) cat <<EOT
+  The window ended before frame $ANCHOR, so nothing was saved. The capture
+  itself is fine -- vector, trace and shots are all present and usable -- but it
+  replays from power-on, which is the run that parts company with the window at
+  frame 4. Lower SDB_ANCHOR toward the start, or run the session longer.
+EOT
+            ;;
+        3) cat <<EOT
+  The state WAS saved but the run ended before the +$ANCHOR_PROBE-frame probe,
+  so there is nothing to check a replay against. The state is usable; it is just
+  unverified. Re-capture with the probe frame inside the run.
+EOT
+            ;;
+        *) echo "  The helper exited $ANCHOR_RC, which it should not. That is a bug" \
+                  " in tools/state/state_anchor.py; $OUT/anchor.log has its last words." ;;
+    esac
+    echo "  SDB_ANCHOR=0 stops asking for one."
+fi

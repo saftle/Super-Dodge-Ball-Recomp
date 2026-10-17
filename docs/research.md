@@ -4007,3 +4007,115 @@ windowed vector diverges at frame 4 (research §22). The same port carries a
 `cheat` command (`op list|on|off|offall`), which exists because the in-game menu is
 a mouse-driven widget no script can drive — and the disarm path is the half that
 shipped broken once, so without it that half had no automated gate at all.
+
+## 33. A save state in a played capture, and what it does to the frame-4 divergence
+
+### The thing being fixed
+
+`tools/play_record.sh` records what the guest *read*, so a played session can be
+replayed. A vector carries the inputs to a run, not the run. §22 measured what
+that costs: a headless replay of a recorded windowed vector is a different machine
+from **frame 4**, and the project's own verdict on validating features at replays
+is the reason this is worth building — a replay comparison "reported 0 differing
+pixels over 1263 frames" on a build that visibly doubled a running player
+(research §26). A green replay is not weak evidence here; it is evidence of
+nothing.
+
+A save state pins the whole machine at one frame — CPU, RAM, PPU, mapper, APU,
+the host's frame counter and the mods' records (`cyc_state.c`). The game's RNG is
+ordinary guest RAM, so it is pinned with the rest.
+
+### Where the state comes from, and why over TCP
+
+The windowed host is `cyc_sdl.c` and has **no** `--save-state F:FILE`; that flag
+is `cyc_host.c`, the headless host. What the window has is a debug server
+(`--tcp`) whose `save_state path=...` writes a state anywhere, and it **replies
+with the frame it saved at**. That reply is the whole mechanism, and it is not
+optional politeness: a `ping` frame and the save that follows it are separated by
+a host loop, so the frame you asked for is not the frame you get. Measured at
+frame 600: asked 600, the server reported **604**.
+
+`tools/state/state_anchor.py` polls for the frame it wants and asks once. Taking
+a state costs the window real frames — 449 508 bytes, 3 frames late on the first,
+6 on the second, because the window is still catching up — so **two states cannot
+be taken closer than about 6 frames apart** on a 16.6 ms host loop. That number is
+why the verification probe defaults to off (§33.4).
+
+### The off-by-one, which is not optional
+
+The window's TCP counter is `cyc_ring_frame`, which counts frames **COMPLETED**,
+while headless `--save-state M:FILE` saves the machine after frame M has **RAN**.
+Window frame F is therefore headless `--save-state F-1`.
+
+Derived, then **measured rather than assumed**: both state files carry the frame
+at `Header.frame`, offset 28, and sliding the replay against a windowed state over
+±10 frames puts the minimum exactly on the frame the window reported — 608↔608 and
+614↔614. `state_anchor.py` records the conversion as `probe_mem_frame` so it
+happens once, in one place, and nothing downstream repeats the rule.
+
+### What it reproduces, and for how long — and the answer is not a number
+
+Two captures, anchored mid-match, compared per chunk (`tools/state/state_check.py`,
+which walks the tag/length chunks so a difference can be *named* rather than
+counted):
+
+| capture | anchor | guest bytes differing at +3 | at +6 | at +9 |
+|---|---|---|---|---|
+| `sdb_throw.input`, scripted | 605 | 0 | 55 | **85** |
+| a played session | 604 | 0 | — | **0** |
+
+Both anchors hold exactly at the frame they were taken, and both agree at +3. At
++9 the scripted run has drifted by 85 bytes of guest state and **the played
+session has not drifted at all** — every guest byte identical nine frames out.
+
+**So the drift onset is content-dependent.** It is not a frame count, and any
+number written down as one is wrong. It is also a *second measurement* of the §22
+divergence, from a known-good starting point, not an explanation of it.
+
+### Ruled out, so nobody re-does them
+
+- **Not an index error.** Same recorded frame in both headers, minimum at the
+  expected offset (§33.3).
+- **Not the APU.** The `APU  ` chunk differs by ~15–24 bytes on **every** frame
+  after the anchor, including the first, while every other chunk is identical
+  there — a standing offset, not a drift. `--wav-out` on the replay does not
+  remove it (1112 → 1108 bytes at a 120-frame probe), so it is not the audio mixing
+  path either. It does not track the guest drift: identical guest at +3 with the
+  APU differing, drifted by +9 with the APU differing no more than at +3.
+- **Not input timing.** Both hosts apply input before `cyc_session_frame_begin()`
+  (`cyc_sdl.c:1452`, `cyc_host.c:1602`), keyed on the same counter.
+
+**Open, and still do not guess at it.** What remains is §22's windowed/headless
+divergence, still unattributed. This is a measurement of it with a known-good
+starting point, which is new information and not an answer.
+
+### Why the verification probe is off by default
+
+The clean window is a few frames. Two states cannot be taken closer than ~6. **A
+probe can never reach it**, so a check that reported drift on every run would be
+noise rather than a gate, and a capture printing a red verdict by default teaches
+you to ignore it. `SDB_ANCHOR_PROBE` therefore defaults to 0; the state is the
+artifact and the check is for when the drift is the question.
+
+### The trap: a label you cannot trust
+
+The first version took the probe with `read_ram` and labelled it with the `ping`
+that preceded it. `ping` then a 2048-byte dump is two round trips inside a 16.6 ms
+frame, so the RAM belongs 2–3 frames past its label — measured, consistently 3. The
+comparison built on it reported 160–460 differing RAM bytes at **every** frame,
+which reads as "the replay is a different machine" and is a mislabelled sample. A
+save state is used for the probe instead: it cannot be mislabelled, because it says
+what frame it is. Same class as the `--present-out` index trap in AGENTS.md.
+
+### What this does not buy
+
+- A state cannot undo a divergence that already happened, so everything **before**
+  the anchor is still a different run.
+- **Our own mods put nothing in the save state.** `CycHostExtras` has no savestate
+  hook and `src/sdb_host_extras.c` registers none, so the flicker mod's published
+  sprite list arrives empty and rebuilds over the first frame or two. The guest is
+  exact from the anchor; the first *presented* frames after it are not.
+- It does not replace capturing in a window. It is what makes a capture's machine
+  reachable afterwards, and it is measured to hold at least 9 frames on a played
+  session — long enough to gate the anchor, not long enough to substitute for the
+  capture.
