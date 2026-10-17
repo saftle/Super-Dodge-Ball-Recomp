@@ -68,6 +68,19 @@
 #   SDB_FRAMES      default frame count, overridable by the second argument   (2000)
 #   SDB_UNLIMITED   1 runs until you CLOSE THE WINDOW, ignoring SDB_FRAMES and
 #                   omitting --exit-after            (default 0)
+#   SDB_CAPTURES    <from>-<to> for the SDB_TRACE_CAPTURES range, so the sdbw /
+#                   sdbc / sdbv / sdbb / sdbp per-object lines land in trace.log
+#                   for margin_track.py and dupes.py to audit.
+#
+#                     SET IT HERE, NOT WITH `export`. Those lines are gated on
+#                     SDB_TRACE_CAPTURES ALONE -- not on SDB_TRACE -- so an
+#                     exported range outlives the capture and every later run
+#                     inherits it. `./build_and_run.sh` then floods the console
+#                     with thousands of sdbw lines for a normal play session,
+#                     which is what happened on 2026-10-17 after a capture
+#                     instruction told the reader to export it.
+#                     (default: the whole run, passed inline so the caller's
+#                     environment is untouched)
 #   SDB_LAUNCHER    1 keeps the recomp-ui launcher; 0 skips it  (default 0)
 #   SDB_UNCAPPED    1 runs as fast as the machine can    (default 0, frame-paced)
 #
@@ -268,6 +281,10 @@ for f in "${FEATURES[@]}"; do
 done
 [ -n "$MODS_ON" ] || MODS_ON="(none -- stock)"
 
+# The capture range is passed INLINE and never exported: see SDB_CAPTURES above
+# for what an inherited one costs.
+CAPTURES="${SDB_CAPTURES:-0-$([ "$UNLIMITED" = "1" ] && echo 20000 || echo "$FRAMES")}"
+
 if [ "$UNLIMITED" = "1" ]; then
     echo "=== $NAME: UNLIMITED (no --exit-after), mods: $MODS_ON ==="
 else
@@ -280,6 +297,7 @@ if [ "$WS_ON" = "true" ]; then
     echo "    camera: $CAMERA"
 fi
 echo "    vector  -> $OUT/repro.input"
+echo "    captures-> $CAPTURES (sdbw/sdbc/sdbv/sdbb/sdbp in trace.log)"
 echo "    trace   -> $OUT/trace.log"
 echo "    shots   -> $OUT/w_<frame>.png (every $SHOT_EVERY)"
 echo
@@ -320,7 +338,8 @@ if [ "$UNLIMITED" != "1" ]; then ARGS+=( --exit-after "$FRAMES" ); fi
 if [ "$UNCAPPED" = "1" ]; then ARGS+=( --uncapped ); fi
 
 set +e
-SDB_TRACE=1 NESRECOMP_NO_LAUNCHER=$( [ "$LAUNCHER" = "1" ] && echo 0 || echo 1 ) \
+SDB_TRACE=1 SDB_TRACE_CAPTURES="$CAPTURES" \
+NESRECOMP_NO_LAUNCHER=$( [ "$LAUNCHER" = "1" ] && echo 0 || echo 1 ) \
 "$GAME" "${ARGS[@]}" > "$OUT/trace.log" 2>&1
 RC=$?
 set -e

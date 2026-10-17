@@ -175,6 +175,13 @@ typedef struct {
     int16_t y;          /* screen row of the sprite's FIRST line, from $06/$07 */
     uint8_t tile;
     uint8_t attr;
+    uint8_t own;        /* the GAME emitted this $4D inside its own cull, so the
+                         * machine owns it and the margin must not draw it */
+    int16_t id;         /* $4D, the emitter's index into THIS object's sprite
+                         * list -- a stable part identity. Only meaningful when
+                         * `keyed`; see the site split below. */
+    uint8_t keyed;      /* 1 = identified by `id`, 0 = by (dx,row) */
+    long b;             /* the sprite LIST that last emitted this part */
 } SdbMargin;
 
 /* The two emitter sites, which cull identically but store their tile and
@@ -243,6 +250,24 @@ static int sdb_ws_row_x0(int y);
  * flicker state below) because the object-index callback above needs them. */
 static long s_frame;                     /* frame counter, for the trace */
 static long s_cap_from = -1, s_cap_to;   /* SDB_TRACE_CAPTURES=<from>-<to> */
+static int s_trace;                    /* SDB_TRACE=1: per-frame trace */
+
+/* SDB_TRACE_CAPTURES NARROWS A TRACE. IT DOES NOT START ONE.
+ *
+ * The per-sprite lines used to be gated on the capture range alone, so an
+ * inherited `SDB_TRACE_CAPTURES=0-6000` printed `sdbw f=478 x0=158: n=0` and
+ * `oam-band:` twice a frame for an entire session on a plain
+ * `./build_and_run.sh` -- twice, on 2026-10-17, because an exported shell
+ * variable outlives the capture it was set for and nothing in the tree objected.
+ *
+ * Every trace in this project is switched on by SDB_TRACE=1 (see the s_trace
+ * read at session start), so the range is a MODIFIER of that, exactly as the
+ * name says: it selects which frames a running trace reports. Reading it as an
+ * enabler made an environment variable silently turn on thousands of lines per
+ * frame in normal play, and made it look like a bug in the margin when it was a
+ * stale shell. */
+#define SDB_CAP_TRACE (s_trace && s_cap_from >= 0 && s_frame >= s_cap_from \
+                       && s_frame <= s_cap_to)
 static int s_ws_aspect = NES_VIDEO_STOCK;  /* moved up: sdb_frame_begin's trace reads it */
 /* SDB_TRACE_JSON=<from>-<to>: one JSON object per line, two kinds. See
  * sdb_json_frame / sdb_json_margin for why it is a separate stream and not a
@@ -295,7 +320,11 @@ static int  s_margin_peak;          /* most sprites painted in one frame */
  * object's tiles; if the identity no longer matches, the slot is stale and is
  * not drawn until the game emits the object again and refreshes it. */
 #define SDB_MARGIN_OBJECTS 13
-#define SDB_MARGIN_PARTS 24
+/* 40, not 24: parts are now CARRIED across a list boundary rather than
+ * wiped, because the game's own sprite index says which of them are
+ * still owed (see sdb_margin_capture). Two lists of a 16-sprite object
+ * have to fit, and 16 + slack is 40. */
+#define SDB_MARGIN_PARTS 40
 
 typedef struct {
     SdbMargin parts[SDB_MARGIN_PARTS];
@@ -303,6 +332,7 @@ typedef struct {
     long seen;         /* frame the parts were last written (trace/debug) */
     uint8_t id0, id1;  /* record bytes 0-1 at capture: the object identity */
     long build;        /* the sprite list these parts belong to */
+    long pruned;       /* the build sdb_ws_prune_margin last retired against */
 } SdbMarginObj;
 
 static SdbMarginObj s_margin_obj[SDB_MARGIN_OBJECTS + 1];  /* +1 = discard bin */
@@ -341,7 +371,7 @@ static int sdb_margin_object(uint16_t addr)
      * between. A backwards step is therefore a build boundary, and it is the
      * only boundary this feature can see. */
     uint8_t cur = cyc_mod_peek(SDB_CURSOR);
-    if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+    if (SDB_CAP_TRACE)
         fprintf(stderr, "sdbv f=%ld obj=%d rec=%02X/%02X x=%d cur=%02X "
                         "held=%d seen=%ld\n",
                 s_frame, s_margin_cur_obj,
@@ -355,7 +385,7 @@ static int sdb_margin_object(uint16_t addr)
                     ? s_margin_obj[s_margin_cur_obj].seen : -1L);
     if (cur < s_margin_prev_cursor) {
         s_margin_build++;
-        if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+        if (SDB_CAP_TRACE)
             fprintf(stderr, "sdbb f=%ld bump: cur=%02X < prev=%02X -> build=%ld, "
                             "obj %d had %d parts\n",
                     s_frame, cur, s_margin_prev_cursor, s_margin_build,
@@ -373,7 +403,6 @@ static int s_build_peak;              /* largest s_build_count seen this frame *
 static SdbSprite s_done[SDB_MAX_SPRITES];    /* last list that finished */
 static int s_done_count;
 static int s_overflow;
-static int s_trace;                    /* SDB_TRACE=1: per-frame trace */
 static uint8_t s_prev_cursor;          /* previous capture's cursor value */
 static int s_list_lost;                /* lists that hit the backstop */
 static int s_saw_reset;              /* a capture saw the cursor at slot 1 */
@@ -507,7 +536,7 @@ static int sdb_capture(uint16_t addr)
     uint8_t cur = cyc_mod_peek(SDB_CURSOR);
     uint16_t at = (uint16_t)(SDB_OAM_BASE + cur);
 
-    if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+    if (SDB_CAP_TRACE)
         fprintf(stderr, "sdbc f=%ld cur=%02X n=%d\n", s_frame, cur, s_build_count);
 
     sdb_restart(cur);
@@ -558,7 +587,7 @@ static int sdb_capture2(uint16_t addr)
     (void)addr;
     uint8_t cur = cyc_mod_peek(SDB_CURSOR);
 
-    if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+    if (SDB_CAP_TRACE)
         fprintf(stderr, "sdbn f=%ld cur=%02X n=%d [%02X %02X %02X %02X] [%02X %02X %02X %02X]\n",
                 s_frame, cur, s_build_count,
                 cyc_mod_peek((uint16_t)(SDB_OAM_BASE + cur)),
@@ -789,7 +818,7 @@ static int sdb_margin_capture(uint16_t addr)
      * index it is walking ($8483: INC $4D), which is what says whether the game
      * emitted fewer sprites for this object or emitted the same ones and the
      * capture threw them away. */
-    if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+    if (SDB_CAP_TRACE)
         fprintf(stderr, "sdbp f=%ld obj=%d at=$%04X $02=%d $4D=%d x=%d y=%d "
                         "cur=%02X build=%ld held=%d\n",
                 s_frame, s_margin_cur_obj, addr,
@@ -873,7 +902,78 @@ static int sdb_margin_capture(uint16_t addr)
      * `sdb_ws_margin_pass`, after `sdb_present` has stamped the native block.
      * That is worth 7 of this character's 9 bad frames, with no regression. */
     int lost = x < 4 || x > 255 || (s_ws_reveal && x < 4 + SDB_WS_CLIP);
-    if (!lost) return 0;
+    /* NOT CULLED MEANS THE MACHINE OWNS THIS SPRITE, AND THAT IS INFORMATION.
+     *
+     * This used to `return 0`, and the carried part it left behind kept being
+     * drawn from a stale row. That is the back-and-forth pixel damage reported
+     * from play on 2026-10-17: panning one way the margin's copy lags the
+     * machine's and columns go missing, panning the other it leads and columns
+     * are drawn twice, and it alternates with every direction change.
+     *
+     * The reason it could not be fixed downstream is that the ownership map is
+     * the wrong question. It compares the machine's rendered frame against its
+     * background, so it can only say "the machine painted something HERE"; it
+     * cannot say "the machine painted THIS SPRITE over THERE, on a different
+     * row". A carried part whose row is one build stale therefore lands on
+     * background the machine left alone, ownership calls it free, and the margin
+     * draws a second copy of a sprite the machine has already drawn.
+     *
+     * The game answers it directly. It emits $4D k either side of its own cull,
+     * and which side is exactly the question:
+     *
+     *   - culled (we are here)     -> the margin's to draw;
+     *   - not culled (this branch) -> the machine drew it, so stop.
+     *
+     * And the "not offered at all" case is the f=808 seam, which is the one
+     * place a carried part is still owed: at that boundary the game had emitted
+     * $4D 1, 3, 5, 7 and had NOT reached 0, 2, 4, 6, which had crossed inside
+     * the viewport. Those stay undrawn and keep their place; the moment the
+     * game's list catches up and emits them, this branch marks them and they go.
+     *
+     * So `own` is the game's own answer, per part, and it is what retires a
+     * carried part -- not the ownership map and not a threshold. It also clears
+     * again when the camera pans back and the same $4D is culled once more,
+     * which is the other half of the back-and-forth. */
+    if (!lost) {
+        if (s_margin_cur_obj >= 0 && s_margin_cur_obj < SDB_MARGIN_OBJECTS
+            && addr == SDB_MARGIN_STRIP) {
+            SdbMarginObj *o = &s_margin_obj[s_margin_cur_obj];
+            int widx = (int)(int8_t)cyc_mod_peek(0x4D);
+            int rcx = (int)(cyc_mod_peek((uint16_t)(s_margin_rec + 3))
+                          | (cyc_mod_peek((uint16_t)(s_margin_rec + 4)) << 8));
+            int ccam = (int)(cyc_mod_peek(SDB_CAM_LO) | (cyc_mod_peek(SDB_CAM_HI) << 8));
+            uint16_t at = (uint16_t)(SDB_OAM_BASE + cur);
+            for (int i = 0; i < o->n; i++)
+                if (o->parts[i].keyed && o->parts[i].id == widx) {
+                    SdbMargin *m = &o->parts[i];
+                    m->own = 1;
+                    m->b = s_margin_build;
+                    /* TAKE THE FRESH GEOMETRY, NOT JUST THE CLAIM.
+                     *
+                     * The game has just told us exactly where it drew this
+                     * sprite, and the first version of this branch discarded
+                     * that and kept only `own`. So the carried part kept the
+                     * column and row from its LAST OFF-EDGE EMISSION -- both
+                     * stale -- and every question asked of it afterwards was
+                     * asked at the wrong place. Measured: at f=813 the player is
+                     * drawn as a 131 px sliver because the part's stale column
+                     * AND stale row both miss the machine's copy, and at f=808
+                     * the seam's four carried halves are needed at a position
+                     * that is one build out of date.
+                     *
+                     * Refreshing the geometry is what makes the ownership test
+                     * answerable: it is then asked where the sprite actually is.
+                     * At f=808 the machine has not painted there yet and the
+                     * part is owed; at f=813 it has, and the part is retired. */
+                    m->dx = (int16_t)(x - (rcx - ccam));
+                    m->y = (int16_t)(SDB_MARGIN_Y0 - y);
+                    m->tile = cyc_mod_peek((uint16_t)(at + 1));
+                    m->attr = cyc_mod_peek((uint16_t)(at + 2));
+                    break;
+                }
+        }
+        return 0;
+    }
     if (y < 4 || y > 255) return 0;
 
     /* NO LIST-BOUNDARY DETECTION. It is not available, and three attempts are
@@ -923,12 +1023,35 @@ static int sdb_margin_capture(uint16_t addr)
      * the machine's own body in OAM one camera step away that the fragment then
      * failed to meet. Accumulating across the visits of one list, and starting
      * again when $0617 restarts, is what makes the character whole. */
+    /* A LIST BOUNDARY IS NOT THE SAME THING AS A PART HAVING GONE, and this is
+     * the fourth attempt at telling them apart (research.md 30). Wiping on the
+     * boundary drops parts the machine is itself mid-way through emitting: at
+     * trace frame 808 object 3's $4D 0, 2, 4 and 6 had crossed inside the
+     * machine's 256 columns and stopped passing the game's cull, so they were
+     * not re-offered -- and the machine's own list had not caught up either.
+     * The ownership map shows it directly: at f=808 native columns 240-255 are
+     * free across all of rows 144-176, and at f=809 they carry the character,
+     * every run clipped at column 255.
+     *
+     * So parts are CARRIED, and retired by sdb_ws_prune_margin against the
+     * ownership map instead. But only the parts that HAVE a stable identity can
+     * be carried safely: the strip walk identifies each sprite with $4D, so
+     * re-emitting one overwrites its own slot no matter how far the object moved
+     * or which rows the animation chose this build.
+     *
+     * The solo emitters cannot be carried and are still dropped here. $4D does
+     * not index at $8302 -- it sits at a constant (measured: $4D=8 across a run
+     * of them) -- so keying on it would collapse every solo sprite of an object
+     * onto one slot. Those keep the (dx, row) key and the boundary wipe. */
     if (o->build != s_margin_build) {
-        if (o->n && s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
-            fprintf(stderr, "sdbb f=%ld wipe: obj %d drops %d parts "
+        int keep = 0;
+        for (int i = 0; i < o->n; i++)
+            if (o->parts[i].keyed) o->parts[keep++] = o->parts[i];
+        if (o->n && SDB_CAP_TRACE)
+            fprintf(stderr, "sdbb f=%ld boundary: obj %d keeps %d of %d parts "
                             "(build %ld -> %ld)\n",
-                    s_frame, s_margin_cur_obj, o->n, o->build, s_margin_build);
-        o->n = 0;
+                    s_frame, s_margin_cur_obj, keep, o->n, o->build, s_margin_build);
+        o->n = keep;
         o->build = s_margin_build;
     }
     if (o->n >= SDB_MARGIN_PARTS) {
@@ -961,12 +1084,48 @@ static int sdb_margin_capture(uint16_t addr)
      * halves of a part are a property of the object, not of the frame, so a
      * repeat emission of the same part replaces it rather than doubling it, and
      * a part that has genuinely gone is dropped with the list. */
+    /* THE PART'S IDENTITY IS THE GAME'S OWN SPRITE INDEX, `$4D`.
+     *
+     * `$8483: INC $4D` walks this object's sprite descriptors, and $4D runs 0..7
+     * for a character, once per list, in order -- measured at frame 808 on
+     * object 3: $4D 0..7 carrying x = 250, 258, 254, 262, 253, 261, 255, 263.
+     * The game's cull is X in [4,255], so 1, 3, 5 and 7 are the margin's and
+     * **0, 2, 4 and 6 are the machine's**, which is exactly the handover this
+     * feature exists to complete.
+     *
+     * Every previous attempt keyed a part on its POSITION -- (dx, row) -- and
+     * that is what made four of them fail the same way. A position is not an
+     * identity: the object's part offset drifts because the record anchor and
+     * the emission sample different frames, and a running player's animation
+     * moves the ROW every build, so a re-emission never matched the part it was
+     * replacing and both survived. Measured, the offset drifting from -59 to -67
+     * over four frames of one running player, and the object accumulating to
+     * `SDB_MARGIN_PARTS` with `backstop` firing.
+     *
+     * $4D is stable across movement, animation and camera, and it is the only
+     * part identity here that comes from the game rather than from arithmetic.
+     *
+     * NOT AT THE SOLO EMITTERS. $4D does not index at $8302; it holds a constant
+     * across them (measured $4D=8), so keying on it there would put every solo
+     * sprite of an object in one slot. Those keep (dx, row), which is why the
+     * boundary above drops unkeyed parts instead of carrying them. */
+    int widx = (int)(int8_t)cyc_mod_peek(0x4D);
+    int strip_key = (addr == SDB_MARGIN_STRIP);
     SdbMargin *m = NULL;
     for (int i = 0; i < o->n; i++) {
-        if (o->parts[i].dx == dx && o->parts[i].y == row) { m = &o->parts[i]; break; }
+        if (strip_key) {
+            if (o->parts[i].keyed && o->parts[i].id == widx) { m = &o->parts[i]; break; }
+        } else if (!o->parts[i].keyed
+                   && o->parts[i].dx == dx && o->parts[i].y == row) {
+            m = &o->parts[i]; break;
+        }
     }
     if (!m) m = &o->parts[o->n++];
     o->seen = s_frame;
+    m->keyed = (uint8_t)strip_key;
+    m->id = (int16_t)widx;
+    m->b = s_margin_build;
+    m->own = 0;
     m->dx = dx;
     /* Record identity, so a recycled slot is not drawn wearing the previous
      * occupant's tiles. See SdbMarginObj. */
@@ -1346,6 +1505,169 @@ static const SdbSprite *sdb_reconcile(const SdbSprite *list, int count)
  * `sdb_ws_row_x0` is already declared at the top; the rest are the widescreen
  * state that pass reads. */
 static void sdb_ws_build_owner(const uint32_t *native);
+/* RETIRE THE CARRIED PARTS THE MACHINE HAS TAKEN OVER, and only those.
+ *
+ * A carried part -- one that a list boundary did not clear, because it is keyed
+ * on the game's own sprite index -- is still worth drawing until the machine
+ * gets round to it. That is the f=808 case: $4D 0, 2, 4 and 6 stopped being
+ * offered the moment they crossed inside the machine's columns, and the
+ * machine's list is one build behind, so for a frame or two nobody draws them.
+ *
+ * "Until the machine gets round to it" is answered by the ownership map, which
+ * is the machine's rendered frame against its background and therefore says
+ * where it really painted. A carried part with a FREE column inside the native
+ * block is one nobody has drawn: keep it. Everything else has been superseded
+ * and goes.
+ *
+ * It runs HERE, in the compositor, before the margin is drawn and while
+ * `cyc_render_line_scroll_x` still means the frame being presented. The
+ * post-stamp pass runs later and is too late to retire anything.
+ *
+ * TWO RULES THAT ARE NOT THRESHOLDS, both measured:
+ *
+ *  - Columns 0-7 are NOT an answer. `sdb_ws_build_owner` marks them free
+ *    unconditionally, because PPUMASK clips them and the machine can never paint
+ *    there, so testing them calls every band part owed on every frame and a
+ *    carried band part never retires. With the clip included, f=817's
+ *    left-margin player went 149 -> 244 ink pixels and f=813 picked up 295 of
+ *    pure stale copy.
+ *  - Retirement rides on the OBJECT's own captures, never on age. The game's
+ *    display list does not contain most off-screen objects (research.md 26), so
+ *    an age-based rule empties precisely the sprites this feature draws. An
+ *    object the game has dropped from the list is never captured, never gets
+ *    here with a fresh build, and keeps its parts -- which is what stops the
+ *    margin blinking. */
+/* RETIRE A CARRIED PART THE GAME HAS SINCE EMITTED INSIDE ITS OWN CULL.
+ *
+ * `own` is set in sdb_margin_capture the moment the game offers that $4D inside
+ * the cull, which is the machine saying "this sprite is mine". The part is then
+ * dropped, and dropped for the only reason worth dropping it for: the game took
+ * it over. Not because it is old, not because a column threshold said so, and
+ * not because the ownership map could not find a mark -- the ownership map is
+ * the wrong instrument here (see the note at the capture site), and using it
+ * costs a back-and-forth artefact in play.
+ *
+ * Retirement rides on the OBJECT's own captures, never on age: the game's
+ * display list does not contain most off-screen objects (research.md 26), so an
+ * age-based rule empties precisely the sprites this feature draws. An object the
+ * game has dropped from the list is never captured, never reaches here with a
+ * fresh build, and keeps its parts -- which is what stops the margin blinking.
+ *
+ * It runs in the compositor, before the margin is drawn, which is where it has
+ * to be: the post-stamp pass is later and draws from the same slot list. */
+/* RETIRE A CARRIED PART ONLY ONCE THE MACHINE HAS ACTUALLY PAINTED IT.
+ *
+ * `own` is the game's claim -- sdb_margin_capture sets it the moment the game
+ * emits that $4D inside its own cull -- and on its own it is one build too
+ * eager. Measured at f=808: the game HAD emitted $4D 0, 2, 4 and 6, at x = 250,
+ * 254, 253 and 255, all inside [4,255]. So `own` says the machine owns them
+ * while its picture has not caught up, and retiring on the claim alone puts the
+ * seam straight back -- object 3's head went 12 -> 40 and 812 came back.
+ *
+ * The claim and the picture are two questions and both have to be answered:
+ *
+ *   - `own`   : has the GAME taken this part over?  Its own cull says so.
+ *   - painted : has the MACHINE's picture caught up?  The ownership map says so.
+ *
+ * Neither alone is enough. Retiring on `own` alone loses the f=808 seam;
+ * retiring on the ownership map alone is what carried the stale row into f=813,
+ * because a part one build out of date is evaluated at its own stale row, lands
+ * on background the machine left alone, and gets drawn as a second copy of a
+ * sprite already on screen. That is the back-and-forth damage reported from play
+ * on 2026-10-17 -- panning one way columns go missing, the other way they are
+ * drawn twice.
+ *
+ * The row window is what makes the two agree. A carried part's row is stale by
+ * one build, so its columns are looked for across the rows the machine could
+ * have used, not only the one the part happens to name. Measured: at f=813 the
+ * machine had the sprite one or two rows away and the narrow test read it as
+ * free; f=813's player was drawn as a 131 px sliver. The window is +/-4 rows,
+ * which is the row leapfrog research.md 26 measured for exactly this pair of
+ * emitters, and it is a window on WHERE TO LOOK rather than a tolerance on what
+ * to accept.
+ *
+ * Retirement rides on the OBJECT's own captures, never on age: the game's
+ * display list does not contain most off-screen objects (research.md 26), so an
+ * age-based rule empties precisely the sprites this feature draws. */
+static void sdb_ws_prune_margin(void)
+{
+    for (int o = 0; o < SDB_MARGIN_OBJECTS; o++) {
+        SdbMarginObj *ob = &s_margin_obj[o];
+        if (!ob->n) continue;
+        if (ob->build == ob->pruned) continue;
+        uint16_t rec = (uint16_t)(SDB_REC_BASE + SDB_REC_STRIDE * o);
+        if (!cyc_mod_peek(rec)) continue;
+        if ((cyc_mod_peek(rec) & ~SDB_CULL_BITS) != (ob->id0 & ~SDB_CULL_BITS)
+            || cyc_mod_peek((uint16_t)(rec + 1)) != ob->id1)
+            continue;                                   /* a recycled slot */
+        ob->pruned = ob->build;
+        int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
+                        | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
+        int row_corr = 0;
+        int corr = sdb_object_delta(rec_x, ob, &row_corr);
+        int keep = 0;
+        for (int i = 0; i < ob->n; i++) {
+            const SdbMargin *m = &ob->parts[i];
+            /* The game has not claimed it, so it is ours to draw. */
+            if (!m->own) { ob->parts[keep++] = *m; continue; }
+            /* Claimed AND the machine's picture has it: drop it. The geometry
+             * was refreshed on the claiming emission, so this test is asked
+             * where the sprite actually is. */
+            int prow = m->y + row_corr;
+            prow = prow < 0 ? 0 : (prow >= 240 ? 239 : prow);
+            int scroll = cyc_render_line_scroll_x(prow);
+            int sx = (rec_x + corr) + m->dx - scroll - 4;
+            /* RETIRE ONLY IF THE MACHINE OWNS *ALL* OF THE PART.
+             *
+             * This was "did the machine paint ANY of this part's columns", and
+             * that drops the band. Measured at frame 817 of the played capture
+             * tmp/lm-follow: object 1 holds a part at sx = 4, which spans columns
+             * 4-11. Columns 4-7 are inside the clip band and PPUMASK means the
+             * machine can never paint them -- the margin is the only renderer
+             * there. Columns 8-11 are in the machine's run and it DID paint
+             * them. So "any column painted" retired the part and took columns
+             * 4-7 with it, and a left-margin character lost two body rows across
+             * two frames:
+             *
+             *   f=816  o1[c4,r200,t86] o1[c5,r208,t8F]
+             *   f=817  (gone)
+             *
+             * The blit already clips, so drawing the band columns of a part the
+             * machine also owns costs nothing: it cannot reach a painted column.
+             * So the test is whether ANY column of the part is one the machine
+             * cannot draw -- inside the band, or inside the block and free. */
+            int owed = 0;
+            for (int c = 0; c < 8 && !owed; c++) {
+                int nx = sx + c;
+                /* The band is free unconditionally, and no other renderer will
+                 * touch it: that alone keeps the part. */
+                if (nx < SDB_WS_CLIP) { owed = 1; continue; }
+                /* PAST THE NATIVE BLOCK IS OURS TOO. A part sitting wholly at
+                 * 256+ covers columns the machine cannot reach at all -- its
+                 * buffer ends at 255 -- so it is the margin's exclusive
+                 * territory and nothing can own it. Skipping these columns
+                 * instead of claiming them retired the right-margin sprites:
+                 * measured at frames 711->712 and 715->716 of the played capture
+                 * tmp/right-follow, object 3 lost the parts at c=257 and c=256,
+                 * which are exactly the parts covering 256-265, and a bald
+                 * character in the right margin lost its pixels on both.
+                 *
+                 * This is the same correction the right SEAM needs and the
+                 * reason it is not a band special case: the rule is "the machine
+                 * owns ALL of it", and a column the machine cannot address is
+                 * never owned. */
+                if (nx > 255) { owed = 1; continue; }
+                if (s_ws_native_owner[(size_t)prow * 256 + nx] == 0xFF) owed = 1;
+            }
+            if (owed) ob->parts[keep++] = *m;
+        }
+        if (keep != ob->n && SDB_CAP_TRACE)
+            fprintf(stderr, "sdbp f=%ld obj %d retires %d of %d parts\n",
+                    s_frame, o, ob->n - keep, ob->n);
+        ob->n = keep;
+    }
+}
+
 static int sdb_ws_margin_pass(uint32_t *canvas, int cw)
 {
     /* THE MARGIN HAS TO BE DRAWN *AFTER* THE STAMP, not only inside the
@@ -2550,6 +2872,7 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
      * `s_ws_native_bg` is valid by here: the seam check above returns 0 when the
      * capture is missing. */
     sdb_ws_build_owner(native);
+    sdb_ws_prune_margin();
 
     int keep = s_ws_reveal ? SDB_WS_CLIP : 0;
     for (int y = 0; y < height; y++)
@@ -2601,13 +2924,13 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
          * stay glued to the scroll it was computed from rather than be split
          * across two bases -- the collapse research 26 records as a character
          * drawn at a sixteenth of his width. */
-        if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+        if (SDB_CAP_TRACE)
             fprintf(stderr, "sdbw f=%ld x0=%d:", s_frame, s_ws_x0_court);
         for (int o = 0; o < SDB_MARGIN_OBJECTS; o++) {
             SdbMarginObj *ob = &s_margin_obj[o];
             if (!ob->n) continue;
             uint16_t rec = (uint16_t)(SDB_REC_BASE + SDB_REC_STRIDE * o);
-            if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+            if (SDB_CAP_TRACE)
                 fprintf(stderr, " [o%dn=%d id=%02X/%02X rec=%02X/%02X/%02X/%02X]", o, ob->n,
                         ob->id0, ob->id1, cyc_mod_peek(rec),
                         cyc_mod_peek((uint16_t)(rec + 1)),
@@ -2644,9 +2967,9 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
              * `[corr+0]` per object per frame, which reads as a column of data and
              * is none -- the same "a green line that measured nothing" shape this
              * file keeps having to undo. */
-            if (corr && s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+            if (corr && SDB_CAP_TRACE)
                 fprintf(stderr, " [corr%+d]", corr);
-            if (row_corr && s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+            if (row_corr && SDB_CAP_TRACE)
                 fprintf(stderr, " [corry%+d]", row_corr);
             for (int i = 0; i < ob->n; i++) {
                 const SdbMargin *m = &ob->parts[i];
@@ -2738,7 +3061,28 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                 int sx = (rec_x + corr) + m->dx - scroll - 4;
                 /* Completing a sprite the PPU clipped is the one case the margin
                  * owns rather than the machine. */
-                int completes = s_ws_reveal && sx >= 0 && sx < SDB_WS_CLIP;
+                /* THE LEFT MIRROR OF THE RIGHT STRADDLE, and the same test.
+                 *
+                 * The right side needs a pass because the machine's own 256-wide
+                 * buffer clips a sprite at column 255 and the columns it loses
+                 * are ones it HAD. The left looks like a mirror and is not:
+                 * PPUMASK clips screen columns 0-7, so the machine delivers
+                 * nothing there at all, and `completes` is already its renderer.
+                 *
+                 * But `completes` said `sx >= 0`, and a part at **sx = -1** covers
+                 * columns -1..6 -- six columns inside the band that the machine
+                 * cannot paint and this test refuses. That is the right side's
+                 * case exactly, one sprite further left: a sprite clipped at its
+                 * edge with the lost columns unpainted by anybody.
+                 *
+                 * So the test is the pass's straddle test, not a half-open
+                 * interval: does the part CROSS the band's inner edge, in either
+                 * direction. `sx < SDB_WS_CLIP && sx + 8 > 0`.
+                 *
+                 * The margin blit then clips to the band, so a part at sx = -1
+                 * paints only what falls inside it and cannot reach a column the
+                 * machine owns. */
+                int completes = s_ws_reveal && sx < SDB_WS_CLIP && sx + 8 > 0;
                 /* NOTE there is deliberately NO `sdb_oam_has` test here.
                  *
                  * One was added to avoid drawing a band sprite the machine also
@@ -2792,7 +3136,7 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                 }
                 if (machine_drew) continue;
                 int px0 = sx + rx0;
-                if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+                if (SDB_CAP_TRACE)
                     fprintf(stderr, " [o%d:%d,%d,t%02X]", o, sx, m->y, m->tile);
                 n++;
                 /* Only ever draw the part that lies in the MARGIN. The machine's
@@ -2860,10 +3204,10 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
          * perfectly healthy run. `n` is final after the draw loop, so the
          * closer goes here, and this block prints after it. */
         s_margin_count = n;
-        if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to)
+        if (SDB_CAP_TRACE)
             fprintf(stderr, " n=%d\n", n);
         if (n > s_margin_peak) s_margin_peak = n;
-        if (s_cap_from >= 0 && s_frame >= s_cap_from && s_frame <= s_cap_to) {
+        if (SDB_CAP_TRACE) {
             const uint8_t *oam = cyc_render_oam();
             fprintf(stderr, "oam-band:");
             for (int j = 0; j < 64; j++) {

@@ -3765,3 +3765,130 @@ Something outside the capture has to disambiguate them, and no candidate is
 recorded here. The honest position is that frames 808 and 812 remain open, that
 four attempts have each fixed one case and broken the other, and that the committed
 build is correct on both captures — locked and follow — as measured.
+
+## 31. `$4D`: identify a part by the game's own index, not by its position
+
+§30 ended with a stopping reason — four attempts, each moving the trade rather
+than removing it, because "still owed" and "superseded" were not separable by age,
+column, row or the ownership map. The discriminator turned out to have been in the
+capture callback the whole time, unread.
+
+### What a part's identity should never have been
+
+Every previous version keyed a margin part on its **position**: `(dx, row)`, with
+`dx` the offset from the object's record anchor. That is arithmetic we perform, and
+it is not an identity:
+
+- the offset **drifts**, because the record anchor and the emitter sample different
+  frames — measured, one running player's part offset going from −59 to −67 across
+  four frames;
+- a running player's animation moves the part's **row** every build, so a
+  re-emission never matched the part it was replacing and both survived, until the
+  object was pinned at `SDB_MARGIN_PARTS` with `backstop` firing (research §30).
+
+So the same logical part was re-appended beside itself on every build, and no
+threshold could tell the two copies apart because they were separated by however
+far the object had moved.
+
+### `$4D` is the index, and it is stable
+
+`$8483: INC $4D` walks an object's sprite descriptors, and `$4D` runs 0..7 for a
+character, once per list, in order. Measured at frame 808 on object 3:
+
+```
+$4D=0 x=250  $4D=1 x=258  $4D=2 x=254  $4D=3 x=262
+$4D=4 x=253  $4D=5 x=261  $4D=6 x=255  $4D=7 x=263
+```
+
+The game's cull is `X in [4,255]`, so **`$4D` 1, 3, 5 and 7 are the margin's and
+0, 2, 4 and 6 are the machine's** — which is exactly the handover this feature
+exists to complete, visible in the game's own numbering. And `$4D` is stable across
+movement, animation and camera, which is what `(dx, row)` was not.
+
+**Not at the solo emitters.** `$4D` does not index at `$8302`; it holds a constant
+across them (measured `$4D=8` across a run of them), so keying on it there puts
+every solo sprite of an object in one slot. The strip walk keys on `$4D`; the solo
+emitters keep `(dx, row)` and keep the boundary wipe. This is checked before use,
+not after.
+
+### Three things that had to change with it
+
+**Take the game's fresh geometry on every emission, including the ones it does not
+cull.** The first version of the claiming branch kept only the claim and discarded
+the position, so a carried part stayed stale in **both** its column and its row and
+every question asked of it was asked in the wrong place. Measured at f=813, a
+player drawn as a 131 px sliver. The game hands us the sprite's position on every
+emission; we were storing it only for the culled ones, which is precisely when it
+does not matter.
+
+**A list boundary is not the same thing as a part having gone.** Boundary now
+retires only the parts that have no stable identity, and retirement moved to a
+prune that asks a per-pixel question (§31.4).
+
+**`SDB_MARGIN_PARTS` 24 → 40.** Parts are carried rather than wiped, so two lists of
+a 16-sprite object have to fit.
+
+### Retirement: the machine must own ALL of a part
+
+A part stops being re-emitted for two reasons — its row changed (superseded), or it
+crossed inside the machine's viewport and stopped passing the game's cull (still
+owed) — and the rule that separates them is that **the machine owns a part only if
+it owns every column of it**. Three columns are never owned, and getting any of
+them wrong retires parts that are still owed:
+
+| column | why the machine cannot own it | cost of getting it wrong |
+|---|---|---|
+| `0..7` | PPUMASK clips them; `sdb_ws_build_owner` marks them free unconditionally | f=817: a left-margin character lost two body rows across two frames — object 1's parts at `c=4` (spanning 4–11) were retired because the machine painted 8–11, taking its band columns 4–7 with it |
+| `256+` | the machine's buffer ends at 255 | f=712 and f=716: object 3 lost the parts at `c=257` and `c=256`, which cover exactly 256–265, and a right-margin character lost its pixels on both |
+| any in-block column the machine left as background | the ownership map's whole job | — |
+
+Measured on the played captures, after the correction:
+
+| | committed | this build |
+|---|---|---|
+| right seam, object 3, frames 805–820 | 2 bad | **0 bad** |
+| right margin, object 3 at f=712 (played, `tmp/right-follow`) | 5 parts | **8 parts** |
+| left margin, object 1 at f=816→817 (played, `tmp/lm-follow`) | 2 parts lost | **0 lost** |
+| `peak` / `backstop` | 76 / 22 | **48 / 0** |
+| gate 1, guest state | — | byte-identical |
+| gate 2, native columns | 54 fr / 1242 px | unchanged |
+| `dupes.py`, follow capture | 0 drifting / 12 rigid / 37 stacked | **0 / 0 / 16** |
+| `dupes.py`, locked capture | 0 / 12 / 367 | **0 / 0 / 355** |
+
+The A/B is on a **played** capture and the same vector replayed both ways, not on
+two sessions: `tmp/right-follow`, no fix versus fix, gives **620 → 0 px at f=712**
+and **256 → 0 at f=716**. A played capture is the only trustworthy instrument here
+(research §30), and re-deriving the fix against it rather than asking for another
+session was the right call.
+
+### The left and right are not mirrors
+
+Worth writing down because it cost an afternoon's wrong turn. The right seam needs
+a pass because the machine's 256-wide buffer **clips** a sprite at 255 and the
+columns it loses are ones it *had*. The left looks like a mirror and is not:
+PPUMASK clips screen columns 0–7, so the machine delivers **none** of them, and the
+compositor's `completes` path is already their renderer. So there was nothing to
+port, and the left-straddle extension written on the assumption that there was
+painted columns the machine already owns — a 1-pixel reconcile offset leaving a
+pale edge beside the machine's copy. The game's cull boundary is tighter than the
+PPU's clip on the left and looser on the right, and that asymmetry is the whole
+reason the two sides behave differently.
+
+### Still open, and both are named
+
+**Gate 8 fails at 690 px** and no fix today moved it (committed 0, `$4D` identity
+342, all-column retirement 690). The direction is known: the differing pixels are
+all at **column 9, rows 101–221, frames 813–820 and 836+**, and the colour goes
+`(84,40,0)` sprite-brown → `(120,10,0)` court-red, so this build **erases** a
+sprite the committed build draws. That is `sdb_present` stamping `s_picture` without
+it — the character-flicker mod's captured list, a different code path from anything
+the margin work touched. It is probably not the same root cause as the margin work
+and wants its own look.
+
+**The left band half-width.** The margin holds **four** parts per character at
+frames 719–720 and **eight** at 721 — the band half of a character is not being
+supplied until the frame it stops straddling. It reads as a doubled sprite because
+the two halves become separately visible at 721. Same shape as the right bug, one
+boundary over, and untouched.
+
+**Also still open from §26:** the menu ghost (plan.md 16).
