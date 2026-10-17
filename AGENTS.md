@@ -941,6 +941,16 @@ line means the capture is off, not that there is nothing to capture.**
 11. **Play it** — off-screen players are most of the pitch, so this is visible on every
    match frame; but the *interesting* states are the culls at the very edge of the
    512-pixel world, where a sprite legitimately lands over backdrop.
+12. **A re-identified slot drops the previous occupant's parts** — see the Known
+   Issue below. Gate: 3000 frames each of `sdb_sweep`/`sdb_throw`/`sdb_pan` with the
+   fix off against on. **498 / 391 / 382 frames differ and every one is a removal**
+   (a pale mis-palette'd copy of a player, 117-136 px). `captured` and `off-edge`
+   must be **identical to the digit** or the guest moved, and `drawn` must not
+   *rise*. `sdbR` traces each re-identification; expect 9-10 in the first 1200
+   frames and none after. **Print the compared file count beside any "0 frames
+   differ"** — the first version of this gate reported a clean zero over an empty
+   set.
+
 ### Four traps in the margin placement, each producing a *different* artefact
 
 All four are the same mistake wearing different clothes, and all four were made
@@ -992,6 +1002,51 @@ cannot work at all because `$0617` only advances for sprites the game draws, so 
 run of culled sprites shares one cursor value. Gate 2 proves it structurally instead
 — the blit is clipped to the columns the machine does not own, so the machine's
 columns differ by 0 px.
+
+### A re-identified slot resurrects the previous occupant's sprites — RESOLVED
+
+**The identity gate at the three draw sites was the only thing keeping a
+recycled slot's old parts hidden, and stamping the new identity is what made them
+visible.** `sdb_margin_capture` writes `o->id0/id1` on every capture; the draw
+sites skip an object whose live record disagrees with it. So the parts the
+*previous* occupant left in `o->parts` were suppressed by exactly the mechanism
+whose job is to suppress them — until the game emitted the new occupant, the
+capture refreshed the identity, the gate started agreeing, and the old parts came
+back wearing the new one's name.
+
+From a played session (`tmp/mysession3`, stage 2), object slot 0 in three lines:
+
+```
+f=96     n=8   identity 00/48    the menu's object
+f=1081   n=19  identity 00/48    eleven more parts arrive, same identity
+f=1676   n=19  identity 02/31    stage 2's object takes the slot
+```
+
+Nothing in 2100 frames ever emits object 0 at rows 152/160. The eleven parts were
+captured at 1081 for the menu's object and were undrawable until 1676, then
+appeared as a 48×16 strip at columns 72..112 that **slides out of the left edge,
+grows until 1693, and stays** — parts do not move unless re-emitted, so the strip
+holds its captured columns while the camera carries it, and it appears exactly as
+it crosses out of the machine's 256.
+
+**The fix: clear `o->n` when the captured identity changes**, before appending.
+Byte 0 is compared with **`$70` masked out** or the game's own culling-bit flips
+read as a re-identification and drop a character mid-match — the same trap as the
+`$E35F-$E36C` rule below. Byte 1 whole, as the draw sites compare it. `sdbR`
+traces each one.
+
+Gate: 3000 frames each of `sdb_sweep`/`sdb_throw`/`sdb_pan`, fix off vs on —
+**498 / 391 / 382 frames differ, every one a removal** (a pale mis-palette'd copy
+of a player, 117-136 px), `captured` and `off-edge` identical to the digit,
+`drawn` down 124719→124506 / 146443→145606 / 126573→126249. Not one frame got
+worse. Full write-up and the re-identification frame list in research.md §26b.
+
+**Not verified on the recording itself** — a headless replay of `mysession3` is
+~600 frames behind by that point, so a re-record is the only way to see it there.
+
+**The first attempt at that gate said "0 of 900 frames differ" and it was
+vacuous**: the comparison looked for the wrong filenames and matched nothing, so
+`len(diffs)` was 0 out of an empty set. Print the file count beside any "0 differ".
 
 **The compositor only runs when something presents the picture** — `--present-out` or the
 window. A headless run with neither prints no `widescreen:` line and no `margin sprites:`

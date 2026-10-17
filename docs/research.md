@@ -2577,6 +2577,78 @@ measurement taken from it was right all along — only the field the code kept w
 wrong. A rule built on a trace line and a rule built on the field it prints are
 not the same rule, and only one of them was measuring the game.
 
+### §26b — A re-identified slot resurrects the previous occupant's sprites — FIXED
+
+Found by playing, in `tmp/mysession3` (stage 2). Eleven tiles in a strip the game
+had not emitted for 595 frames slide out of the left edge from frame 1676, grow
+until 1693, and then sit there; pan left and the machine's own picture covers
+them, pan back and they return.
+
+**What they are.** Object slot 0's parts at screen rows 152 and 160, tiles
+`$CA-$CF` and `$DA-$DE`, columns 72..112 at frame 1693. The trace carries the
+whole story in three lines:
+
+    f=96     n=8   identity 00/48    the menu's object
+    f=1081   n=19  identity 00/48    eleven more parts arrive, same identity
+    f=1676   n=19  identity 02/31    stage 2's object takes the slot
+
+Nothing in the recording ever emits object 0 at rows 152 or 160 — not at `$8483`,
+not at `$8302`, zero lines in 2100 frames. The eleven parts were captured at
+frame 1081, on the roster screen, for the menu's object.
+
+**Why they were invisible for 595 frames and then appeared.** The draw sites
+compare the live display record against the identity recorded at capture and skip
+the object when they disagree (`sdb_host_extras.c` 1723, 1847, 3153), and that
+comparison was the *only* thing hiding them: from frame 641 the live record read
+`02/18` then `02/31` against a recorded `00/48`, so slot 0 drew nothing at all.
+At frame 1676 the game emitted the new occupant's eight sprites, and the capture
+wrote the **new** identity — so the gate started agreeing, and every part the
+**old** occupant had left in `o->parts` became drawable at once.
+
+The strip then slides because it has no position of its own: parts do not move
+unless re-emitted, so it sits at the columns it was captured at while the camera
+carries it across the canvas, and it becomes visible exactly as it crosses out of
+the machine's 256. Hence fine at 1675, out at 1676, fully in the band by 1693,
+and there after.
+
+**The fix: discard the parts when the captured identity changes**, before
+appending, in `sdb_margin_capture`. Byte 0 is compared with `$70` masked out for
+the reason §26 already records — the game flips bits 4-6 of the state byte to
+signal its own culling, and an unmasked test reads that as a new object and drops
+a character mid-match. Byte 1 whole, exactly as the draw sites compare it.
+
+**Gate.** 3000 frames each of `sdb_sweep`, `sdb_throw` and `sdb_pan`, `--present-every 1`
+at 16:9, fix off against fix on, every differing frame inspected:
+
+| vector | frames differing | largest change | what it was |
+|---|---|---|---|
+| `sdb_sweep` | 498 / 3000 | 117 px (f=226-228) | a pale mis-palette'd copy of a player, offset 1-2 px |
+| `sdb_throw` | 391 / 3000 | 136 px (f=2247-2248) | the same, on a different character |
+| `sdb_pan` | 382 / 3000 | 117 px (f=226-228) | the same |
+
+Every difference is a removal: `captured` and `off-edge` are identical to the
+digit on all three, so the guest is untouched, and `drawn` falls (sweep
+124719 → 124506, throw 146443 → 145606, idle 121225 → 121024, pan 126573 →
+126249) because those parts are no longer offered for drawing. **Not one frame
+got worse.**
+
+The re-identifications all happen early — frames 30, 54, 506, 686 and then
+nothing in the remaining 500 — which is what a title→match transition should look
+like. `sdbR` prints each one and is gated behind `SDB_TRACE=1` **and**
+`SDB_TRACE_CAPTURES`, per the standing trap.
+
+**Not verified on the recording.** A headless replay of `mysession3` is ~600
+frames behind it by the time it reaches this point — it is still on stage 1 at
+recorded frame 1700 — so the fix cannot be shown on the artefact that found it
+without a re-record. The mechanism is proven from the recording's own trace; the
+picture evidence is the four-vector gate.
+
+**A caution the numbers make concrete.** The first attempt at this gate reported
+"0 of 900 frames differ" and it was **vacuous**: the comparison script looked for
+the wrong filenames and matched nothing, so `len(diffs)` was 0 out of an empty
+set. The same script, pointed at the right names, reports 498. Check the file
+count before believing a zero.
+
 #### The four rules that did not ship, and why
 
 **A fifth shipped, for the MARGIN half, and it is the one the menu needed.** See

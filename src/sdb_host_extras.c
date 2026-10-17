@@ -890,6 +890,55 @@ static int sdb_margin_capture(uint16_t addr)
     if (s_margin_cur_obj >= 0 && s_margin_cur_obj < SDB_MARGIN_OBJECTS)
         s_margin_obj[s_margin_cur_obj].seen = s_frame;
 
+    /* A DIFFERENT OBJECT NOW HOLDS THIS SLOT: throw away what the previous one
+     * left behind.
+     *
+     * The identity is written at the bottom of this function, on every capture,
+     * and the three draw sites compare the live record against it and skip the
+     * object when they disagree. That is what keeps a recycled slot from being
+     * drawn wearing the previous occupant's tiles -- and it is exactly what
+     * RESURRECTS them, because the disagreement is the only thing hiding them.
+     * The moment the game emits the slot's new occupant, the capture stamps the
+     * NEW identity, the gate now agrees, and every part the OLD occupant left in
+     * `o->parts` becomes drawable again.
+     *
+     * Measured on a played session (`tmp/mysession3`, stage 2). Object slot 0:
+     *
+     *     f=96     n=8   identity 00/48    the menu's object
+     *     f=1081   n=19  identity 00/48    11 more parts arrive, same identity
+     *     f=1676   n=19  identity 02/31    stage 2's object takes the slot
+     *
+     * From 641 to 1675 the live record read 02/18 or 02/31 against a recorded
+     * 00/48, so nothing of slot 0 was drawn at all. At 1676 the game emitted the
+     * new occupant's eight sprites, the identity was refreshed, and the eleven
+     * parts captured at 1081 -- 595 frames earlier, for a different object, on a
+     * different screen -- became visible. They are what the player sees slide out
+     * of the left edge from 1676 and settle by 1693: eleven tiles in two rows at
+     * screen rows 152 and 160, columns 72..112, drawn in a strip the game has not
+     * emitted since 1081 and cannot paint here, so nothing ever covers them.
+     *
+     * The comparison MASKS `$70` out of byte 0 for the reason research 26 already
+     * records: the game flips bits 4-6 of the state byte to signal its own
+     * culling, so an unmasked test reads that flip as a new object and drops a
+     * character mid-match. Byte 1 is compared whole, exactly as the draw sites
+     * compare it, so a slot the game has genuinely re-identified is dropped and
+     * rebuilt from this frame's captures. */
+    if (s_margin_cur_obj >= 0 && s_margin_cur_obj < SDB_MARGIN_OBJECTS) {
+        SdbMarginObj *slot = &s_margin_obj[s_margin_cur_obj];
+        uint8_t n0 = cyc_mod_peek(s_margin_rec);
+        uint8_t n1 = cyc_mod_peek((uint16_t)(s_margin_rec + 1));
+        if ((n0 & ~SDB_CULL_BITS) != (slot->id0 & ~SDB_CULL_BITS) || n1 != slot->id1) {
+            if (slot->n && SDB_CAP_TRACE)
+                fprintf(stderr, "sdbR f=%ld obj %d re-identified %02X/%02X -> "
+                                "%02X/%02X: discarding %d parts from the previous "
+                                "occupant\n", s_frame, s_margin_cur_obj,
+                        slot->id0, slot->id1, n0, n1, slot->n);
+            slot->n = 0;
+            slot->build = s_margin_build;
+            slot->pruned = s_margin_build;
+        }
+    }
+
     /* Which of the two emitters this is. They place a sprite the same way (the
      * same 16-bit accumulators, the same [4,255] cull) but take the tile and
      * attribute from different places: the strip walk at $8348 has already
