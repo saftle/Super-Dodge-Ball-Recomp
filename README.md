@@ -439,7 +439,6 @@ Super Dodgeball Recomp/
 │   └── README.md                  # format table + provenance
 ├── mods/packages/                 # manifest-only packages, one per mod
 │   ├── super-dodgeball.character-flicker/1.0.0/manifest.toml
-│   ├── super-dodgeball.cheats/1.0.0/manifest.toml
 │   ├── super-dodgeball.ppu-overclock/1.0.0/manifest.toml
 │   └── super-dodgeball.widescreen/1.0.0/manifest.toml
 ├── external/

@@ -2274,23 +2274,11 @@ static void sdb_frame_end(void *ctx)
 
 /* ---- mod activation ---- */
 
-/* Cheats are opt-in twice over: the package feature, and then a cheat file
- * with at least one cheat ENABLED in it. A .cht whose every entry says
- * enable = false - which is how the libretro database ships, so that a player
- * chooses - therefore loads and arms nothing, and we say so rather than
- * leaving the player wondering why a Mods-screen toggle did nothing.
- *
- * The CLI is the other way in and needs no package: --cheat / --cheats run
- * whether or not the feature is selected, the same asymmetry --widescreen has. */
-static void sdb_cheats_enable(void)
-{
-    sdb_cheats_load_default();
-}
-
-static void sdb_cheats_disable(void)
-{
-    sdb_cheats_option("--no-cheats", NULL);
-}
+/* Cheats are no longer a package. The .cht loads at power-on on its own, each
+ * entry is its own toggle in the in-game Cheats menu, and --cheat / --cheats /
+ * --no-cheats cover the headless path, so there is nothing left for a manifest
+ * feature to gate. The package was removed for exactly that reason: a feature
+ * switch in front of per-cheat switches carries no information. */
 
 static const char *const SDB_HOOK_IDS[] = {
     "super-dodgeball.oam.b5-8116",
@@ -3764,11 +3752,9 @@ static void register_sdb_mods(void)
     if (!nes_mod_register_activation_plugin("super-dodgeball.character-flicker", sdb_enable) ||
         !nes_mod_register_activation_plugin("super-dodgeball.ppu-overclock", sdb_oc_enable) ||
         !nes_mod_register_activation_plugin("super-dodgeball.widescreen", sdb_ws_enable) ||
-        !nes_mod_register_activation_plugin("super-dodgeball.cheats", sdb_cheats_enable) ||
         !nes_mod_register_reset_callback(sdb_disable) ||
         !nes_mod_register_reset_callback(sdb_oc_disable) ||
-        !nes_mod_register_reset_callback(sdb_ws_disable) ||
-        !nes_mod_register_reset_callback(sdb_cheats_disable))
+        !nes_mod_register_reset_callback(sdb_ws_disable))
         fprintf(stderr, "sdb: mod registration failed\n");
     for (unsigned i = 0; i < sizeof sites / sizeof sites[0]; i++)
         if (!nes_mod_register_function_entry_plugin(SDB_HOOK_IDS[i], sites[i].addr, sites[i].fn))
