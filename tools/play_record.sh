@@ -134,6 +134,29 @@
 #                  directly, so Player1Source is irrelevant here. That is what
 #                  makes it usable for a gate; a --virtual-pad replay needs
 #                  Player1Source = 2 or the guest sees nothing at all.
+#   SDB_CHEAT       codes to ARM now, ';'-joinable, repeatable  (default: none)
+#                       SDB_CHEAT='043B:00;0403:00;03CB:00' ...
+#                   Passed straight through as --cheat. This is the only way an
+#                   unattended capture can carry a cheat, because the in-game
+#                   Cheats menu (Escape) is a mouse-driven widget no script can
+#                   drive -- so arming it here is not a convenience, it is the
+#                   only door.
+#   SDB_CHEATS      a .cht FILE to load instead of the default one  (default: none)
+#                   Passed as --cheats, which SUPERSEDES any --cheat already
+#                   given, so setting both does not mean both. Note the window
+#                   loads cheats/Super Dodge Ball (USA).cht from the repo root
+#                   on its own and every entry there ships disabled, so this
+#                   knob loads a menu rather than arming anything.
+#   SDB_NO_CHEATS   1 passes --no-cheats, dropping every loaded cheat  (default 0)
+#                   Checked first of the three: it supersedes them, and a capture
+#                   that passed --no-cheats AND --cheat would be asking for two
+#                   opposite things with the engine's order deciding, not you.
+#
+#                   Beware what a cheat does NOT do: research.md S32 refutes the
+#                   obvious reading of the P2 energy codes. Freezing them at 0
+#                   HOLDS and the match PLAYS ON, because the match is a fixed
+#                   ~37-second scripted sequence, not something a player can end
+#                   early. A handicap, not a kill switch.
 #   SDB_LAUNCHER    1 keeps the recomp-ui launcher; 0 skips it  (default 0)
 #   SDB_UNCAPPED    1 runs as fast as the machine can    (default 0, frame-paced)
 #   SDB_TCP         port for the host's debug server, so a tap can sample the
@@ -266,6 +289,9 @@ if [ "$SCANLINES" -gt 262 ]; then
     exit 2
 fi
 VECTOR="${SDB_VECTOR:-}"
+CHEAT="${SDB_CHEAT:-}"
+CHEATS="${SDB_CHEATS:-}"
+NO_CHEATS="${SDB_NO_CHEATS:-0}"
 SHOT_EVERY="${SDB_SHOT_EVERY:-1}"
 SCALE="${SDB_SCALE:-1}"
 LAUNCHER="${SDB_LAUNCHER:-0}"
@@ -517,6 +543,21 @@ if [ -n "$VECTOR" ]; then
     echo "    vector  -> $VECTOR (played through the window, unattended)"
 fi
 
+if [ "$NO_CHEATS" = "1" ]; then
+    ARGS+=( --no-cheats ); CHEAT_FLAG="--no-cheats"
+elif [ -n "$CHEATS" ]; then
+    if [ ! -f "$CHEATS" ]; then
+        echo "play_record: SDB_CHEATS names no file: $CHEATS" >&2
+        exit 2
+    fi
+    ARGS+=( --cheats "$CHEATS" ); CHEAT_FLAG="--cheats $CHEATS"
+elif [ -n "$CHEAT" ]; then
+    ARGS+=( --cheat "$CHEAT" ); CHEAT_FLAG="--cheat $CHEAT"
+else
+    CHEAT_FLAG=""
+fi
+[ -n "$CHEAT_FLAG" ] && echo "    cheats  -> $CHEAT_FLAG"
+
 # The anchor helper starts FIRST and waits for the port, so the two do not have
 # to be started in a particular order -- and starting it first is what makes the
 # anchor land early enough to be worth having. It holds the host's single TCP
@@ -614,6 +655,12 @@ REC_STEPS=$(grep -oE '^# [0-9]+ frames, [0-9]+ input steps' "$OUT/repro.input" |
 WS_FLAG=""
 if [ "$WS_ON" = "true" ]; then WS_FLAG="--widescreen $ASPECT"; fi
 
+# A cheat that does not reach the replay is worse than no cheat: the capture and
+# the run measured from it would be different machines for a reason nothing in
+# the printed command shows.
+CHEAT_CONT=""
+[ -n "$CHEAT_FLAG" ] && CHEAT_CONT=" $CHEAT_FLAG"
+
 # The overclock has to reach the replay, not just widescreen. The printed
 # command used to carry only --widescreen, so a replay of an overclocked capture
 # silently dropped --ppu-overclock -- and the overclock changes the guest's
@@ -631,7 +678,7 @@ cat >> "$OUT/repro.input" <<EOF
 #
 #   cd "$PWD" && SDB_TRACE=1 ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" \\
 #       --frames $REC_FRAMES --input $OUT/repro.input --ram-init zeros \\
-#       --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG \\
+#       --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG$CHEAT_CONT \\
 #       --present-out $OUT/r_ --present-every 1
 #
 # MEASURED 2026-10-13, and do not assume it: this replay is NOT byte-faithful to
@@ -660,7 +707,7 @@ cat >> "$OUT/repro.input" <<EOF
 #   cd "$PWD" && SDB_TRACE=1 ./build-cycle/nes_game "$ROM" \\
 #       --load-state $OUT/state.bin --frames $REC_FRAMES \
 #       --input $OUT/repro.input --ram-init zeros \\
-#       --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG \
+#       --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG$CHEAT_CONT \
 #       --save-state $P_MEM:$OUT/replay.bin
 #
 #   python3 tools/state/state_check.py $OUT
@@ -717,7 +764,7 @@ echo
 echo "Replay it with:"
 echo "  SDB_TRACE=1 ./build-cycle/nes_game \"$ROM\" \\"
 echo "      --frames $REC_FRAMES --input $OUT/repro.input --ram-init zeros \\"
-echo "      --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG \\"
+echo "      --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG$CHEAT_CONT \\"
 echo "      --present-out $OUT/r_ --present-every 1 2> $OUT/replay.log"
 
 if [ "$ANCHOR_OK" = "1" ]; then
@@ -729,7 +776,7 @@ if [ "$ANCHOR_OK" = "1" ]; then
     echo "  SDB_TRACE=1 ./build-cycle/nes_game \"$ROM\" \\"
     echo "      --load-state $OUT/state.bin --frames $REC_FRAMES \\"
     echo "      --input $OUT/repro.input --ram-init zeros \\"
-    echo "      --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG \\"
+    echo "      --mods-root $OUT/mods $WS_FLAG$EXTRA_FLAG$CHEAT_CONT \\"
     if [ -n "$P_MEM" ]; then
         echo "      --save-state $P_MEM:$OUT/replay.bin \\"
     fi
