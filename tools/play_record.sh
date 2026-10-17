@@ -389,14 +389,47 @@ rm -f "$OUT"/w_*.png "$OUT"/trace.log "$OUT"/repro.input \
 # the audio, because audio is generated per emulated frame. It gets worse as the
 # run goes on because the dirty-page writeback queue fills.
 #
-# At 1x the same shot is 300 KB and every frame is affordable. So this derives a
-# config that pins the display keys and changes nothing else -- in particular
-# Player1Source, because player 1 is the KEYBOARD and player 2 is the controller
-# (cyc_input.c): a config that loses that records the whole session on port 2.
-sed -e "s/^WindowScale = .*/WindowScale = $SCALE/" \
-    -e 's/^Fullscreen = .*/Fullscreen = 0/' \
-    -e 's/^VSync = .*/VSync = 0/' \
-    build-cycle/config.ini > "$OUT/config.ini"
+# At 1x the same shot is 300 KB and every frame is affordable.
+#
+# THE CONFIG IS WRITTEN FROM SCRATCH, NOT DERIVED. This used to be
+#   sed ... build-cycle/config.ini > "$OUT/config.ini"
+# which pinned three keys and inherited every other one -- and
+# build-cycle/config.ini is owned by the launcher and rewritten by it and by the
+# in-game menu. So a capture silently depended on shared mutable state that
+# nothing in the capture recorded: toggle LinearFilter in the launcher and every
+# LATER capture is a different picture, for a reason that has nothing to do with
+# the game. The whole point of SDB_SCALE / SDB_MODS / SDB_ASPECT is that the
+# capture is a function of its parameters; deriving the pins from a file the
+# launcher owns puts that back.
+#
+# So every key the capture depends on is pinned here, explicitly, and nothing is
+# inherited. What is NOT listed -- Player1Source and the bindings -- comes from
+# cyc_bindings_default (cyc_input.c), which is already the arrangement the old
+# derivation was preserving: player 1 on the KEYBOARD, player 2 on the
+# controller, A=Z B=X Select=\ Start=Return arrows. Losing Player1Source used to
+# be the trap here -- a config without it records the whole session on port 2
+# and the guest sees nothing -- and that cannot happen now, because the default
+# IS 1.
+#
+# IntegerScale and LinearFilter are pinned too, and they were the live risk:
+# LinearFilter changes the captured image directly, and neither was pinned
+# before. HdPackEnabled is off so a texture pack found on the machine cannot
+# change the capture either.
+#
+# The file you find in tmp/<name>/ afterwards is LONGER than this: the host saves
+# the whole settings set on exit, so the pins sit at the top and every default
+# the host filled in is spelled out below them. That is worth having -- the
+# capture then records the complete machine it was made on rather than the six
+# keys somebody remembered to pin.
+cat > "$OUT/config.ini" <<EOF
+[Display]
+WindowScale = $SCALE
+Fullscreen = 0
+IntegerScale = 0
+LinearFilter = 0
+VSync = 0
+HdPackEnabled = 0
+EOF
 
 # A private copy of the catalog. build-cycle/mods/state.toml is SHARED MUTABLE
 # state, and two concurrent runs can leave a feature enabled=false, which makes
