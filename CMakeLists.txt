@@ -9,7 +9,10 @@
 #   - project(... C CXX)                      the mod runtime is C++
 #   - nesrecomp_add_cycle_game(... MODS GAME_ID <id>)   launcher's Mods screen
 #   - ... HOST_EXTRAS src/sdb_host_extras.c    the no-sprite-limit mod
+#         src/sdb_cheats.c       libretro .cht cheats (a separate unit: it
+#                                writes guest RAM, the other three do not)
 #   - a post-build copy of mods/ beside the executable (preloaded packages)
+#   - ... and of cheats/, for the same reason RetroArch keeps a cheats/ dir
 cmake_minimum_required(VERSION 3.20)
 project(NESRecompCycleGame C CXX)
 
@@ -45,6 +48,7 @@ nesrecomp_add_cycle_game(nes_game
     MODS
     GAME_ID "${NESRECOMP_GAME_ID}"
     HOST_EXTRAS "${CMAKE_CURRENT_LIST_DIR}/src/sdb_host_extras.c"
+               "${CMAKE_CURRENT_LIST_DIR}/src/sdb_cheats.c"
     ${options})
 
 # The mod catalog lives beside the executable. Preload the shipped packages so
@@ -52,4 +56,6 @@ nesrecomp_add_cycle_game(nes_game
 add_custom_command(TARGET nes_game POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
         "${CMAKE_CURRENT_LIST_DIR}/mods" "$<TARGET_FILE_DIR:nes_game>/mods"
-    COMMENT "Preloading mod packages beside nes_game")
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+        "${CMAKE_CURRENT_LIST_DIR}/cheats" "$<TARGET_FILE_DIR:nes_game>/cheats"
+    COMMENT "Preloading mod packages and cheats beside nes_game")

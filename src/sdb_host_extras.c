@@ -65,6 +65,7 @@
 
 #include "mod_function_hooks.h"
 #include "mod_runtime.h"
+#include "sdb_cheats.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2199,6 +2200,18 @@ static void sdb_frame_begin(void *ctx)
     s_margin_frames++;
 }
 
+/* Non-const: menu_items / menu_item_count / menu_callbacks depend on the cheat
+ * file, which is not read until the machine is powered on, and a static
+ * initialiser cannot call a function. sdb_power_on fills those three, which is
+ * why this is a tentative definition with the real one at the bottom of the
+ * file, next to the callbacks it names.
+ *
+ * recomp-ui derives its section list from the `section` string on each item, so
+ * a "Cheats" section appears with no engine and no recomp-ui change -- and a
+ * game that declares no items gets no section at all, which is why this is safe
+ * to be generic about. */
+static CycHostExtras SDB_EXTRAS;
+
 static void sdb_power_on(void *ctx)
 {
     (void)ctx;
@@ -2227,6 +2240,7 @@ static void sdb_power_on(void *ctx)
     s_frame = 0;
     const char *t = getenv("SDB_TRACE");
     s_trace = t && t[0] == '1';
+    sdb_cheats_set_trace(s_trace);
     const char *c = getenv("SDB_TRACE_CAPTURES");
     if (c && c[0]) {
         long a = 0, b = 0;
@@ -2238,9 +2252,45 @@ static void sdb_power_on(void *ctx)
         if (sscanf(j, "%ld-%ld", &a, &b) == 2) { s_json_from = a; s_json_to = b; }
         else fprintf(stderr, "sdb: SDB_TRACE_JSON wants <from>-<to>, got %s\n", j);
     }
+    /* Re-arm the ROM read substitutions: a reset restored the image, and a
+     * Game Genie code's compare is only meaningful against what is mapped now.
+     * Then hand the rows to the menu, which is the only reason they exist. */
+    sdb_cheats_power_on();
+    {
+        size_t n = 0;
+        SDB_EXTRAS.menu_items = sdb_cheats_menu_items(&n);
+        SDB_EXTRAS.menu_item_count = n;
+        SDB_EXTRAS.menu_callbacks = sdb_cheats_menu_callbacks();
+    }
+}
+
+/* A frame finished, whether or not it was presented - the host's documented
+ * place for per-frame work. This is where the freezes land. */
+static void sdb_frame_end(void *ctx)
+{
+    (void)ctx;
+    sdb_cheats_frame_end();
 }
 
 /* ---- mod activation ---- */
+
+/* Cheats are opt-in twice over: the package feature, and then a cheat file
+ * with at least one cheat ENABLED in it. A .cht whose every entry says
+ * enable = false - which is how the libretro database ships, so that a player
+ * chooses - therefore loads and arms nothing, and we say so rather than
+ * leaving the player wondering why a Mods-screen toggle did nothing.
+ *
+ * The CLI is the other way in and needs no package: --cheat / --cheats run
+ * whether or not the feature is selected, the same asymmetry --widescreen has. */
+static void sdb_cheats_enable(void)
+{
+    sdb_cheats_load_default();
+}
+
+static void sdb_cheats_disable(void)
+{
+    sdb_cheats_option("--no-cheats", NULL);
+}
 
 static const char *const SDB_HOOK_IDS[] = {
     "super-dodgeball.oam.b5-8116",
@@ -2411,6 +2461,9 @@ static const CycHostOption SDB_OPTIONS[] = {
     { "--overscan", false, "drop the blank scanlines a CRT hid at the top and bottom" },
     { "--margin-sprites", true, "background-only widescreen margins: do NOT draw the players the game culled off-screen (default is to draw them)" },
     { "--record-input", true, "record the live controller to an --input vector as you play, for replaying headless afterwards" },
+    { "--cheat", true, "arm a libretro cheat code now, e.g. --cheat 058B:FF; repeat, or join several with ';'" },
+    { "--cheats", true, "load a RetroArch .cht cheat file (supersedes any --cheat already given)" },
+    { "--no-cheats", false, "drop every loaded cheat and restore stock RAM" },
 };
 
 /* ------------------------------------------------------------------ *
@@ -3649,17 +3702,28 @@ static bool sdb_option(void *ctx, const char *name, const char *value)
         if (s_rec) sdb_rec_close();          /* a second one replaces the first */
         return sdb_rec_start(value);
     }
+    {
+        /* Cheats are a separate translation unit; -1 means "not ours". Order
+         * matters: an option given on the command line has to beat the launcher's
+         * saved selection, and this runs after the mods activate. */
+        int rc = sdb_cheats_option(name, value);
+        if (rc >= 0) return rc != 0;
+    }
     return false;
 }
 
-static const CycHostExtras SDB_EXTRAS = {
+/* The real definition, here rather than at the forward declaration so
+ * sizeof SDB_OPTIONS sees a complete type. */
+static CycHostExtras SDB_EXTRAS = {
     .present = sdb_present,
     .power_on = sdb_power_on,
     .frame_begin = sdb_frame_begin,
+    .frame_end = sdb_frame_end,
     .input = sdb_input,
     .options = SDB_OPTIONS,
     .option_count = sizeof SDB_OPTIONS / sizeof SDB_OPTIONS[0],
     .option = sdb_option,
+    .tcp_setup = sdb_cheats_tcp_setup,
 };
 
 const CycHostExtras *cyc_host_extras(void) { return &SDB_EXTRAS; }
@@ -3668,6 +3732,7 @@ const CycHostExtras *cyc_host_extras(void) { return &SDB_EXTRAS; }
 __attribute__((destructor)) static void sdb_report_at_exit(void)
 {
     sdb_ws_report();
+    sdb_cheats_report();
     sdb_rec_close();
 }
 
@@ -3699,9 +3764,11 @@ static void register_sdb_mods(void)
     if (!nes_mod_register_activation_plugin("super-dodgeball.character-flicker", sdb_enable) ||
         !nes_mod_register_activation_plugin("super-dodgeball.ppu-overclock", sdb_oc_enable) ||
         !nes_mod_register_activation_plugin("super-dodgeball.widescreen", sdb_ws_enable) ||
+        !nes_mod_register_activation_plugin("super-dodgeball.cheats", sdb_cheats_enable) ||
         !nes_mod_register_reset_callback(sdb_disable) ||
         !nes_mod_register_reset_callback(sdb_oc_disable) ||
-        !nes_mod_register_reset_callback(sdb_ws_disable))
+        !nes_mod_register_reset_callback(sdb_ws_disable) ||
+        !nes_mod_register_reset_callback(sdb_cheats_disable))
         fprintf(stderr, "sdb: mod registration failed\n");
     for (unsigned i = 0; i < sizeof sites / sizeof sites[0]; i++)
         if (!nes_mod_register_function_entry_plugin(SDB_HOOK_IDS[i], sites[i].addr, sites[i].fn))

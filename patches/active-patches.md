@@ -11,6 +11,70 @@ was refused, but it must not change behaviour for a game that did not ask for
 it. These are meant to become upstream PRs, so a reviewer should be able to
 read the diff and see that no existing title moves.
 
+## 008_rom_read_substitution.patch (active 2026-10-17)
+
+**What:** `cyc_mod_set_rom_read_override(addr, value)` and a table consulted on
+every ROM-space CPU read. `hw_rom_read_override()` is called from `hw_bus_read()`
+and from `hw_read_rom()`.
+
+**Why written:** a Game Genie code changes the *value* the CPU reads at a ROM
+address — that is how it patches a game's own code without rewriting the image.
+The cycle backend could not do that at all: `cyc_mod_peek()` reads *without*
+intercepting, and `hw_code_watch` sees stores only. So a game that wanted to load
+a `.cht` file had no way to honour the Game Genie codes in it.
+
+**Two sites, and one of them is the whole reason.** `hw_bus_read()` covers a
+byte the recompiler left computed at run time; `hw_read_rom()` covers one it
+folded to a constant. Over Super Dodge Ball's generated cycle code that is **1405
+`cpu_read()` against 3327 `cpu_read_rom()`** — 70% of PRG reads are folded, so a
+hook on `hw_bus_read()` alone would be blind to most of the ROM and would look
+like it worked. Both sites already called `hw_cart_cpu_read_snoop()`, which is why
+these are the two lines to touch.
+
+**What it cannot reach, and why no read hook ever could:** what the recompiler
+has already turned into C. An opcode is a `goto`, an address operand is a
+compile-time constant (`recompiler/src/cyc_codegen.c`). So a substitution changes
+the constants a game compares against and the data it reads out of a ROM table,
+and cannot retarget an instruction. Retargeting needs a codegen change, not this.
+
+**The patch's own message names no file in this repository.** It is written to
+stand alone for an upstream reviewer, so everything it cites
+(`cyc_mod_peek`, `hw_code_watch`, `hw_bus_read`, `hw_read_rom`,
+`hw_cart_cpu_read_snoop`, `cyc_mod_set_ppu_write_hook`,
+`recompiler/src/cyc_codegen.c`) exists in the submodule, and its verification is
+described against the API rather than against this project's CLI flags or
+vectors. Anything game-specific lives here instead — which is why this entry
+duplicates the detail, deliberately.
+
+**Blast radius: none for any game without a cheat.**
+`cyc_mod_rom_read_overrides` is NULL until something calls the setter, and
+`hw_rom_read_override()` returns on it, so the added cost on the hottest path in
+the machine is one load and a branch. Overrides are host policy, not machine
+state, and are not serialized into a save state — the same position as
+`cyc_mod_set_ppu_write_hook`, and the right one: a state records the machine, and
+a cheat applies to whatever machine is loaded.
+
+**Verified** (in the game that needed it; `tools/cheats/README.md`, `src/sdb_cheats.c`):
+- cheats **off** is byte-identical to the build before this patch — 600/600
+  frames over `sdb_throw.input`, `cycles=17865922 native_cycles=13225160
+  (74.0%)`, every frame's trace/mem/PC/register hash equal, re-checked after
+  rebuilding the tree from pristine + 006 + 008.
+- the RAM path lands exactly: `--cheat 058B:FF` leaves `$058B = $FF` at frame
+  900, `--cheat 0019:8F` leaves `$0019 = $8F`, with 110 downstream bytes differing
+  because the guest then computes something different.
+- the substitution reaches a **folded** read: `--cheat 8048:FF` changes guest
+  state against a stock control over the same 300 frames.
+- the decoder agrees with the raw spelling: the Game Genie code for `$8048=$FF`
+  gives output byte-identical to `--cheat 8048:FF`.
+
+The substitution is applied *after* `hw_cart_cpu_read_snoop()`, so a cheat wins
+over the board. A cheat the mapper can undo is not a cheat.
+
+**Afterlife: propose upstream.** Cheat support is not game-specific and the
+API is deliberately game-agnostic. Upstream would likely also want the compare
+byte honoured per-read rather than once at arm time, and a way to reach a folded
+*opcode* — but the latter is a codegen question, not a bus one.
+
 ## 007_window_vsync.patch (active 2026-10-12)
 
 **What:** VSync as a launcher Display setting. `CycSettings` gains `[Display]

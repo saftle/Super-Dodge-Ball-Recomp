@@ -83,6 +83,15 @@
 #                     environment is untouched)
 #   SDB_LAUNCHER    1 keeps the recomp-ui launcher; 0 skips it  (default 0)
 #   SDB_UNCAPPED    1 runs as fast as the machine can    (default 0, frame-paced)
+#   SDB_TCP         port for the host's debug server, so a tap can sample the
+#                   RUNNING WINDOW's RAM (default: off). The windowed host has no
+#                   --frame-log -- that is the headless host -- so capturing RAM
+#                   where it was made means asking the live window over this
+#                   port. Worth it whenever the question is about machine state:
+#                   a headless replay of this vector is a DIFFERENT machine from
+#                   frame 4 (see the replay note this script appends), so a diff
+#                   taken there is a diff of the wrong thing.
+#                       tools/cheats/ram_tap.py --port <port> --out tmp/<name>/ram.csv &
 #
 # WHY --ram-init zeros is passed HERE and not only in the replay: the flag does
 # not imply headless (cyc_host.c:1044), so the windowed run can take it too --
@@ -165,6 +174,7 @@ SHOT_EVERY="${SDB_SHOT_EVERY:-1}"
 SCALE="${SDB_SCALE:-1}"
 LAUNCHER="${SDB_LAUNCHER:-0}"
 UNCAPPED="${SDB_UNCAPPED:-0}"
+TCP="${SDB_TCP:-}"
 
 # --uncapped is rejected by the engine unless --exit-after is positive
 # (cyc_sdl.c:1238), so the two are mutually exclusive. Fail here rather than let
@@ -300,6 +310,12 @@ echo "    vector  -> $OUT/repro.input"
 echo "    captures-> $CAPTURES (sdbw/sdbc/sdbv/sdbb/sdbp in trace.log)"
 echo "    trace   -> $OUT/trace.log"
 echo "    shots   -> $OUT/w_<frame>.png (every $SHOT_EVERY)"
+if [ -n "$TCP" ]; then
+    echo "    tcp     -> 127.0.0.1:$TCP (a RAM tap can sample this live window)"
+    echo
+    echo "Start the tap in another terminal, in either order -- it waits for the port:"
+    echo "  python3 tools/cheats/ram_tap.py --port $TCP --out $OUT/ram.csv &"
+fi
 echo
 echo "Play. Close the window (or let --exit-after stop it) when you have it."
 echo
@@ -336,6 +352,7 @@ ARGS=( "$ROM"
 if [ "$WS_ON" = "true" ]; then ARGS+=( --widescreen "$ASPECT" ); fi
 if [ "$UNLIMITED" != "1" ]; then ARGS+=( --exit-after "$FRAMES" ); fi
 if [ "$UNCAPPED" = "1" ]; then ARGS+=( --uncapped ); fi
+if [ -n "$TCP" ]; then ARGS+=( --tcp "$TCP" ); fi
 
 set +e
 SDB_TRACE=1 SDB_TRACE_CAPTURES="$CAPTURES" \

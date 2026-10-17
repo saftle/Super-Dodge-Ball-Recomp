@@ -1,0 +1,172 @@
+Subject: [PATCH] cyc: a ROM read override, so a trusted mod can patch what the CPU reads
+
+A Game Genie code changes the VALUE the CPU reads at a ROM address, which is how
+it patches a game's own code without rewriting the image, and it is the one cheat
+primitive this backend could not express: cyc_mod_peek() reads WITHOUT
+intercepting, and the compiled-code write watch (hw_code_watch) only sees
+stores. A trusted mod wanting to honour such a code had nowhere to put it.
+
+Two sites, and both are needed. hw_bus_read() covers a byte the recompiler left
+computed at run time; hw_read_rom() covers one it folded to a constant, and the
+folded ones are the majority: counting over one game's generated cycle code
+(mapper 1, 128 KB PRG) gives 1405 cpu_read() against 3327 cpu_read_rom(), so
+70% of PRG reads would be invisible to a hook on hw_bus_read() alone. Both
+already called hw_cart_cpu_read_snoop(), which is why these are the two lines to
+change.
+
+What this cannot reach, and no read hook can: what the recompiler has already
+turned into C. An opcode is a goto and an address operand is a compile-time
+constant (recompiler/src/cyc_codegen.c), so a substitution changes the constants
+a game compares against and the data it reads out of a ROM table, and cannot
+retarget an instruction. A caller that needs to change WHICH address is read
+has to change the code generator, not this.
+
+Blast radius: none for a game that has not asked for one.
+cyc_mod_rom_read_overrides is NULL until cyc_mod_set_rom_read_override() is
+called, and hw_rom_read_override() returns early on it, so the cost on the
+hottest path in the machine is one load and a branch. Overrides are host policy
+rather than machine state and are not serialized into a save state, which is
+the right way round -- a state records the machine, and an override applies to
+whatever machine is loaded -- and matches cyc_mod_set_ppu_write_hook, which is
+host policy for the same reason.
+
+Verified against a game-side consumer of the new API, on a mapper 1 title:
+
+- with nothing registered, a 600-frame run is byte-identical to the same build
+  without this patch: the total cycle count, the native share, and a per-frame
+  hash of the registers, CPU RAM, palette and OAM all compare equal.
+- an override reaches a FOLDED read: an entry at an address whose byte the
+  recompiler folded to a constant changes guest state against a stock control
+  over the same 300 frames.
+- the two spellings of one substitution agree: setting an address/value pair
+  directly, and deriving the same pair from a Game Genie code, produce
+  byte-identical output over 300 frames.
+- setting and clearing at run time take effect from the next frame in both
+  directions, so a host can toggle one without a reset.
+
+The substitution is applied after hw_cart_cpu_read_snoop(), so an override wins
+over the board. A cheat the mapper can undo is not a cheat.
+
+diff --git a/runner/cyc/cyc_mod.c b/runner/cyc/cyc_mod.c
+index bc764ca..8c85ce2 100644
+--- a/runner/cyc/cyc_mod.c
++++ b/runner/cyc/cyc_mod.c
+@@ -23,6 +23,37 @@
+  * like everything else. */
+ #define RETURN_PC 0x5FFFu
+ 
++/* ---- ROM read substitution (cyc_mod.h) ----
++ * A cheat set is a handful of entries at most, so a linear scan behind a NULL
++ * guard beats anything indexed: hw_machine.c calls this once per ROM read, and
++ * for every game that has not asked for a cheat it is one load and a branch. */
++#define CYC_MOD_READ_OVERRIDES_MAX 64
++static CycModReadOverride read_overrides[CYC_MOD_READ_OVERRIDES_MAX];
++static unsigned read_override_count;
++const CycModReadOverride *cyc_mod_rom_read_overrides;
++
++unsigned cyc_mod_rom_read_override_count(void) { return read_override_count; }
++
++bool cyc_mod_set_rom_read_override(uint16_t addr, uint8_t value)
++{
++    if (addr < 0x8000) return false;
++    for (unsigned i = 0; i < read_override_count; i++) {
++        if (read_overrides[i].addr == addr) { read_overrides[i].value = value; return true; }
++    }
++    if (read_override_count >= CYC_MOD_READ_OVERRIDES_MAX) return false;
++    read_overrides[read_override_count].addr = addr;
++    read_overrides[read_override_count].value = value;
++    read_override_count++;
++    cyc_mod_rom_read_overrides = read_overrides;
++    return true;
++}
++
++void cyc_mod_clear_rom_read_overrides(void)
++{
++    read_override_count = 0;
++    cyc_mod_rom_read_overrides = NULL;
++}
++
+ bool cyc_background_enabled;
+ uint8_t cyc_background_pipe[4];
+ static uint16_t background_frame[256*240];
+diff --git a/runner/cyc/cyc_mod.h b/runner/cyc/cyc_mod.h
+index f101555..df441cb 100644
+--- a/runner/cyc/cyc_mod.h
++++ b/runner/cyc/cyc_mod.h
+@@ -60,6 +60,33 @@ uint8_t cyc_mod_peek(uint16_t addr);
+ bool    cyc_mod_peek_ok(uint16_t addr, uint8_t *value);
+ bool    cyc_mod_poke(uint16_t addr, uint8_t value);
+ 
++/* ---- ROM read substitution (Game Genie / code-patching cheats) ----
++ *
++ * A Game Genie code changes the VALUE the CPU reads at an address, which is how
++ * it patches a game's own code without rewriting the image. Both CPU read paths
++ * consult this: hw_bus_read() for a byte the recompiler left computed at run
++ * time, and hw_read_rom() for one it folded to a constant, so one override
++ * applies whichever way the address happens to be read.
++ *
++ * This substitutes on the value the bus delivers, and cannot reach what the
++ * recompiler already turned into C: an opcode is a goto and an address operand
++ * is a compile-time constant (recompiler/src/cyc_codegen.c). Immediates and
++ * data operands are read at run time, so those are what it can change.
++ *
++ * Host policy, not machine state: overrides are not serialized, and the host
++ * tears them down with cyc_mod_clear_rom_read_overrides(). Empty (NULL) unless
++ * a game sets one, so every other title pays a load and a branch per ROM read. */
++typedef struct {
++    uint16_t addr;   /* $8000-$FFFF */
++    uint8_t  value;
++} CycModReadOverride;
++extern const CycModReadOverride *cyc_mod_rom_read_overrides;
++unsigned cyc_mod_rom_read_override_count(void);
++/* Adds or replaces the override for addr. False when addr is not ROM, or the
++ * table is full (count tells you how full; CYC_MOD_READ_OVERRIDES_MAX). */
++bool cyc_mod_set_rom_read_override(uint16_t addr, uint8_t value);
++void cyc_mod_clear_rom_read_overrides(void);
++
+ /* Optional trusted content tools. Obtaining writable PRG disables generated
+  * ROM dispatch until another image is loaded: generated opcodes/operands and
+  * folded NROM data may otherwise disagree with the edited image (also from
+diff --git a/runner/cyc/hw_machine.c b/runner/cyc/hw_machine.c
+index 7093d22..60c9899 100644
+--- a/runner/cyc/hw_machine.c
++++ b/runner/cyc/hw_machine.c
+@@ -9,6 +9,7 @@
+ #include "hw_internal.h"
+ 
+ #include "cyc_core.h"
++#include "cyc_mod.h"
+ #include "cyc_ring.h"
+ #include "cyc_trace.h"
+ #include "hw.h"
+@@ -203,9 +204,22 @@ uint8_t hw_read(uint16_t addr)
+     return hw_bus_read(addr);
+ }
+ 
++/* A cheat's read substitution (cyc_mod.h), applied last so it wins over the
++ * board: a cheat the mapper can undo is not a cheat. Empty for every game that
++ * has not asked for one, so this costs a load and a branch per ROM read. */
++static inline uint8_t hw_rom_read_override(uint16_t addr, uint8_t value)
++{
++    const CycModReadOverride *t = cyc_mod_rom_read_overrides;
++    if (!t) return value;
++    for (unsigned i = 0, n = cyc_mod_rom_read_override_count(); i < n; i++)
++        if (t[i].addr == addr) return t[i].value;
++    return value;
++}
++
+ uint8_t hw_read_rom(uint16_t addr, uint8_t value)
+ {
+     hw_cart_cpu_read_snoop(addr,value);
++    value = hw_rom_read_override(addr, value);
+     hw.data_driven = 1;
+     hw.data_bus = hw.internal_bus = value;
+     if (cyc_trace_enabled) cyc_trace_access(addr, value, false);
+@@ -254,6 +268,7 @@ uint8_t hw_bus_read(uint16_t addr)
+         hw.data_bus = hw_cart_prg_read(addr);
+         hw.data_driven = !(hw_cart.prg_off[addr>>12&7]&MMC5_PRG_OPEN);
+         hw_cart_cpu_read_snoop(addr,hw.data_bus);
++        hw.data_bus = hw_rom_read_override(addr,hw.data_bus);
+     } else if (addr < 0x2000) {
+         hw.data_bus = hw.ram[addr & 0x7FF];
+         hw.data_driven = 1;

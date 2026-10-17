@@ -52,6 +52,43 @@ Copyright Sam Lantinga and contributors.
 legacy runner and apply to nothing; they are used under the same PolyForm
 Noncommercial terms. See `patches/README.md`.
 
+**libretro-database**, the cheat-code collection
+<https://github.com/libretro/libretro-database>. Its
+`Super Dodge Ball (USA).cht` supplied the thirteen entries in
+`cheats/Super Dodge Ball (USA).cht`; ours also carries codes written for this
+project, and each entry says which is which. **The upstream project's licence is
+CC BY-SA 4.0** — its only licence file, and not GPL — recorded here as a fact
+about *that project*. It is not a claim over our file: a cheat code is a short
+functional instruction ("hold this address at this value") with no expressive
+content of its own, and the file is ours in part. Nothing else from that
+repository is used or re-hosted, and no file of theirs is imported into `src/`.
+
+Its own project notes the cheat files are auto-generated and untested, which is
+why the entries here are labelled unverified rather than presented as working
+codes.
+
+**Cheat formats, decoders, and why no GPL source is in the tree.** The obvious
+references for this work are GPL — RetroArch (`cheat_manager.c`, GPL-3.0) and
+libretro-fceumm (`src/cheat.c`, GPL-2.0) — and this project is PolyForm
+Noncommercial, so a transcribed GPL routine would be a problem for the whole
+repository rather than for one file. `src/sdb_cheats.c` therefore implements
+published *specifications*, not those implementations:
+
+- the **Game Genie** decoder implements the Code Masters / Galoob **device's code
+  encoding**, per the published technical notes at
+  <https://tuxnes.sourceforge.net/gamegenie.html> (the alphabet and the three
+  formulas are quoted in the source, along with their provenance);
+- the **Pro Action Replay / GameShark** decoder implements that code layout's own
+  convention of discarding the leading byte;
+- the **`.cht` parser** implements the documented RetroArch file layout.
+
+A file format and a code encoding are not copyrightable, and implementing a
+published scheme is not a derivative work of whichever project also implements
+it. Behaviour is verified rather than assumed: the Game Genie decoder's output is
+compared against the technical notes' own worked examples (`GOSSIP` →
+`$D1DD`/`$14`, `ZEXPYGLA` → `$94A7`/`$02`/`$03`), and against the raw `AAAA:VV`
+spelling for the same address, over a full run.
+
 ## Game content and rights holders
 
 This repository contains no Super Dodge Ball ROM and no assets extracted from

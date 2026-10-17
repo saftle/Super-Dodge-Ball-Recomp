@@ -3892,3 +3892,118 @@ the two halves become separately visible at 721. Same shape as the right bug, on
 boundary over, and untouched.
 
 **Also still open from §26:** the menu ghost (plan.md 16).
+
+## 32. Cheats: the `.cht` engine, the team's memory layout, and four refuted ways to win a stage
+
+The request was a cheat for "instant win, so I can reach the next stage for
+testing". What came out is a working libretro `.cht` engine (its own section
+below), a map of the game's team state, and a negative result about the win that
+is worth more than a cheat would have been.
+
+### The engine, and why `.cht`
+
+The cycle backend had no cheat support of any kind. `cyc_mod_peek()` reads
+*without* intercepting and `hw_code_watch` sees stores only, so a substitution on
+a value the CPU reads was inexpressible — which is the whole of what a Game Genie
+code is. That needed `patches/008`.
+
+`.cht` is RetroArch's format and is the one worth implementing: a file that works
+in a NES libretro core works here, so **libretro-database's 13 codes for this ROM
+load unchanged**, which makes the database a source of codes rather than just ours.
+
+All four spellings implemented and verified — `AAAA:VV`, `AAAA?CC:VV`, 8-hex
+Pro Action Replay, and 6/8-character Game Genie. Measured: the freeze lands
+exactly (`$058B = $FF`, `$0019 = $8F` at frame 900, 110 downstream bytes differing
+because the guest then computes something different), the conditional fires only
+while its compare holds, the PAR form resolves, and the Game Genie code for
+`$8048 = $FF` is **byte-identical over 300 frames** to the raw `8048:FF` spelling.
+
+**Two engine facts worth knowing, both measured rather than assumed.** A freeze
+writes its byte *every frame*, so switching it off has to put something back —
+merely stopping the writes leaves the last value in RAM forever, and `$06AE` (the
+captain-face code) is loaded once and never rewritten, so the face stayed modified
+with the row reading `Off`. And the restore point must be captured immediately
+before the first write that clobbers it, **not** when the cheat is armed: a `.cht`
+entry shipping `enable = true` arms at power-on while the byte still holds whatever
+power-on left there, which is not what the game had.
+
+### The team's memory layout
+
+Discovered from a RAM tap of a recorded stage win, and the database's three
+"P2 No Energy" addresses turn out to be three members of a six-member family:
+
+- **six members a side, stride `$38`**, P1 based at `$058B`, P2 at `$043B`
+  (offset `$150`), and the family **stops cleanly** — `$02EB` and below change
+  54–118 times a match and are different data;
+- the database's `$058B/$0553/$051B` and `$043B/$0403/$03CB` are members 1–3 of
+  those two families. Its stride is `$38`, not the `$88` the arithmetic suggests
+  at a glance;
+- P1's six bytes each changed **once** in 3651 frames; P2's changed 5–6 times as
+  they took hits. Consistent with energy, and consistent with the database's
+  claim that `0` means defeated.
+
+**Two stage counters, both stepping per stage:** `$007A` and `$018A`, each
+`$00 → $01 → $02`. Forcing them is *not* a stage skip — freezing `$007A` at `$02`
+leaves the course alone and only swaps the roster the HUD reads (it shows
+JAMES/SCOTT/TERRY/HENRY on the *stadium*), which is itself a clean confirmation
+that the counter steers team data without steering the stage load.
+
+**The match clock is `$0754`**, counting down one unit per ~49 frames and
+reaching zero at frame 2809 of the recorded win.
+
+### The win: four hypotheses, all refuted
+
+| attempt | result |
+|---|---|
+| freeze all six P2 energy bytes at 0 | bytes hold; the match plays on |
+| **one-shot** those same bytes instead | fires; the match plays on |
+| freeze `$0754` at 0 | the match plays on |
+| force `$007A` / `$018A` to 2 | roster changes, course does not |
+
+**And one that was refuted by measurement rather than by trying:** a brute-force
+search of the 756 bytes the game writes during a match. A count over the ROM's
+generated code found no strictly monotonic countdown anywhere in the 2048 bytes,
+the apparent ones are wrap-around counters (`$FA → $00`), and `$0535` — the only
+byte stepping purely by +1 — ticks every 5 frames *straight through* the win
+without reacting to it. At 14.6s a trial that is three hours, and the evidence
+says it would find nothing. Not run.
+
+### What actually explains the four failures
+
+One measurement reframes all of them. Replaying the recorded vector with **all
+input stripped from frame 700**, `$0754` still counts down and hits zero at
+**frame 2809 — the same frame**. So the match is a **fixed ~37-second scripted
+sequence**, not something you win early: there is no early exit, and a freeze
+cannot help because a freeze removes the *transition* a comparison watches for.
+That one idea explains all four failures, rather than four unrelated mistakes.
+
+But the win check is real: in the same no-input run `$018A` and `$007A` **never
+moved**. The game runs the match to its end regardless and *then* decides whether
+you advance. So "instant win" cannot mean "win in five seconds" — it can only mean
+**skipping the match**, which means jumping a state machine rather than satisfying
+a comparison.
+
+**The structural reason RAM poking cannot reach it:** `$0754` and `$0532` have
+**zero occurrences as operands anywhere in the ROM**. The game does not address
+that state directly; it reaches it through an indirect pointer, presumably a
+struct base in zero page plus a field offset. So "find the instruction that touches
+`$0754`" fails at step one. (The exception is `$018A`, referenced once, as
+`LDA $018A,X` at `$90B7`.) Getting to the real win check means resolving the
+pointer, then reading the comparison at the code that uses it — at which point
+`patches/008`'s substitution is the right tool, because a comparison has an
+immediate operand and that operand is read at run time.
+
+**Open (plan item 17).** Nothing is cheaper, and the honest summary is that
+save states already solve the stated need — jump to any stage, no cheat, no guest
+state, nothing to go stale.
+
+### A tool that exists because of a measured trap
+
+`tools/cheats/ram_tap.py` samples RAM from the **running window** over the host's
+TCP port, because the obvious plan is the one this project has already been
+burned by: `--frame-log` is a **headless** host option, so capturing RAM where it
+was made means asking the live window, and a headless replay of a recorded
+windowed vector diverges at frame 4 (research §22). The same port carries a
+`cheat` command (`op list|on|off|offall`), which exists because the in-game menu is
+a mouse-driven widget no script can drive — and the disarm path is the half that
+shipped broken once, so without it that half had no automated gate at all.

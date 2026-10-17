@@ -69,7 +69,8 @@ It prints exactly what is missing and stops rather than failing later.
 ## What this recomp adds
 
 Three mods, all in the launcher's **Mods** screen, all **off by default**. With all
-three off the build is byte-identical to the unmodded game.
+three off the build is byte-identical to the unmodded game. Cheats are a fourth
+thing and are reached differently — see [Cheats](#cheats) below.
 
 They are ordinary mod packages — manifests in `mods/packages/`, selectable and
 deselectable at runtime. Nothing is patched into your ROM, and each section below
@@ -244,6 +245,60 @@ presentation jitter — every frame used to be presented on a host timer with a 
 milliseconds of wobble. It cannot subdivide a scroll step the guest never drew, and
 this game scrolls coarsely: 6–7 pixels in a single frame, never anything between.
 
+## Cheats
+
+Press <kbd>Esc</kbd> in game and open **Cheats**. Every code in the cheat file is
+listed with its own switch, all off to begin with; the line at the bottom says what
+the highlighted one actually does to the machine, in its own terms — `Freeze $058B
+to $FF every frame. Changes guest RAM.` — rather than repeating the file's label.
+
+Cheats use RetroArch's `.cht` format, so a cheat file written for any NES libretro
+core works here, and the codes in
+[libretro-database](https://github.com/libretro/libretro-database) load unchanged.
+Four spellings are understood:
+
+| spelling | meaning |
+|---|---|
+| `AAAA:VV` | hold that RAM address at that value |
+| `AAAA?CC:VV` | hold it, but only while it still reads the compare value |
+| 8 hex digits | Pro Action Replay / GameShark; the leading byte is discarded |
+| 6 or 8 letters | Game Genie (`APZLGITYEOXUKSVN`) |
+
+Several codes can share one entry, joined by `;`, so one line can hold a whole
+team.
+
+**This one is not hardware-accurate, and it changes the game.** An armed cheat
+writes the machine's RAM, so the guest computes different things than it would in
+real hardware, and a save state or a recorded vector made with one armed does not
+compare against a stock one. That is also why nothing is armed by default: the file
+ships with every entry off, exactly as libretro-database ships it, because a cheat
+file is a menu rather than a decision.
+
+**The thirteen codes already in the file are largely unverified.** They come from
+libretro-database and its own project describes those files as auto-generated and
+untested. Measured here: two of them land (`$058B:FF`, `$0019:8F`), two do nothing
+measurable (`$043B:00`, `$007B:80`), and the four labelled "Infinite Health
+(Possibility N)" freeze a byte that does not look like health. Treat them as a
+starting menu, not as working codes.
+
+Two limits worth knowing before writing your own. A **Game Genie** code changes the
+value the CPU *reads* out of ROM, which on a recompiled machine means it can change
+the constants the game compares against but **cannot change an instruction** — an
+opcode is already `goto` and an address operand is already a compile-time constant.
+And the twelve shipped codes are the start of the file, not all of it: write your
+own below them and the two are kept apart.
+
+From a terminal, for scripted work:
+
+```bash
+./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --cheat "058B:FF;0553:FF"
+./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" --cheats "cheats/Super Dodge Ball (USA).cht"
+```
+
+`--no-cheats` drops the set **and puts back** every byte a freeze was holding —
+switching a cheat off in the menu does the same, which is not automatic and was a
+real bug before it was one.
+
 ## Controls
 
 | NES button | Keyboard | Gamepad 1 |
@@ -354,8 +409,10 @@ by content.
 | Path | |
 |---|---|
 | [`src/game.toml`](src/game.toml) | Recompiler config — window title, discovery roots, and twelve content-keyed hook sites |
-| [`src/sdb_host_extras.c`](src/sdb_host_extras.c) | **All three mods.** The only game-specific C in the tree |
+| [`src/sdb_host_extras.c`](src/sdb_host_extras.c) | **All three mods.** Presentation and timing only — never writes the guest |
+| [`src/sdb_cheats.c`](src/sdb_cheats.c) | **The cheat engine.** Separate because it is the one thing here that writes guest RAM |
 | [`src/cycle_seeds.txt`](src/cycle_seeds.txt) | Discovery roots that make the hooked sprite emitters recompiled rather than interpreted |
+| [`cheats/`](cheats/) | The `.cht` cheat file, copied beside the executable at build time. Every entry ships off |
 | `mods/packages/` | One manifest-only package per mod, copied beside the executable at build time |
 | [`CMakeLists.txt`](CMakeLists.txt) | The game project. Wraps the engine's own project file and adds what that file cannot express, which is why the submodule stays pristine |
 | `external/nesrecomp/` | Pinned engine submodule. The tree is *expected* to be dirty — `setup.sh` applies `patches/*.patch` after every checkout |
@@ -375,9 +432,14 @@ Super Dodgeball Recomp/
 │   ├── game.toml                  # recompiler config + 12 hook sites
 │   ├── cycle_seeds.txt            # discovery roots for the hooked emitters
 │   ├── sdb_host_extras.c          # flicker / overclock / widescreen
+│   ├── sdb_cheats.c               # .cht cheats (the one thing that writes the guest)
 │   └── third_party/               # local build scratch, not shipped
+├── cheats/                        # the .cht cheat file, copied beside the executable
+│   ├── "Super Dodge Ball (USA).cht"
+│   └── README.md                  # format table + provenance
 ├── mods/packages/                 # manifest-only packages, one per mod
 │   ├── super-dodgeball.character-flicker/1.0.0/manifest.toml
+│   ├── super-dodgeball.cheats/1.0.0/manifest.toml
 │   ├── super-dodgeball.ppu-overclock/1.0.0/manifest.toml
 │   └── super-dodgeball.widescreen/1.0.0/manifest.toml
 ├── external/
@@ -424,16 +486,32 @@ ran on the interpreter — where a hook compiles, binds, and never fires. That i
 cycle count. A hook declared at an address that discovery never reached looks
 completely healthy and does nothing.
 
-**`src/sdb_host_extras.c`** is the whole of the game-specific work: the flicker
-mod's sprite capture, host-side redraw and culling override; the overclocking mod,
-which is just a value handed to the engine's existing extra-scanlines setting; and
-the widescreen compositor with its margin-sprite capture. One file, three features.
+**`src/sdb_host_extras.c`** is the flicker mod's sprite capture, host-side redraw
+and culling override; the overclocking mod, which is just a value handed to the
+engine's existing extra-scanlines setting; and the widescreen compositor with its
+margin-sprite capture. One file, three features, and none of them writes the guest —
+that is the property the whole file is built around.
+
+**`src/sdb_cheats.c`** is deliberately *not* in there. It is the one unit that does
+write guest RAM, and keeping it separate makes that boundary something you can see
+in the tree rather than something you have to infer from which half of a long file
+you happen to be reading.
 
 **`mods/packages/*/*/manifest.toml`** are declarations, not code. A `.nesmod` archive
 may not carry native code, so each package is a manifest naming features whose
 implementation is statically linked into `nes_game` and selected by a stable id.
 That is also why a package cannot carry a different licence from the code it points
 at — see [`NOTICE.md`](NOTICE.md).
+
+**The cheat decoders implement published specifications, not GPL source.** The
+obvious references for this work are RetroArch and libretro-fceumm, both copyleft,
+and this project is PolyForm Noncommercial — so a transcribed routine from either
+would be a problem for the whole repository rather than for one file. The Game
+Genie decoder follows the Code Masters/Galoob device's code encoding as published
+in the technical notes, and it is checked against that document's own worked
+examples by a gate that asks the real binary rather than a copy of the algorithm.
+Full reasoning in [`cheats/README.md`](cheats/README.md) and
+[`NOTICE.md`](NOTICE.md).
 
 ## Headless and scripted runs
 
@@ -804,7 +882,7 @@ the canonical document for constraints, verification procedures, known issues an
 every gate that has to pass before a change lands. Start here before touching
 anything.
 
-**[docs/research.md](docs/research.md)** — 28 sections of deep research: the flicker
+**[docs/research.md](docs/research.md)** — 32 sections of deep research: the flicker
 analysis and all three of its causes (§2, §2.1), the framework and how discovery
 works (§3), the NMI dispatcher and the game's fixed bank (§13), the MesenCE oracle
 (§16), PPU overclocking (§23), VSync (§24), widescreen (§25), the eleven margin-sprite
@@ -814,8 +892,9 @@ camera anchor (§28).
 **[docs/plan.md](docs/plan.md)** — the living project plan and the open-issues list,
 including the two open bugs and exactly what the next measurement should be.
 
-**[patches/active-patches.md](patches/active-patches.md)** — the two active engine
-patches, why they are strictly additive, and what they are for upstream.
+**[patches/active-patches.md](patches/active-patches.md)** — the three active engine
+patches (006, 007, 008), why they are strictly additive, and what they are for
+upstream.
 
 ## References
 
