@@ -4369,8 +4369,8 @@ static void sdb_ms_disable(void)
  * `cyc_set_extra_scanlines` -- "blank scanlines before NMI, APU paused"
  * (runner/cyc/PROJECTS.md) -- the same mechanism as MesenCE's
  * `Nes.PpuExtraScanlinesBeforeNmi` and FCEUX's post-render scanlines. Upstream
- * scopes it to MMC3; patches/006 widens the gate to MMC1, whose IRQ is
- * write-triggered at $8000/$8001 and never clocked by the PPU. Measured against
+ * scopes it to MMC3 and MMC1, whose IRQ is write-triggered at $8000/$8001
+ * and never clocked by the PPU. Measured against
  * MesenCE at 300 lines: +12.0 work-ticks per frame, and the lead grows
  * (research.md section 23).
  *

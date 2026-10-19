@@ -160,7 +160,7 @@ def main():
         return 0
     if len(results) == 2:
         print(f"\nN DIFFERS: {results}. That is an engine difference and "
-              f"belongs upstream as a PPU patch beside patches/006.")
+              "belongs upstream.")
         return 1
     return 0
 

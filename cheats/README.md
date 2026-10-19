@@ -37,13 +37,13 @@ A recompiled machine has already turned some bytes into C. An **opcode** is a
 (`recompiler/src/cyc_codegen.c`). Those bytes are not on the bus any more, so no
 read hook can reach them. Immediates and data operands *are* read at run time
 and do respond — for this ROM, 3327 folded operand reads and 1405 run-time reads
-both reach the substitution, which is why `patches/008` adds the hook at both
-sites rather than one.
+both reach the substitution, which is why the engine hooks both sites rather
+than one.
 
 So a substitution changes the constants the game compares against and the data it
 reads out of a ROM table. It cannot retarget an instruction. `src/sdb_cheats.c`
-has the long version; `patches/008_rom_read_substitution.patch` has the engine
-half.
+has the long version; the engine half is upstream now
+(`cyc_mod_set_rom_read_override()`, PR #69) — see `runner/cyc/cyc_mod.h`.
 
 ## Provenance
 

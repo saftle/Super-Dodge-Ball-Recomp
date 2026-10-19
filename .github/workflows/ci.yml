@@ -2,7 +2,7 @@ name: CI
 
 # ROM-less validation: the full game build needs a user-supplied ROM
 # (gitignored, never committed), so CI covers everything up to that point:
-# engine checkout + patch application, recompiler build, script syntax,
+# engine checkout, patch application, recompiler build, script syntax,
 # and config parsing.
 on:
   push:
@@ -16,6 +16,22 @@ jobs:
 
       - name: Init nesrecomp submodule only
         run: git submodule update --init external/nesrecomp
+
+      - name: Engine patches apply cleanly (none active today)
+        # A patch that no longer applies is a silent failure: setup.sh reports
+        # "skipped (already applied or conflicts)" and the build proceeds
+        # without it. There are no active patches right now, so this is the
+        # step that will catch the first one that does not fit.
+        run: |
+          set -e
+          shopt -s nullglob
+          patches=(patches/*.patch)
+          [ ${#patches[@]} -eq 0 ] && { echo "no active patches"; exit 0; }
+          for p in "${patches[@]}"; do
+            git -C external/nesrecomp apply --check "$p" \
+              || { echo "patch does not apply: $p" >&2; exit 1; }
+            echo "applies: $p"
+          done
 
       - name: Install build tools
         run: sudo apt-get update -q && sudo apt-get install -qy cmake ninja-build

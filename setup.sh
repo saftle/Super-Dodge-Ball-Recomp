@@ -60,9 +60,9 @@ echo "nesrecomp: $(git -C "${SCRIPT_DIR}/external/nesrecomp" rev-parse --short H
 
 # ---- Game-specific runner patches (re-applied after every submodule checkout) ----
 # Active patches live in patches/*.patch (sorted order); patches/archived/ holds
-# dormant ones that setup.sh deliberately ignores. See patches/README.md and
-# patches/active-patches.md.
-if [ -d "${SCRIPT_DIR}/patches" ]; then
+# dormant ones that setup.sh deliberately ignores. See patches/README.md.
+# There are none active: all three landed upstream (PRs #66, #67, #69).
+if ls "${SCRIPT_DIR}"/patches/*.patch >/dev/null 2>&1; then
     echo ""
     echo "Applying game patches to NESRecomp submodule..."
     cd "${SCRIPT_DIR}/external/nesrecomp"

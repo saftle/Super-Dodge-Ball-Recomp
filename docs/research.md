@@ -868,11 +868,12 @@ annotations from there).
 
 ## 10. NESRecomp Submodule Status
 
-**Tracks `mstan/nesrecomp` `origin/master` (currently `2b4fcdb`), pinned.** The
-checked-out tree is dirty exactly when an active patch is applied: `setup.sh`
-applies `patches/*.patch` after every checkout (006 PPU-overclock MMC1,
-007 window vsync — see `patches/active-patches.md`); archived legacy-runner
-patches stay unapplied. The retried-legacy 002 S-latch guard is drafted in
+**Tracks `mstan/nesrecomp` `origin/master` (currently `f15f1c4`), pinned.** The
+checked-out tree is **clean**: this project carries no active submodule patches.
+The three it used to carry — 006 PPU-overclock MMC1, 007 window VSync, 008 ROM
+read substitution — all landed upstream (PRs #66, #67, #69; see
+`patches/README.md` for what upstream changed while taking them); archived
+legacy-runner patches stay unapplied. The retried-legacy 002 S-latch guard is drafted in
 plan.md. Our game project is the repo-root `CMakeLists.txt`, which wraps the submodule's
 `runner/cyc/project.cmake` and adds `CXX` + `MODS` + `GAME_ID` + `HOST_EXTRAS` — the submodule's own
 `runner/cyc/project/CMakeLists.txt` cannot express those, which is why it stays untouched.
@@ -881,16 +882,27 @@ Upstream history includes the PPUMASK rendering fix (PR #22) and register-propag
 fixes. The cycle backend is upstream's primary path; the legacy function-level runner is "retained",
 not primary.
 
+**Five upstream PRs are this project's own work**, all under the `saftle` account:
+**#21** (the NES-to-runner PPUMASK bit translation layer, `nes_ppumask_to_runner()`,
+opt-in via `g_ppumask_translate`), **#22** (force rendering on when that layer is
+enabled — since revised upstream by `a671d53`, *"Preserve disabled PPUMASK
+rendering bits in compatibility mode"*, which removed the forcing and left the
+translation layer), and the three that used to be local submodule patches:
+**#66** MMC1 PPU overclocking, **#67** window VSync, **#69** the ROM read
+substitution. #21 and #22 touch `runner/src/runtime.c` — the **legacy
+function-level runner**, retired here in 2026-10 — so neither reaches the cycle
+backend this project plays on. The full attribution is in `NOTICE.md`.
+
 ---
 
 ## 11. Current Project Build State
 
-- **nesrecomp submodule**: `mstan/nesrecomp` `2b4fcdb` (origin/master), pinned; tree dirty only with active patches 006/007 applied — see §10
+- **nesrecomp submodule**: `mstan/nesrecomp` `f15f1c4` (origin/master), pinned; **clean tree** — no active patches (they landed upstream as #66/#67/#69) — see §10
 - **Game project**: repo-root `CMakeLists.txt` (adds `CXX`/`MODS`/`GAME_ID`/`HOST_EXTRAS`); builds `build-cycle/nes_game`
 - **Generated C code**: `build-cycle/cycle-nes_game/<rev>/generated/game_cyc*.c`, gitignored, one revision dir per ROM/config revision
 - **Builds**: `build-cycle/` only (the legacy `build/` and `build-diag/` are gone with the legacy runner)
 - **Config**: `src/game.toml` carries the display name plus twelve `[[mod_function_hook]]` sites (ten for the character-flicker mod, two for the widescreen margins) and a `cycle_seed_file`; no `extra_func`, no `force_interp`, no discovery tuning needed for the stock ROM
-- **Mods**: `super-dodgeball.character-flicker`, `super-dodgeball.ppu-overclock` and `super-dodgeball.widescreen`, all off by default; the widescreen package is **one feature** (`widescreen`, with an `aspect` choice) that also reveals the clipped left-hand columns and draws the off-screen players. Packages preloaded into `build-cycle/mods/` at build time; window picks them up via the launcher, headless needs `--mods-root build-cycle/mods`. A `state.toml` naming a feature this build does not have (e.g. one written before the overscan fold) **hard-fails the whole catalog** rather than degrading — delete it and let the launcher rewrite it. VSync is a launcher Graphics setting (patch 007), not a mod. Reproduction vector for both flicker fixes: `tas/vectors/sdb_idle.input`
+- **Mods**: `super-dodgeball.character-flicker`, `super-dodgeball.ppu-overclock` and `super-dodgeball.widescreen`, all off by default; the widescreen package is **one feature** (`widescreen`, with an `aspect` choice) that also reveals the clipped left-hand columns and draws the off-screen players. Packages preloaded into `build-cycle/mods/` at build time; window picks them up via the launcher, headless needs `--mods-root build-cycle/mods`. A `state.toml` naming a feature this build does not have (e.g. one written before the overscan fold) **hard-fails the whole catalog** rather than degrading — delete it and let the launcher rewrite it. VSync is a launcher Graphics setting (upstream PR #67), not a mod. Reproduction vector for both flicker fixes: `tas/vectors/sdb_idle.input`
 - **Native share**: ~60–77% of cycles run recompiled code, the rest via the interpreter — bit-exact either way, informational only, never a gate. `src/cycle_seeds.txt` roots the sprite emitter natively so the mod's hooks can exist there at all; total cycle count unchanged by it
 - **Verification**: 400-frame TAS byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25
 - **Venv**: `nesasm` 0.0.8 only (pip broken); system `python3` has Pillow + numpy
@@ -1058,7 +1070,7 @@ Status: input flows but the game never reacts; Start press derails. All verified
 > **Historical.** This section (and §18) documents the *legacy function-level runner*, retired
 > 2026-10-02. Every fix described below belongs to that runner and is **not** in the cycle build.
 > Kept as game-knowledge history — the NMI/tunnel/input findings transfer to mod work, and the
-> `patches/` files they mention no longer exist.
+> `patches/` files they mention are **archived**, not active.
 
 Status: Start tunnels to menus reliably (30/30 through 330/330
 frames, 0 misses, 0 BRKs): title → city → lineup → MODE MENU → skill
@@ -1087,7 +1099,8 @@ follow-on symptoms (bank-8 `$8003` miss from corrupted A at `$FF08`,
 `BRK $0001`/`$00A2`/`$0600` slides from interp garbage-wandering,
 `$90` in `$0100`, C-stack growth) were downstream of the S drift.
 
-Fix (`patches/002_interp_ram_dummy.patch`, active): in
+Fix (`patches/archived/002_interp_ram_dummy.patch`, dormant with the legacy
+runner): in
 `nes_interp_dispatch_bank`'s RAM/SRAM path, pre-push a dummy 6502-stack
 pair before `interp_run` (standing in for the missing hardware JSR push),
 strip it on exit if untouched. Terminal RTS then consumes the dummies and
@@ -1101,7 +1114,8 @@ engine was the sole imbalance source.
 `EF9F` Start branch (`JSR $FE8A`, `LDX #$FF; TXS`, `JMP $F09F`) relocates
 main into `$F09F` from inside NMI. C-calling `$F09F` never returns: the
 outer frame callback never completes, frames freeze, no render/count.
-Fix (`patches/004_nmi_tunnel_unwind.patch`, active): opt-in
+Fix (`patches/archived/004_nmi_tunnel_unwind.patch`, dormant with the legacy
+runner): opt-in
 longjmp unwind — game arms `g_tunnel_site = $EFC1`; a TXS-site marker
 (`coroutine_scheduler_setjmp`, which already exists at every
 `LDX #$FF; TXS`) reached while armed, at the site, inside NMI
@@ -1295,7 +1309,8 @@ survived it.)
 
 Upstream `runner/cyc`, built by our repo-root `CMakeLists.txt` (see §10): `build-cycle/nes_game`
 from our ROM + `src/game.toml`, windowed (`./build_and_run.sh`; headless flags imply headless).
-The guest machine runs **stock** — patches 006/007 are inert at stock settings,
+The guest machine runs **stock** — the engine's own enhancements (PPU
+overclocking, VSync) are inert at stock settings,
 and of the three mods only the flicker mod's truncation half is presentation-only
 (§2); its culling half is not, and the overclocking mod changes console timing by
 design (§23), while widescreen changes nothing at all (§25, §26).
@@ -1469,15 +1484,16 @@ long a run takes, and 0.606 s vs 0.612 s says it didn't. **Validate that a harne
 detect the effect it is looking for before concluding the effect is absent.** A negative
 result from a tool never tested against a known positive is not a negative result.
 
-### Shipping it: patch 006 + the `ppu-overclock` mod
+### Shipping it: upstream PR #66 + the `ppu-overclock` mod
 
 Our backend already implemented Mesen's mechanism, so the work was to make it
 reachable. `cyc_extra_scanlines_supported()` returned `mapper == 4` (MMC3 only)
 and `--extra-scanlines` refused with *"requires an MMC3 cartridge"* on our
 mapper-1 cart.
 
-**`patches/006_ppu_overclock_mmc1.patch`** widens that to `mapper == 1 || 4` --
-one line. The criterion is principled: the added lines are blank (rendering is
+**Upstream PR #66** widens that to `mapper == 1 || 4` --
+one line (it was `patches/006_ppu_overclock_mmc1.patch` here until it landed).
+The criterion is principled: the added lines are blank (rendering is
 off above scanline 239) and the APU is paused, so they are inert for any mapper
 whose IRQ is not PPU-clocked; in this engine only MMC3 counts PPU A12 rises,
 while MMC1 triggers its IRQ from writes to `$8000`/`$8001` bit 7. The predicate
@@ -1552,11 +1568,17 @@ agreed on why, and on what does and does not exist to fix it:
   Mesen ships Integer FPS mode for exactly this drift; RetroArch's BFI help
   documents the 60-content-on-144-panel judder.
 
-**Shipped:** patch 007 makes VSync a launcher Display setting:
+**Shipped:** upstream PR #67 makes VSync a launcher Display setting:
 `CycSettings` gains `[Display] VSync` (default off, persisted in
 `config.ini`), `cyc_ui_launcher.c` sets `gi.has_vsync = 1` — lighting up
-recomp-ui's existing Graphics row, the same one PSX uses — and `cyc_sdl.c`
-builds its renderer with `PRESENTVSYNC` when set. Guest clock untouched at
+recomp-ui's existing Graphics row, the same one PSX uses — and the renderer
+is driven at the display's refresh when set. **Upstream rewrote the
+implementation** while taking it: the renderer is created *without*
+`SDL_RENDERER_PRESENTVSYNC` and the setting is applied at run time with
+`SDL_RenderSetVSync()` (SDL 2.0.18+), so fast-forward and uncapped runs can
+turn blocking presents off, and the guest's frame deadline is decoupled from
+the display (`runner/cyc/cyc_frame_pacing.h`). Ours set the flag at renderer
+creation, which could not be undone. Guest clock untouched at
 any refresh rate — 60/120/144 Hz all just repeat finished frames as needed.
 No save-state footprint. Windowed `--exit-after 60` exit 0 both ways;
 `VSync = 1` logs the renderer line under xvfb. (This started as a
@@ -1711,6 +1733,72 @@ free instead of growing garbage margins.
 - Frame 0 pillarboxes on every mode — the background capture is not available
   until after the first frame, so there is nothing to verify against and the
   compositor declines rather than claiming a seam it did not check.
+
+### The reconstruction reads LIVE state, and that is correct here — measured
+
+The compositor reads `cyc_render_nametable()`, `cyc_render_chr()` and
+`cyc_render_palette()`, which are **live** registers. At a frame boundary the
+live state is the state the **next** frame will be drawn from, because a game
+writes its tiles, its palette and its CHR banking in vblank — the gap between
+one frame finishing and the next starting, and no host callback sits inside
+that gap. A game that rewrote its map in vblank would have the margin
+reconstructed from the wrong frame's map.
+
+**Super Dodge Ball does not, and that is a measurement, not an assumption.**
+A game that rewrote its map in vblank would have the margin reconstructed from
+the wrong frame's map — in another cartridge this problem made the
+reconstruction disagree with the machine's own background on **more than half
+the picture**, and no combination of the tile, attribute, pattern or page
+conventions fixed it: the problem was the frame, not a convention. The fix is
+an opt-in snapshot of the frame's own nametables, palette and pattern window,
+taken at dot 1 of visible line 0, with accessors that read it
+(`cyc_render_capture_frame_state()`, `cyc_render_frame_nametable/chr/palette/
+color`). **It is upstreamable as-is and not yet upstream.**
+
+Applied here as an experiment, it is a **no-op for this game**:
+
+| what | frames compared | differing |
+|---|---|---|
+| margin reconstruction, live vs frame-state, `sdb_sweep` at 16:9 | 1201 | **0** |
+| margin reconstruction, live vs frame-state, `sdb_sweep` at 32:9 | 1201 | **0** |
+| margin reconstruction, live vs frame-state, `sdb_throw` at 32:9 | 3001 | **0** |
+| flicker mod's blit, live vs frame-state CHR, `sdb_sweep` at 16:9 | 1201 | **0** |
+| flicker mod's blit, live vs frame-state CHR, `sdb_throw` at 16:9 | 3001 | **0** |
+
+**Why, measured rather than guessed.** A temporary instrument compared the live
+registers against the frame's own snapshot on every frame of a 1200-frame
+`sdb_sweep`: the **palette never differs** (0 bytes over 1200 frames — SDB's
+palette is written on 15 frames, all in the early menus), the **CHR window**
+differs on 33 frames, and the **nametable** differs on the same 33 — every one
+of them in the first 415 frames, i.e. menus and the transition into the match.
+Of those 33, exactly **one** ever reaches the compositor, and on that frame the
+seam diff was **0**. During the match itself the nametable writes are
+**idempotent**.
+
+That last word is the finding, and it came from `tools/frame_gen/vram_trace.lua`
+(this project's first `$2007`-write trace): over
+the camera-pan window the game writes **32 bytes at a time to `$2040`, `$2060`
+and `$2080` in rotation** — three rows of the nametable's top-left — every
+frame, always the same bytes. The game is redrawing a fixed decoration, not
+streaming a map, so the live nametable equals the frame's nametable and there
+is nothing stale to read.
+
+`tools/frame_gen/zp_watch.lua` then named the
+routine: **5697 of 5959 PPU writes in a 300-frame window come from PC `$D320`**
+— the game's screen builder — including all three 32-byte blocks. The
+full-page copy is `$FD1D` and the attribute table is `$FD3A`.
+
+**So the live reads stay, and the patch is not carried here.** It remains
+worth proposing upstream. What the experiment did buy is the *reason* — "the
+live reads are correct here" is now a measurement with a mechanism behind it,
+not a hope that the game happens not to rewrite its map.
+
+**The safety net is separate and was already here.** The compositor's seam
+check compares the reconstruction against `cyc_render_background()` — the
+machine's own capture — and a frame whose reconstruction differs by more than
+2% of 61440 pixels is **pillarboxed** rather than presented. A stale read
+therefore shows up as *the wide view falling back*, never as a wrong margin.
+That is why a no-op patch is a no-op rather than a silent improvement.
 
 ### Overscan: measured per game, and left side only
 
@@ -4533,7 +4621,8 @@ is worth more than a cheat would have been.
 The cycle backend had no cheat support of any kind. `cyc_mod_peek()` reads
 *without* intercepting and `hw_code_watch` sees stores only, so a substitution on
 a value the CPU reads was inexpressible — which is the whole of what a Game Genie
-code is. That needed `patches/008`.
+code is. That needed the engine's ROM read substitution (`patches/008` here, now
+upstream PR #69).
 
 `.cht` is RetroArch's format and is the one worth implementing: a file that works
 in a NES libretro core works here, so **libretro-database's 13 codes for this ROM
@@ -4545,6 +4634,26 @@ exactly (`$058B = $FF`, `$0019 = $8F` at frame 900, 110 downstream bytes differi
 because the guest then computes something different), the conditional fires only
 while its compare holds, the PAR form resolves, and the Game Genie code for
 `$8048 = $FF` is **byte-identical over 300 frames** to the raw `8048:FF` spelling.
+
+**The folded-read path, and a bug that was ours and not the engine's.** A ROM
+read reaches the bus two ways: `hw_bus_read()` for a byte the recompiler left
+computed at run time, and `hw_read_rom()` for one it folded to a constant. Over
+this ROM's generated code that is **1405 `cpu_read()` against 3327
+`cpu_read_rom()`** — 70% of PRG reads are folded — so a substitution hooked on
+the bus read alone is blind to most of the ROM *and still looks like it worked*.
+Both sites need the hook, and the folded one needs one more thing: the folded
+path (`runner/cyc/cpu6502.h`) must use `hw_read_rom()`'s **return value**. It
+did not — it called it for its side effect and returned the original folded
+constant — so a substitution on a folded read was computed and thrown away.
+
+**The symptom is not "the cheat does nothing".** It is **the same cheat
+producing two different games**: a native run and an `--interp-only` run of one
+vector disagreed, because the interpreter took the bus path (where the override
+applied) and the native run took the folded path (where it did not). Measure it
+that way — native against interpreter over the same vector — not by asking
+whether the cheat changed anything. Upstream's PR #69 carries the missing hunk;
+`--cheat 8048:FF` over `sdb_throw.input` now gives byte-identical output in
+both modes.
 
 **Two engine facts worth knowing, both measured rather than assumed.** A freeze
 writes its byte *every frame*, so switching it off has to put something back —
@@ -4618,7 +4727,7 @@ struct base in zero page plus a field offset. So "find the instruction that touc
 `$0754`" fails at step one. (The exception is `$018A`, referenced once, as
 `LDA $018A,X` at `$90B7`.) Getting to the real win check means resolving the
 pointer, then reading the comparison at the code that uses it — at which point
-`patches/008`'s substitution is the right tool, because a comparison has an
+the engine's ROM read substitution is the right tool, because a comparison has an
 immediate operand and that operand is read at run time.
 
 **Open (plan item 17).** Nothing is cheaper, and the honest summary is that

@@ -13,7 +13,7 @@ You bring the ROM. Nothing from the cartridge ships here.
 | **Playable** | title, menus, team select, and full matches end to end — throws land, damage numbers show, HUD and menus render |
 | **Verified against** | MesenCE 2.2.1 — 400 frames of RAM, OAM, palette and CIRAM byte-exact from boot · blargg CPU suite 25/25 |
 | **Mods** | 3, all **off by default** — flicker removal, widescreen with margin sprites, PPU overclocking |
-| **Engine patches** | 2, both strictly additive and on their way upstream |
+| **Engine patches** | 0 — the three this port carried are upstream now (PRs #66, #67, #69) |
 | **Open bugs** | 2, both in the flicker mod's presentation layer |
 
 Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong [here](https://github.com/saftle/Super-Dodgeball-Recomp/issues). **This port is in active development; expect rough edges.**
@@ -237,8 +237,8 @@ The Mods screen exposes the count as a slider, **0 to 262**.
 
 A toggle in the launcher's Graphics section. With it on, each present syncs to your
 display's refresh, so motion lands evenly at 60 Hz, 120 Hz or anything else.
-**Presentation only** — the guest keeps its stock clock either way. Needs
-`patches/007`, which `setup.sh` applies.
+**Presentation only** — the guest keeps its stock clock either way. Built into
+the engine (upstream PR #67), so it needs nothing from this repository.
 
 Super Dodge Ball is already 60 Hz; there is no 30→60 cap to lift. What this fixes is
 presentation jitter — every frame used to be presented on a host timer with a few
@@ -432,7 +432,7 @@ by content.
 | [`cheats/`](cheats/) | The `.cht` cheat file, copied beside the executable at build time. Every entry ships off |
 | `mods/packages/` | One manifest-only package per mod, copied beside the executable at build time |
 | [`CMakeLists.txt`](CMakeLists.txt) | The game project. Wraps the engine's own project file and adds what that file cannot express, which is why the submodule stays pristine |
-| `external/nesrecomp/` | Pinned engine submodule. The tree is *expected* to be dirty — `setup.sh` applies `patches/*.patch` after every checkout |
+| `external/nesrecomp/` | Pinned engine submodule, **pristine** — this port carries no engine patches |
 | `external/recomp-ui/` | Pinned launcher and in-game menu |
 | `external/mesence/` | MesenCE, the reference emulator |
 | `tools/` | Measurement harnesses — see [verification](#verification) |
@@ -459,7 +459,7 @@ Super Dodgeball Recomp/
 │   ├── super-dodgeball.ppu-overclock/1.0.0/manifest.toml
 │   └── super-dodgeball.widescreen/1.0.0/manifest.toml
 ├── external/
-│   ├── nesrecomp/                 # engine (pinned submodule, dirty when patched)
+│   ├── nesrecomp/                 # engine (pinned submodule, pristine)
 │   ├── recomp-ui/                 # launcher + in-game menu (pinned submodule)
 │   ├── mesence/                   # MesenCE (pinned submodule; binary fetched at setup)
 │   └── nes-test-roms/             # blargg suite (gitignored, via setup.sh)
@@ -480,7 +480,8 @@ Super Dodgeball Recomp/
 │   ├── vectors/                   # recorded input vectors
 │   └── runs/                      # per-run artefacts (gitignored)
 ├── build-cycle/                   # the build (gitignored)
-├── patches/                       # active engine patches, applied by setup.sh
+├── patches/                       # the mechanism for an engine change awaiting
+│                                  #   upstream (no active patches right now)
 ├── docs/                          # research.md, plan.md, assets/
 ├── setup.sh · build_and_run.sh · CMakeLists.txt
 ├── AGENTS.md                      # operating manual for coding agents
@@ -945,9 +946,9 @@ camera anchor (§28).
 **[docs/plan.md](docs/plan.md)** — the living project plan and the open-issues list,
 including the two open bugs and exactly what the next measurement should be.
 
-**[patches/active-patches.md](patches/active-patches.md)** — the three active engine
-patches (006, 007, 008), why they are strictly additive, and what they are for
-upstream.
+**[patches/README.md](patches/README.md)** — the mechanism for an engine change that
+still needs upstreaming, and the record of the three that landed upstream
+(PRs #66, #67, #69) with what upstream changed while taking them.
 
 ## References
 

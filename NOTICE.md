@@ -52,6 +52,30 @@ Copyright Sam Lantinga and contributors.
 legacy runner and apply to nothing; they are used under the same PolyForm
 Noncommercial terms. See `patches/README.md`.
 
+**Engine changes this project contributed.** Five upstream pull requests in
+`mstan/nesrecomp` came from this project. All of them live in
+`external/nesrecomp` and carry that repository's license and attribution — the
+same terms as the rest of the engine.
+
+- **PR #21** — *runner: Add NES-to-runner PPUMASK bit translation layer*
+  (`nes_ppumask_to_runner()`, `g_ppumask_translate`). Opt-in: existing titles
+  keep the original behaviour unchanged. Still upstream.
+- **PR #22** — *runner: Force rendering enabled when `g_ppumask_translate` is
+  set*. **Upstream later revised this** (commit `a671d53`, 2026-10-18,
+  *"Preserve disabled PPUMASK rendering bits in compatibility mode"*), which
+  removed the forced `g_ppumask |= 0x1E`. The translation layer from #21
+  remains; the forcing does not.
+- **PR #66** — *Allow PPU overclocking on MMC1 carts*
+- **PR #67** — *Add a VSync display setting to the windowed cycle host*
+- **PR #69** — *cyc: a ROM read override, so a trusted mod can patch what the
+  CPU reads* (the primitive Game Genie cheat codes need)
+
+#21 and #22 touch `runner/src/runtime.c`, the **legacy function-level runner**,
+which this project retired in 2026-10 — so neither reaches the cycle backend
+this project plays on. The other three were originally carried here as local
+submodule patches (006, 007, 008) and are now upstream; `patches/README.md`
+records what upstream changed while taking them.
+
 **libretro-database**, the cheat-code collection
 <https://github.com/libretro/libretro-database>. Its
 `Super Dodge Ball (USA).cht` supplied the thirteen entries in

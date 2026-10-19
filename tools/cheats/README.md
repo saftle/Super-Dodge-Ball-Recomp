@@ -1,7 +1,7 @@
 # tools/cheats/
 
-Analysis behind the cheat work (`src/sdb_cheats.c`, `cheats/`,
-`patches/008_rom_read_substitution.patch`).
+Analysis behind the cheat work (`src/sdb_cheats.c`, `cheats/`, and the
+engine's ROM read substitution — upstream PR #69).
 
 ## `ramcensus.py`
 
