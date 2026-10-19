@@ -3,10 +3,18 @@
 Eight scripts, and one of them is shared rather than run. Five read a
 `--frame-log` binary or a trace and back a specific claim in
 `docs/research.md` §25-26; `json_trace.py` reads the `SDB_TRACE_JSON` stream
-instead, and `bounds_gate.py` reads the `--present-out` PNGs rather than a log, and
-`zp_writers.py` is a ROM byte scan rather than either.
+instead, and `bounds_gate.py`, `anchor_gate.py` and `native_cols.py` read the
+`--present-out` PNGs rather than a log, and `zp_writers.py` is a ROM byte scan
+rather than either.
 `cycframe.py` is the `--frame-log` reader the other four sit on.
 Nothing here runs the emulator; make the log first.
+
+**Two of these tools' recorded baselines do not reproduce** — `dupes.py` and
+`margin_track.py` both report failures on the committed build over the window
+these docs give (research §34, plan item 19). **Run them against a known-good
+build before believing either verdict**, and prefer a pre/post comparison of two
+builds where you have them: that needs no baseline at all, and it is how the Bean
+Ball margin fix was gated.
 
 ## Make the logs
 
@@ -430,10 +438,55 @@ reconstructed rather than stamping the machine's picture over them. The reveal i
 so `--reveal` is right for the command above and `--no-reveal` is right for a
 `SDB_OVERSCAN=0` run.
 
+## `native_cols.py` — the machine's own 256 columns, in three parts
+
+Research §34. Compares a `--present-out` run with margin sprites **on** against
+the same run with `--margin-sprites 0`, and reports where the pictures differ.
+
+```bash
+mkdir -p tmp/nc/on tmp/nc/off
+for ms in 1 0; do
+  d=tmp/nc/$([ $ms = 1 ] && echo on || echo off)
+  cp -r build-cycle/mods tmp/nc/mods
+  SDB_TRACE=1 SDB_TRACE_CAPTURES=0-399 ./build-cycle/nes_game \
+    "roms/Super Dodge Ball (USA).nes" --frames 400 \
+    --input tas/vectors/sdb_sweep.input --ram-init zeros --widescreen 16:9 \
+    --margin-sprites $ms --present-out $d/p --present-every 1 \
+    >/dev/null 2>tmp/nc/$ms.log
+done
+python3 tools/widescreen/native_cols.py tmp/nc/on tmp/nc/off tmp/nc/1.log
+```
+
+**Why it exists: the gate it replaces could not pass.** AGENTS.md asked whether
+the machine's 256 columns "differ by 0 pixels on every frame". On the committed
+build, 400 frames of `sdb_sweep` at 16:9 with the reveal on:
+
+| region | px | what it is |
+|---|---|---|
+| native 0-14 | 13229 | the PPUMASK band the reveal exists to fill, plus the sprite parts that bleed out of it |
+| native 248-255 | 3338 | the right seam, where the machine's buffer clips at 255 |
+| **native 15-247** | **136** | the machine's own run — **this is the number that matters** |
+
+Only the third is a failure, and it is **136 on six frames of 400 on this build
+and on the one before it** — so it is the figure to compare when gating a change.
+A gate that cannot pass cannot have been run; this one can.
+
+**The index trap.** `--present-out` writes capture file `N` for host frame `N+1`,
+so a frame's native block sits at `x0[N-1]` or `x0[N]`. The first version took the
+**union** of those two windows, which is wider than the block and reported 35
+failures that were entirely band and seam. It now takes the union **and** requires
+the narrow reading to be clean, so being off by one cannot make it pass. The same
+care belongs in any tool pairing a capture with a trace line.
+
+Exit 0 clean, 1 pixels inside the machine's own run, **2 measured nothing** — and
+a clean pass over zero frames is the failure this project keeps paying for, so
+read the frame count in the output.
+
 ## Attribution
 
 Written for this project, with no third-party code. `cycframe.py` reads the
 `--frame-log` format documented in `runner/cyc/cyc_host.c` (`write_frame_log`);
 `anchor_gate.py` reads the presented PNGs the host writes and the compositor's own
-JSON trace lines, both of which it documents the shape of inline. Pillow is the
+JSON trace lines, both of which it documents the shape of inline; `native_cols.py`
+reads the same PNGs and the `sdbw f=N x0=M:` trace line. Pillow is the
 system package the rest of `tools/` already uses.

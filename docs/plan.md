@@ -1,6 +1,6 @@
 # Super Dodgeball NES Recompilation — Project Plan
 
-> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). PPU overclocking **shipped** (opt-in mod; deliberately changes timing). Widescreen **shipped** (opt-in mod, 16:9 / 21:9 / 32:9), and its margins now carry sprites as well as court. Margin sprites found by a *played* session rather than a script — `--record-input` + `tools/play_record.sh` (item 4, research §26) — and the last of them, a duplicated sprite at the seam that flickered while the camera panned, turned out to reproduce **headlessly on `sdb_pan` all along** (research §26). The sprite judder while the camera pans is **resolved and it is the game's** — MesenCE reproduces the same two-frame offset, so nothing here is broken (item 12, research §27). **Cheats shipped** (item 17, research §32): RetroArch `.cht` files with all four code kinds including Game Genie, which needed a new engine primitive (`patches/008`). The **instant-win cheat is not solved** (item 18) and four attempts at it are refuted by measurement — read that item before spending time on it; save states already deliver what it was wanted for. **One** open question left unattributed: the Bean Ball sprite-list degeneration (item 14). Item 15 is **fixed**, and so is the seam offset it left behind. Frontier: full-movie TAS vectors (level-switch screens).
+> Cycle backend is the default and only play path. Team-select verified byte-exact vs Mesen; blargg 25/25. Flicker fix **shipped** for all causes (opt-in mod until a full playthrough is tested). PPU overclocking **shipped** (opt-in mod; deliberately changes timing). Widescreen **shipped** (opt-in mod, 16:9 / 21:9 / 32:9), and its margins now carry sprites as well as court. Margin sprites found by a *played* session rather than a script — `--record-input` + `tools/play_record.sh` (item 4, research §26) — and the last of them, a duplicated sprite at the seam that flickered while the camera panned, turned out to reproduce **headlessly on `sdb_pan` all along** (research §26). The sprite judder while the camera pans is **resolved and it is the game's** — MesenCE reproduces the same two-frame offset, so nothing here is broken (item 12, research §27). **Cheats shipped** (item 17, research §32): RetroArch `.cht` files with all four code kinds including Game Genie, which needed a new engine primitive (`patches/008`). The **instant-win cheat is not solved** (item 18) and four attempts at it are refuted by measurement — read that item before spending time on it; save states already deliver what it was wanted for. **No** open question left unattributed: the Bean Ball sprite-list degeneration (item 14) is **fixed** — the game does emit fewer sprites, and the margin was capturing them and discarding them because record byte 0 is the object's state byte, which the game parks at `$00` while still emitting (research §34). **The margin gates are not currently believable** (item 19): three of them do not reproduce their own recorded baselines on the committed build, which is worth knowing before quoting any of their verdicts. Item 15 is **fixed**, and so is the seam offset it left behind. Frontier: full-movie TAS vectors (level-switch screens).
 
 ## Where Things Stand
 
@@ -69,134 +69,80 @@
     Two traps that cost most of the time, both recorded in §27. The harness had **never** been logging scroll — five of `mesen_tas.lua`'s state columns are `null` because the keys are namespaced (`ppu.xScroll`, not `ScrollX`), which is exactly what research §16 warns about; fixed in `7cfa35a`. And with the key fixed, **`ppu.xScroll` is still not the court's scroll** — it reads 0-7 through the whole pan while `$C3/$C4` goes 128→154, so treating it as the scroll gives a confidently wrong answer. The metric avoids both by using the game's own camera variable, which both sides already dump in RAM. Do not measure this by correlating pictures either: a column-SAD over the flat court locks onto the wrong feature.
 
     The sides agree at frame 600 (camera 134 on both) and diverge by 650, which is the known RNG divergence — so the usable window is 597-618, not the whole pan.
-14. **Bean Ball: the flicker mod's sprite list degenerates while running across the full map** (research §26, **OPEN — shelved at the owner's request, not closed**). Everything needed to resume is below, including what the owner said in their own words and how to get the capture again without referring to any scratch folder.
+14. **Bean Ball: the margin was capturing the characters and then throwing them away — FIXED** (research §34). The symptom, the diagnosis and the gate results are all in research §34; this item is the state of play plus what is still open. **This retires the "does the game emit fewer or does the mod drop them" question — the game emits fewer, and the mod is not dropping anything.**
 
-    ### How it presents, from the owner's description
+    ### How it presents
 
     Game mode **"bean ball"**, which lets you run across the **entire map** rather
     than a half-width court. It works in general — the failure is specific to
-    **running from one end of the screen to the other**, and it looks like the
-    implementation "plays catch up and screws up". The owner's frame-by-frame
-    account, verbatim in substance:
+    **running from one end of the screen to the other**. On the capture it was
+    found on, everything is correct through frame 829; from 830 sprites are
+    progressively occluded, the upper-right one first, fully covered by 838, two
+    more at 866, then the left of the screen, one fully covered at 883, the last
+    non-player sprite at 906. Two properties are the owner's and not inferred:
+    **the order is random**, so do not expect the same sequence or the same frame
+    numbers, and **"progressively"** is the tell — sprites are lost one at a time
+    over ~56 frames, not all at once, which rules out a single bad transition.
 
-    | frame | what they saw |
-    |---|---|
-    | **658** | everything normal |
-    | —→ **679** | progressively: **two sprites on the left are completely covered** |
-    | —→ **692** | a **third** sprite is completely covered as well |
-    | —→ **708** | a sprite **all the way across the screen to the left** is covered, **leaving just the player sprite visible** |
-    | —→ **714** | **the player sprite itself gets cut in half** |
+    ### What it was
 
-    Two properties matter and are the owner's, not inferred. **The order is
-    random** — which things get hidden differs on a different playthrough, so a
-    future agent must not expect the same sequence or the same frame numbers.
-    And **"progressively"** is the tell: sprites are lost one at a time over ~56
-    frames, not all at once, which rules out a single bad transition and points at
-    something degrading.
+    Not the flicker mod, and not the game dropping sprites silently. The game
+    stops emitting a character at native column ≈250 (its parts going 8 → 4 → 1 →
+    0), which is its own off-screen cull doing what an off-screen cull does — and
+    **stock does the same thing**. But at 16:9 locked the canvas shows world
+    `[32,457)` with the native block starting at canvas column 8, so native column
+    250 is canvas column 258: **there are 167 columns of court to its right.** The
+    character is not off-screen, it is off the *machine's* screen and well inside
+    the *canvas*, which is the entire reason §26's margin exists.
 
-    ### What the trace shows (measured, from the owner's capture)
+    The margin was **capturing all of them and then discarding them**. Record byte
+    0 is the object's state byte `$43`, all three draw sites led their identity
+    check with `if (!cyc_mod_peek(rec)) continue` ("non-zero means the slot is in
+    use"), and **the game parks an object at `$00` while still emitting it** — which
+    is precisely what it does to characters walking off the end of the pitch.
+    Measured: **216 of 252 capture events saw byte 0 == `$00`, 155 of those
+    objects were holding parts**, and the margin **held 4570 parts over 141 frames
+    and drew 719 (16%)** with `sdbR` never firing, so the identity itself was
+    stable the whole time.
 
-    Flicker mod per-frame line `sdb <frame> <peak-list> <overflow> <published-list>
-    <saw-$04> <backstop>`, frames 658→714. The list **decays monotonically as the
-    player runs**:
+    Fix is one predicate, `sdb_margin_live()` (masked byte 0 + byte 1, no nonzero
+    term), replacing four copies of the rule that had drifted into three different
+    answers — including the JSON reporter, which called six of seven live objects
+    dead and made the margin look switched off when it was merely blind. On one
+    capture `drawn` 880 → **3775**, `peak` 9 → **42**, with `captured` and
+    `off-edge` **identical at 917**, so the guest never moved.
 
-    ```
-    658:54  662:51  666:44  670:37  674:34  678:30  682:25  686:22  690:22
-    698:21  702:17  706:13  710:10  714:14          (peak-list)
-    ```
-
-    **53 → 10, then a small recovery.** `overflow` is 0 and `backstop` is 0 on
-    every one of those frames. So it is **not** §2.1's runaway-capture-list bug
-    running backwards, and it is not the `SDB_LIST_LIMIT` backstop firing.
-
-    Ruled out by the same run:
-
-    - **Not the widescreen compositor.** `widescreen: 1183 composed, 1 pillarboxed,
-      seam diff 2 px` — the background is essentially perfect, and the screenshots
-      at 658 and 714 show the building, tree and fence fully drawn and correctly
-      scrolled in both. The margins are black in Bean Ball (its world is not the
-      512-px stadium) which is expected, not the fault.
-    - **Not the margin sprites.** `margin sprites: 1207 captured (872 off-edge),
-      2018 drawn, peak 9` — and `sdbm` is **0** on almost every frame in the whole
-      655–716 window. The margin draws essentially nothing here, so it cannot be
-      what is covering anything.
-    - **Not the camera.** `scr == cam` for 660–690 (`scr=40` throughout); the
-      camera starts moving only around 696. The loss begins at 658, *before* the
-      pan.
-
-    The mechanism is straightforward once stated: **the flicker mod replaces the
-    machine's own sprites with its own captured list** (`cyc_render_capture_background`
-    + `sdb_blit`). So a short list *is* missing sprites, whatever caused the list
-    to be short.
-
-    ### The one question that has to be answered first
-
-    **Not established: whether the game emits fewer sprites in Bean Ball, or the
-    mod drops them.** These need opposite fixes — one is a fact about the ROM to be
-    documented, the other is our boundary detection to be corrected — and guessing
-    wrong wastes the whole investigation. **Do not pick a branch and start editing
-    before measuring this.**
-
-    `--frame-log` cannot answer it, and the reason is worth not re-learning:
-    `--frame-log` sets `headless = true` (`cyc_host.c:1100`), and the window and
-    headless hosts **do not run the same guest state** (frames 0–3 match, frame 4
-    diverges — research §26). An OAM dump from a headless run describes a
-    different game.
-
-    **The instrument now exists: `SDB_TRACE_JSON`.** `src/sdb_host_extras.c`
-    emits one JSON object per line in two kinds — `f` at frame begin, carrying
-    the flicker counters *and every live OAM entry for that frame*, and `m` at
-    composite. `python3 tools/widescreen/json_trace.py flicker LOG` prints live
-    OAM against the mod's published list in the same frame, which is exactly
-    this question, and only offers the interpretation on a ≥30% collapse so it
-    does not cry wolf on a normal run's jitter. It exists because the *human*
-    trace had twice lied to `margin_track.py` — a missing newline and then a
-    misplaced line closer, each leaving the audit reporting "no lines" on a
-    healthy run — so this is plan item 14's instrument reading a structured
-    stream instead of a regex. See `tools/widescreen/README.md`.
-
-    **So: replay the vector in a WINDOW with that flag on**, and read
-    `flicker`. The decision rule, both branches spelled out so the next agent
-    cannot rationalise either way:
-
-    - **OAM holds ~50 sprites while the mod's list holds 10 → it is ours.** The
-      game emitted them and the mod lost them. Go to the list bookkeeping: the
-      `$0617`-going-backwards boundary, the prefix carry-over, and the
-      done-freshness rule (`s_frame - s_done_frame <= 1`), all of which are in
-      `sdb_restart`/`sdb_publish`/`sdb_present` in `src/sdb_host_extras.c`. The
-      prior art is §2.1's runaway list, which was the same code failing the other
-      way.
-    - **OAM holds 10 too → the game is not emitting them** in this mode at this
-      camera position, the mod is faithful, and the honest outcome is a recorded
-      finding rather than a fix. Check whether it is the display-list culling of
-      §2.1 reasserting itself (all three gates overridden — so that would be a
-      *fourth* gate nobody has found), whether it is Bean Ball legitimately holding
-      fewer objects in a list, or whether it is the two-frame build cadence
-      interacting with a longer camera travel.
+    **Why it survived every existing gate: it was inert on the stadium course.**
+    `sdb_sweep`/`throw`/`pan`/`idle` barely move `drawn` when the term is removed
+    (124506→124490, 145606→145650, 126249→126345, 121225→121120 over 3000 frames
+    each), so the four vectors everyone gates with could never see it. Only a
+    course where the game parks objects at state 0 exposes it. **A gate that only
+    runs one course is a gate that only knows one course.**
 
     ### Getting the capture again — do not refer to scratch
 
-    The original capture was 1.4 GB of **scratch, gitignored, and not a source of
-    truth**. Do not cite a capture folder and do not expect one to exist — cite the
-    vector and the number instead (AGENTS.md, "Never cite a `tmp/` capture as the
-    source of a number"). **Ask the owner to re-record it** — they are the only one
-    who can play the route; it is a specific mode plus a specific run:
+    The original capture was **scratch, gitignored, and not a source of truth**. Do
+    not cite a capture folder and do not expect one to exist — cite the vector and
+    the number instead (AGENTS.md, "Never cite a `tmp/` capture as the source of a
+    number"). **Ask the owner to re-record it** — they are the only one who can
+    play the route; it is a specific mode plus a specific run:
 
     ```bash
-    SDB_SCALE=2 SDB_UNLIMITED=1 tools/play_record.sh bar-artifact-2
+    SDB_MODS=remove-character-flicker,widescreen,ppu-overclock \
+    SDB_ASPECT=16:9 SDB_CAMERA=locked SDB_UNLIMITED=1 \
+    tools/play_record.sh beanball
     ```
 
-    `SDB_SCALE=2` because they read the artifact at that scale, `SDB_UNLIMITED=1`
-    so there is no frame cap to land on (they stop when they have it — and closing
-    the window still flushes the vector's frame count, because that line is written
-    from the destructor; SIGKILL does not), `SDB_SHOT_EVERY=1` to present every
-    frame. **`SDB_SHOT_EVERY` is a PRESENT interval, not a screenshot interval** —
-    the compositor only runs on a presented frame, so any stride above 1 silently
-    skips it and every `drawn`/`composed` count drops. A capped alternative is
-    `SDB_FRAMES=1400`, chosen to cover the ~658–714 window with margin.
-    **Make the request rather than re-deriving the state**: the symptom is
-    *intermittent and order-random*, so a vector built by trial and error will not
-    reproduce it, and a headless replay will not reproduce it either.
+    `SDB_UNLIMITED=1` so there is no frame cap to land on (they stop when they
+    have it — and closing the window still flushes the vector's frame count,
+    because that line is written from the destructor; SIGKILL does not),
+    `SDB_SHOT_EVERY=1` to present every frame. **`SDB_SHOT_EVERY` is a PRESENT
+    interval, not a screenshot interval** — the compositor only runs on a presented
+    frame, so any stride above 1 silently skips it and every `drawn`/`composed`
+    count drops. **Make the request rather than re-deriving the state**: the
+    symptom is *intermittent and order-random*, so a vector built by trial and
+    error will not reproduce it, and a headless replay will not reproduce it
+    either.
 
     If a replay is wanted for instrumentation, `tas/vectors/sdb_beanball.input` is
     the owner's recorded 40-step vector from this very session and is committed.
@@ -207,20 +153,15 @@
     which looks exactly like "the feature does nothing". Check `sdbc` for
     `cam≈128` by frame 600 to confirm the run is live.
 
-    ### Examples from last time — the closest things we have
+    ### Still open
 
-    No committed vector reproduces this, and it is worth being explicit about that
-    rather than rediscovering it. `sdb_sweep` runs the full 512-px world but only
-    in the **stadium** mode; `sdb_pan` alternates direction from a still camera;
-    `sdb_throw` stresses the flicker mod's bookkeeping for 8000 frames in the
-    stadium and holds `max list 77, 0 overflow, 0 backstop`; `sdb_idle` and
-    `sdb_bar` are stadium matches. **None enters Bean Ball, and none makes the
-    player run the length of the map.** The one thing that resembles it —
-    §2.1's runaway capture list, where the presented picture smeared hundreds of
-    stale court copies in a trail — is the *same code failing the other way* and
-    was fixed by the backwards-`$0617` boundary plus the `SDB_LIST_LIMIT`
-    backstop. If this bug turns out to be ours, start from that fix and ask what
-    is different about a camera in constant motion.
+    - **`SDB_MARGIN_STALE = 240`'s floor was measured on the stadium course.**
+      Bean Ball's characters park at state 0 for long stretches and nothing says
+      whether any object's *emission* gap there approaches 240. It did not fire in
+      the measured window, but that is one window.
+    - **Not played by hand** after the change in follow mode, or at 21:9 / 32:9.
+      The capture that found it was 16:9 locked-camera.
+    - **The gate baselines do not reproduce** — see item 19.
 
 15. **The presented sprite layer is one build old, and the seam offset it shared a symptom with — BOTH FIXED.** With the flicker mod on the character used to render 1-2 px from where OAM put it, and 7-11 px on a build boundary: the captured list is published only once a build completes, so an entry the game has since moved was drawn where it *was*.
 
@@ -243,6 +184,18 @@
 18. **An instant win / skip-stage cheat** (research §32, **OPEN — and read the section before spending time on it**). Four hypotheses were tried and **all four refuted by measurement**: freezing all six P2 energy bytes at 0; one-shotting those same bytes instead; freezing the match clock `$0754` at 0; forcing the stage counters `$007A`/`$018A`. One measurement explains all four at once: with all input stripped from frame 700, `$0754` still expires at **frame 2809, the same frame**, so the match is a fixed ~37-second scripted sequence with no early exit, and a freeze removes the transition any comparison would watch for. The win check is still real — in that same run `$018A`/`$007A` never move, so the game decides at the end whether you advance. RAM poking cannot reach it because `$0754` and `$0532` have **zero occurrences as operands in the ROM**: the game reaches that state through an indirect pointer, so "find the code that touches `$0754`" fails at step one. **What is needed:** resolve the pointer, read the comparison at the code that uses it, and then patch 008's substitution is the right tool (a comparison has an immediate operand, read at run time). A 756-candidate brute-force search was costed at three hours and **deliberately not run**, because no strictly monotonic countdown exists in any of the 2048 bytes and the apparent ones are wrap-around counters.
 
     **Note before picking this up:** save states already deliver the stated need — jump to any stage instantly, with no cheat, no guest state, and nothing to go stale. This item is only worth doing to have it *as a cheat*, and that is the expensive version of the problem, not the easy one.
+
+19. **The margin gates cannot currently be believed — three of them do not reproduce their own recorded baselines** (research §34, "Four things the gates got wrong"). Found while gating the Bean Ball margin fix (item 14), and **none of it is caused by that fix** — every one of these fails identically on the build before it. They are open because a gate that reports a red nobody can explain trains people to ignore red.
+
+    1. **"The machine's 256 columns must differ by 0 pixels" has never been true.** Measured on the committed build, 400 frames of `sdb_sweep` at 16:9 with the reveal on: band 0-14 **13229 px**, right seam 248-255 **3338 px**, and **136 px inside the machine's own run on six frames of 400**. The first two are the feature working — the revealed band exists to be drawn, and the right seam exists because the machine clips at 255. **A gate that cannot pass cannot have been run.** `tools/widescreen/native_cols.py` is the replacement: it reports the three regions separately and fails only on the third. **The number to compare across builds is 136 — it is 136 both before and after the Bean Ball fix.**
+
+    2. **`dupes.py` fails on the committed build.** 574 stacked pairs on `sdb_sweep` and 934 on `sdb_pan`, against `--max-stacked 500` and a baseline recorded in AGENTS.md as 37 follow / 367 locked. 0 same-row clusters and 0 drifting on both, so it is not the doubling artefact the tool exists for — but the quoted baseline does not reproduce over a 1168-frame follow-mode window.
+
+    3. **`margin_track.py` does not reproduce either.** 20 anomalies on `sdb_sweep` and 12 on `sdb_pan` where AGENTS.md records "one `cshift` on the sweep … and none on the pan vector".
+
+    (2) and (3) are most likely the same root cause: **the baselines were taken over a frame range nothing records**, and the documented command reproduces a different one. **Fix, in order:** state the frame range in the tool's own output and in AGENTS.md; re-run both on the committed build to establish what they actually report; then set `--max-stacked` and the pass criteria from *that*, not from the older numbers. Until then neither tool's verdict means anything, and the Bean Ball fix's "no regression" claim rests on the **pre/post comparison**, which is sound precisely because it does not depend on the baselines.
+
+    A fourth, smaller one: **`--present-out` indexes one frame ahead of the trace**, so a capture file's native block sits at `x0[N-1]` or `x0[N]`. The first version of `native_cols.py` hedged by taking the union of the two windows, which is wider than the block and reported 35 failures that were entirely band and seam. It now takes the union **and** requires the narrow reading to be clean, so being off by one cannot make it pass. Any other tool pairing a capture with a trace line needs the same care.
 
 ## What Other Successful NESRecomp Projects Do Differently
 

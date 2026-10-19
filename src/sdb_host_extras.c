@@ -1798,6 +1798,24 @@ static void sdb_ws_build_owner(const uint32_t *native);
  * Retirement rides on the OBJECT's own captures, never on age: the game's
  * display list does not contain most off-screen objects (research.md 26), so an
  * age-based rule empties precisely the sprites this feature draws. */
+/* IS THIS MARGIN SLOT STILL THE OBJECT WE CAPTURED?
+ *
+ * One predicate, called by all three draw sites and by the JSON reporter,
+ * because they had three different copies of this rule and they had drifted:
+ * the reporter carried two extra terms and read six of seven live objects as
+ * dead. See the note at the compositor's own loop for what the rule is.
+ *
+ * THE CULLING BITS ARE MASKED OUT of byte 0 on purpose. Byte 0 is the object's
+ * state byte `$43`, and section 2.1's three gates read exactly
+ * `($43 & $70) == $20` and `& $20` -- the flicker mod overrides all three
+ * precisely so the object keeps being emitted -- so the game flips those bits
+ * while the object is still the same object. */
+static int sdb_margin_live(const SdbMarginObj *ob, uint16_t rec)
+{
+    return ((cyc_mod_peek(rec) & ~SDB_CULL_BITS) == (ob->id0 & ~SDB_CULL_BITS))
+        && cyc_mod_peek((uint16_t)(rec + 1)) == ob->id1;
+}
+
 static void sdb_ws_prune_margin(void)
 {
     for (int o = 0; o < SDB_MARGIN_OBJECTS; o++) {
@@ -1805,10 +1823,7 @@ static void sdb_ws_prune_margin(void)
         if (!ob->n) continue;
         if (ob->build == ob->pruned) continue;
         uint16_t rec = (uint16_t)(SDB_REC_BASE + SDB_REC_STRIDE * o);
-        if (!cyc_mod_peek(rec)) continue;
-        if ((cyc_mod_peek(rec) & ~SDB_CULL_BITS) != (ob->id0 & ~SDB_CULL_BITS)
-            || cyc_mod_peek((uint16_t)(rec + 1)) != ob->id1)
-            continue;                                   /* a recycled slot */
+        if (!sdb_margin_live(ob, rec)) continue;        /* a recycled slot */
         ob->pruned = ob->build;
         int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
                         | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
@@ -1929,10 +1944,7 @@ static int sdb_ws_margin_pass(uint32_t *canvas, int cw)
         SdbMarginObj *ob = &s_margin_obj[o];
         if (!ob->n) continue;
         uint16_t rec = (uint16_t)(SDB_REC_BASE + SDB_REC_STRIDE * o);
-        if (!cyc_mod_peek(rec)) continue;
-        if ((cyc_mod_peek(rec) & ~SDB_CULL_BITS) != (ob->id0 & ~SDB_CULL_BITS)
-            || cyc_mod_peek((uint16_t)(rec + 1)) != ob->id1)
-            continue;                                   /* a recycled slot */
+        if (!sdb_margin_live(ob, rec)) continue;        /* a recycled slot */
         /* The same "the game stopped emitting it" gate as the compositor's loop,
          * and for the same reason: a right-seam completion of a part the guest
          * retired is the same ghost. */
@@ -2352,9 +2364,16 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
         SdbMarginObj *ob = &s_margin_obj[o];
         if (!ob->n) continue;
         uint16_t rec = (uint16_t)(SDB_REC_BASE + SDB_REC_STRIDE * o);
-        int live = cyc_mod_peek(rec) &&
-                   cyc_mod_peek(rec) == ob->id0 &&
-                   cyc_mod_peek((uint16_t)(rec + 1)) == ob->id1;
+        /* THE DRAW SITE'S OWN TEST -- `sdb_margin_live`, the same call the three draw
+         * sites make. This used to be a fourth copy with two extra terms (an
+         * unmasked byte-0 compare and a leading "byte 0 non-zero"), and the
+         * record's byte 0 is zero for 216 of the 252 capture events on the
+         * bean-ball capture, so the reporter wrote off six objects out of seven
+         * while the draw sites went on painting them: over a 141-frame window it
+         * could account for 194 parts of the 719 actually drawn. An instrument
+         * that hides six objects in seven cannot be used to ask why the other
+         * 84% of the parts the margin holds are not drawn. */
+        int live = sdb_margin_live(ob, rec);
         fprintf(stderr, "%s\"i\":%d,\"live\":%d,\"parts\":[", first++ ? ",{" : "{", o, live);
         /* A recycled slot is skipped OUTRIGHT by the draw site -- it `continue`s
          * on the object, before any placement decision -- so there is no branch
@@ -3681,10 +3700,32 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
              * Masking `$70` is the whole fix and nothing more: the remaining bits
              * and byte 1 still have to match, so a genuinely recycled slot is
              * still caught. Byte 1 is `$41` and does not move with the culling
-             * state. */
-            uint8_t r0 = cyc_mod_peek(rec);
-            if (!r0 || (r0 & ~SDB_CULL_BITS) != (ob->id0 & ~SDB_CULL_BITS) ||
-                cyc_mod_peek((uint16_t)(rec + 1)) != ob->id1)
+             * state.
+             *
+             * THE `!r0` TERM THAT USED TO LEAD THIS TEST IS GONE, and it was
+             * wrong on this very question. "byte 0 non-zero means the slot is in
+             * use at all" is not a fact about this game: byte 0 is the state byte
+             * and the game parks an object at `$00` while still emitting it --
+             * that is precisely what it does to the characters walking off the
+             * end of the pitch in Bean Ball, which is the case this whole feature
+             * exists for. Measured on that capture: 216 of 252 capture events saw
+             * byte 0 == `$00`, and 155 of those objects were holding parts at the
+             * time. So the margin captured every one of them, and then threw
+             * them away here. Over a 141-frame window it held 4570 parts and drew
+             * 719. The characters those parts belong to stop being emitted by the
+             * game at native column ~250 and vanish, while the canvas still has
+             * 167 columns of court to their right.
+             *
+             * Nothing is lost by dropping it. Each of the three things it stood
+             * in for has its own gate, and all three are measured: a slot the
+             * game has handed to a DIFFERENT object fails the identity compare
+             * here and is discarded at capture by `sdbR` before its old parts can
+             * come back (research.md 26b); an object the game has stopped
+             * emitting is stood down by `ob->seen` and SDB_MARGIN_STALE below; and
+             * a roster the game has hidden wholesale is caught by the page-clear
+             * gate. This was the fourth copy of the rule and the only one that
+             * answered a question none of them was asked. */
+            if (!sdb_margin_live(ob, rec))
                 continue;
             /* THE GAME STOPPED EMITTING THIS OBJECT.
              *

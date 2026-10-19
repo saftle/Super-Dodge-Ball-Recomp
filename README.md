@@ -338,18 +338,7 @@ through team select, and blargg's CPU suite passes 25/25 on this engine.
 rounds and the level-switch screens. That is the main reason the flicker mod stays
 opt-in.
 
-### Two open bugs
-
-- **Bean Ball: the sprite list shrinks while you run the length of the map.** In
-  that game mode — which lets you run across the *entire* map rather than a
-  half-width court — running from one end of the screen to the other makes the
-  flicker mod's presented sprite list decay frame by frame, **53 sprites down to 10**,
-  until a single player sprite remains, cut in half. The background stays perfect
-  (`1183 composed, 1 pillarboxed, seam diff 2 px`) so the compositor is not involved,
-  and the overflow and backstop counters both read 0, so it is not the runaway-list
-  bug. **Not established whether the game emits fewer sprites in that mode or the mod
-  drops them**, and the two need opposite fixes. Full write-up, the frame-by-frame
-  measurements and the next step are in [`docs/plan.md` 14](docs/plan.md).
+### One open bug, and a gate caveat
 
 - **A one-frame ghost of a menu character.** A menu screen's character is retired
   with `y=$F0`, the game then emits nothing for about 14 frames, and the mod repaints
@@ -357,6 +346,34 @@ opt-in.
   Four rules were built and measured; the nearest miss fixed the ghost cleanly and
   cost 11% of sweep frames (8 players becoming 4). It needs to know *the screen
   changed*, and it cannot currently. [`docs/plan.md` 16](docs/plan.md).
+
+- **The margin gates are not currently believable.** Three of them do not reproduce
+  their own recorded baselines on the committed build — `dupes.py` reports 574 and
+  934 stacked pairs against a recorded 37, `margin_track.py` reports 20 and 12
+  anomalies against a recorded one, and the "0 pixels in the machine's 256 columns"
+  criterion is really 136 px on six frames of 400 because the revealed band and the
+  right seam are *supposed* to differ. None of this is caused by any recent change;
+  every one fails the same way on the build before it. **Prefer a before/after
+  comparison of two builds over a pass/fail against a quoted number**, and read
+  [`docs/plan.md` 19](docs/plan.md) before quoting any of their verdicts.
+
+### Resolved, and worth not re-investigating
+
+- ~~**Bean Ball: the sprite list shrinks while you run the length of the map**~~ —
+  **the game does emit fewer sprites; the margin was throwing them away.** Not the
+  flicker mod: on every build frame the machine's live OAM and the mod's published
+  list agree exactly, and stock emits *fewer* sprites than the mod does. The game
+  stops emitting a character at native column ~250 — which leaves **167 columns of
+  court still on screen** — and the margin had captured every one of those
+  characters and then discarded them, because record byte 0 is the object's state
+  byte and the game parks an object at `$00` while still emitting it. The margin
+  held 4570 parts over 141 frames and drew 719. Fixed by one shared predicate.
+  [`docs/research.md` §34](docs/research.md), [`docs/plan.md` 14](docs/plan.md).
+
+  **The lesson that matters more than the fix: it was invisible to every gate
+  because it is inert on the stadium course.** The four vectors everyone tests move
+  the margin's `drawn` count by −16/+44/+96/−105 over 3000 frames. A gate that only
+  runs one course is a gate that only knows one course.
 
 ### Resolved, and worth not re-investigating
 

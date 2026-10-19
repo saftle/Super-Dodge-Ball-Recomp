@@ -4747,3 +4747,211 @@ what frame it is. Same class as the `--present-out` index trap in AGENTS.md.
   reachable afterwards, and it is measured to hold at least 9 frames on a played
   session — long enough to gate the anchor, not long enough to substitute for the
   capture.
+
+## 34. Bean Ball: the margin was capturing the characters and then throwing them away
+
+### The thing being fixed
+
+Game mode **"bean ball"**, where the whole map is playable left to right rather
+than a half-width court. Everything is correct through frame 829; from 830
+onward sprites are progressively occluded — the upper-right one first, fully
+covered by 838, two more at 866, then the left of the screen, one fully covered
+at 883, the last non-player sprite at 906. The **order is the player's**, so it
+differs between playthroughs and no frame number here is a target.
+
+This was plan item 14, shelved with one question left open: *does the game emit
+fewer sprites, or does the mod drop them?* Those need opposite fixes.
+
+### The open question, answered
+
+`SDB_TRACE_JSON` (`f` records) carries `oamn`, the count of **live OAM entries the
+machine itself holds**, beside `pub`, the flicker mod's published list. Replaying
+one capture's save state headlessly and reading that stream answers it directly:
+
+- **On all 35 build frames, `oamn − pub == 1`, exactly.** The mod's list is what
+  the machine holds. It is not dropping sprites.
+- **`flicker-only` and `flicker + widescreen` differ on 0 of 140 frames.** Widescreen
+  is presentation-only, and this says so again from the guest's side.
+- **Stock emits *fewer* than the mod config on 33 of 140 frames — 8 sprites on 29
+  of them, 2 on the other 4, and never fewer.** That is the flicker mod doing its
+  documented job (§2.1's culling override).
+- **Both degenerate identically in shape**: live OAM falls 55 → 14.
+
+**So the game emits fewer.** Item 14's second branch, and its stated outcome —
+"a recorded finding rather than a fix" — is half of what turned out to be true.
+
+### But that is not the bug, and this is the part worth keeping
+
+The game stops emitting a character at native column ≈250, its parts going
+**8 → 4 → 1 → 0** over about eight frames. That is its own off-screen cull doing
+what an off-screen cull does, and stock does the same thing.
+
+The reason it is still a bug: at 16:9 locked the canvas shows world `[32,457)`
+with the native block starting at canvas column 8. Native column 250 is canvas
+column 258. **There are 167 columns of court to its right.** The character is not
+off-screen; it is off the *machine's* screen and well inside the *canvas*. Drawing
+it is the margin's entire reason to exist, and §26's whole subject.
+
+### The root cause: a "slot is in use" test that was not a fact about this game
+
+All three margin draw sites led their identity check with
+
+```c
+if (!cyc_mod_peek(rec)) continue;        /* byte 0 non-zero == the slot is in use */
+```
+
+Record byte 0 is the object's **state byte `$43`**. "Non-zero means the slot is
+in use" is not true of this game: **the game parks an object at `$00` while still
+emitting it** — which is exactly what it does to the characters walking off the
+end of the pitch. Measured on one capture's replay window:
+
+- **216 of 252 capture events saw record byte 0 == `$00`.**
+- **155 of those objects were holding parts at the time.**
+- The margin **held 4570 parts over 141 frames and drew 719** — 16%.
+- `sdbR` fired **zero** times, so the identity itself was stable the whole time.
+  The parts were captured correctly and then discarded on presentation.
+
+Nothing is lost by dropping the term. Each of the three things it stood in for
+has its own measured gate: a slot handed to a *different* object fails the
+identity compare and is discarded at capture by `sdbR` before its old parts can
+return (§26b); an object the game has stopped emitting is stood down by
+`ob->seen` and `SDB_MARGIN_STALE`; a wholesale hidden roster is caught by the
+page-clear gate.
+
+**Why it survived every gate**: it was **inert on the stadium course**. `sdb_sweep`,
+`throw`, `pan` and `idle` barely move `drawn` when it is removed, so the four
+vectors everyone gates with could never see it. Only a course where the game
+parks objects at state 0 exposes it.
+
+### The instrument was wrong too, and that is why this took a while
+
+`sdb_json_margin` computed `live` with its own **fourth** copy of the rule, which
+carried two extra terms — an unmasked byte-0 compare and the nonzero test. So the
+reporter called **six of seven live objects dead** and emitted empty parts arrays
+for them while the draw sites went on painting them. Over a 141-frame window it
+could account for 194 of the 719 parts actually drawn, all of one object.
+
+Reading that stream first is what makes the margin look switched off when it is
+merely blind, which is the same failure the project has already paid for three
+times with its own human-readable trace (§26: a missing newline, then a misplaced
+line closer). **Four copies of one predicate had already drifted into three
+different answers.** There is now one, `sdb_margin_live()`, called by all three
+draw sites and the reporter.
+
+### The fix, and what it does to the capture
+
+```c
+static int sdb_margin_live(const SdbMarginObj *ob, uint16_t rec)
+{
+    return ((cyc_mod_peek(rec) & ~SDB_CULL_BITS) == (ob->id0 & ~SDB_CULL_BITS))
+        && cyc_mod_peek((uint16_t)(rec + 1)) == ob->id1;
+}
+```
+
+One capture, 340 frames from its save state:
+
+| | before | after |
+|---|---|---|
+| `margin sprites: … drawn` | 880 | **3775** |
+| `… peak` | 9 | **42** |
+| `… captured (off-edge)` | 340 (917) | **340 (917)** — identical |
+
+`captured` and `off-edge` are the guest's own numbers and they do not move, so
+this is presentation only. The characters walk continuously off the right edge
+instead of dissolving into a head-and-torso stump.
+
+### Reproducing it
+
+```bash
+SDB_MODS=remove-character-flicker,widescreen,ppu-overclock \
+SDB_ASPECT=16:9 SDB_CAMERA=locked \
+tools/play_record.sh beanball 1041
+```
+
+then, from the anchor the capture writes into `tmp/beanball/`:
+
+```bash
+SDB_TRACE=1 SDB_TRACE_JSON=200-340 ./build-cycle/nes_game \
+  "roms/Super Dodge Ball (USA).nes" --load-state tmp/beanball/state.bin \
+  --frames 945 --input tmp/beanball/repro.input --ram-init zeros --ppu-overclock 262 \
+  --mods-root tmp/beanball/mods --widescreen 16:9 --camera locked
+```
+
+`--load-state` continues from the state's own frame counter, so `--frames` is the
+**total**, and the mod's own `s_frame` restarts at 0, which is why the JSON range
+is `200-340` and not `805-944`. The guest's sprite behaviour replays faithfully —
+the `sdb` counters are identical for 335 frames — but the *presented* picture does
+not, because the window and headless hosts are still different machines (§22,
+§33). The gates below use two hosts comparing each other, which that does not
+affect.
+
+### The gates
+
+Four vectors, 3000 frames each, before → after:
+
+| vector | `captured` | `drawn` | `peak` | `backstop` | `stood down` |
+|---|---|---|---|---|---|
+| `sdb_sweep` | 3000 → 3000 | 124506 → 124490 | 59 → 70 | 0 → 0 | 0 → 0 |
+| `sdb_throw` | 3000 → 3000 | 145606 → 145650 | 59 → 87 | 0 → 0 | 0 → 0 |
+| `sdb_pan` | 3000 → 3000 | 126249 → 126345 | 59 → 70 | 0 → 0 | 0 → 0 |
+| `sdb_idle` | 3000 → 3000 | 121225 → 121120 | 59 → 70 | 0 → 0 | 0 → 0 |
+
+- **Guest untouched** — `--frame-log` with the margin on vs off, `cmp`
+  byte-identical, on all four vectors **with and without the reveal** (16 runs).
+  Cycles, `native_cycles` and callback counts identical throughout.
+- **Machine's own columns** — `tools/widescreen/native_cols.py`, 400 frames of
+  `sdb_sweep` at 16:9, pre-fix against post-fix: **band 0-14 13229, seam 248-255
+  3338, own run 15-247 136 — all three identical to the digit, and the 136 sit on
+  the same six frames.** The change adds nothing inside the machine's run.
+- **Per-object audit** — `margin_track.py`: 20 → 21 anomalies (sweep), 12 → 13
+  (pan). The delta is obj 0 at frame 22, reported at column `65503` against an
+  expected `65494`; both are unsigned wraps of ≈ −33/−42, and the **pre-fix build
+  draws the same object the same way at frames 19-21**. The tool only started
+  flagging frame 22 because the fix draws that object there.
+- **`dupes.py`** — sweep 574, pan 934 stacked pairs, **identical on both builds**,
+  with 0 same-row clusters and 0 drifting on both.
+- **Mod off = stock** — all-off catalog (with `aspect = "stock"` and
+  `camera = "follow"`, or the comparison is between two equally non-stock runs)
+  is byte-identical to no `--mods-root` at all, 1200/1200 frames, and the run is
+  genuinely stock (`width 256 (stock), 0 composed`).
+
+### Four things the gates got wrong, which is why this section is long
+
+**1. "The machine's 256 columns must differ by 0 pixels" has never been true.**
+Measured on the *committed* build at 16:9 with the reveal on: band 0-14 **13229**
+px, right seam 248-255 **3338** px, and **136 px inside the machine's own run on
+six frames of 400**. The first two are the feature working. The gate as written
+cannot pass, so it cannot have been run; `native_cols.py` now reports the three
+regions separately and fails only on the third, which is the property anyone
+actually meant. **Compare that number across builds — it is 136 on both.**
+
+**2. `dupes.py` fails on the committed build.** 574 stacked pairs on `sdb_sweep`
+and 934 on `sdb_pan`, against `--max-stacked 500` and a committed baseline of
+37 follow / 367 locked. Identical before and after this change, so it is not a
+regression, but the quoted baseline does not reproduce over a 1168-frame
+follow-mode window.
+
+**3. `margin_track.py` does not reproduce either.** 20 and 12 anomalies on both
+builds where AGENTS.md records "one `cshift` on the sweep … and none on the pan
+vector". Same window question as (2): the baselines were taken over a different
+frame range, and nothing records which.
+
+**4. A gate that cannot see its own index will be right by luck.** `--present-out`
+writes capture file N for host frame N+1, so a frame's native block sits at
+`x0[N-1]` or `x0[N]`. The first version of `native_cols.py` hedged by taking the
+union of the two windows, which is several columns wider than the block and
+reported 35 failures that were entirely band and seam. Hedging an index this way
+makes the tool stricter than the thing it measures, and the strictness lands in
+the wrong place. It now takes the union **and** requires the narrow reading to be
+clean too, so being off by one cannot make it pass.
+
+### What is still not established
+
+- The **144-frame stand-down floor** (`SDB_MARGIN_STALE = 240`) was measured on
+  the stadium course. Bean Ball's characters park at state 0 for long stretches,
+  and nothing here says whether any object's *emission* gap there approaches 240.
+  It did not fire at all in this window, but that is one window.
+- The capture this was found on is a **16:9 locked-camera** session. Follow mode
+  and 21:9/32:9 were not played by hand after this change.
+- The gate baselines in (2) and (3) need re-establishing against a recorded window
+  before any of these numbers is quoted as a pass.

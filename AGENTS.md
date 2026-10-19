@@ -59,7 +59,7 @@ nesrecomp already integrates recomp-ui for the cycle host (`runner/cyc/project.c
 - **File size**: 262,160 bytes (16-byte header + 262,144 data)
 
 ### Key References
-- **`docs/research.md`** — ROM specs, NESRecomp framework details, sprite flickering analysis (§2, §2.1), PPU overclocking (§23), VSync (§24), widescreen (§25), margin sprites (§26), the pan judder (§27), Zelda/SMB/MesenCE research, input-frontier dossier (§18 pre-fix, §19 resolution)
+- **`docs/research.md`** — ROM specs, NESRecomp framework details, sprite flickering analysis (§2, §2.1), PPU overclocking (§23), VSync (§24), widescreen (§25), margin sprites (§26), the pan judder (§27), Zelda/SMB/MesenCE research, input-frontier dossier (§18 pre-fix, §19 resolution), **the Bean Ball margin fix (§34) and the margin gates that do not reproduce their baselines (§34, plan item 19)**
 - **`docs/plan.md`** — Consolidated project plan and todo list (merged from plan.md + todo.md)
 - **`README.md`** — Project overview, MesenCE installation options, frame comparison pipeline, TAS differential harness
 - **RetroPortingToolKit Docs**: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/main/data/docs
@@ -299,6 +299,45 @@ run, and **our own mods put nothing in the save state** — `CycHostExtras` has 
 savestate hook and `src/sdb_host_extras.c` registers none, so the flicker mod's
 published sprite list arrives empty and rebuilds over the first frame or two.
 
+### Three margin gates do not reproduce their own recorded baselines — believe a pre/post comparison instead
+
+Found while gating the Bean Ball margin fix, and **none of it is caused by that
+fix** — every one fails identically on the build before it. Plan item 19.
+
+1. **"The machine's 256 columns must differ by 0 pixels" has never been true.**
+   On the committed build, 400 frames of `sdb_sweep` at 16:9 with the reveal on:
+   band 0-14 **13229 px**, right seam 248-255 **3338 px**, and **136 px inside
+   the machine's own run on six frames of 400**. The first two are the feature
+   working. **A gate that cannot pass cannot have been run.** Use
+   `tools/widescreen/native_cols.py`: it reports the three regions separately
+   and fails only on the third. **The number to carry across builds is 136 — it
+   is 136 before and after the Bean Ball fix.**
+2. **`dupes.py` fails on the committed build**: 574 stacked pairs on `sdb_sweep`,
+   934 on `sdb_pan`, against `--max-stacked 500` and a baseline recorded below as
+   37 follow / 367 locked. 0 same-row clusters and 0 drifting on both, so it is
+   not the doubling artefact the tool exists for.
+3. **`margin_track.py` does not reproduce either**: 20 anomalies on `sdb_sweep`
+   and 12 on `sdb_pan`, where this file records "one `cshift` on the sweep … and
+   none on the pan vector".
+
+(2) and (3) are almost certainly the same root cause — **the baselines were taken
+over a frame range nothing records**, and the documented command reproduces a
+different one. Until they are re-established against a stated window, **neither
+tool's verdict means anything**, and the honest way to gate a change here is a
+**pre/post comparison of the same two builds**, which is what the Bean Ball fix
+was gated with and which does not depend on a baseline at all.
+
+### `--present-out` indexes one frame ahead of the trace — any tool pairing the two must handle it
+
+Capture file `N` holds host frame `N+1`, so a frame's native block sits at
+`x0[N-1]` or `x0[N]`. The first version of `native_cols.py` hedged by taking the
+**union** of the two windows, which is wider than the block and reported 35
+failures that were entirely band and seam — hedging an index this way makes a
+tool stricter than the thing it measures, and the strictness lands in the wrong
+place. It now takes the union **and** requires the narrow reading to be clean, so
+being off by one cannot make it pass. The same care belongs in any tool that
+pairs a capture with a trace line.
+
 ### The menu ghost — RESOLVED. The signal is "is anything on screen at all", not "did the screen change"
 
 A menu screen's roster is retired by the game writing `y=$F0` over every OAM slot
@@ -438,16 +477,43 @@ is a broken instrument, not a clean picture. `SDB_TRACE_JSON` + `json_trace.py`
 exists for the same reason — one JSON object per line, parsed with `json.loads`,
 which cannot care where a closer was printed.
 
-### Bean Ball: the flicker mod's sprite list degenerates while running — open
+### Bean Ball: the margin captured the characters and threw them away — RESOLVED
 
-From a played capture, game mode "bean ball": as the player runs across the full
-map the presented sprite list shrinks monotonically, 53 → 10, and by frame 714 a
-single player sprite remains, cut in half. `overflow 0`, `backstop 0` — not the
-§2.1 runaway list. The background is perfect (1183 composed, 1 pillarboxed), so
-the compositor is not involved; the flicker mod replaces the machine's sprites
-with its own list, so a short list is missing sprites. **Not established whether
-the game emits fewer or the mod drops them** — opposite fixes. Full detail and the
-next measurement in research §26 and plan item 14.
+Game mode "bean ball", where the whole map is playable left to right. From a
+played capture: everything correct to frame 829, then sprites progressively
+occluded one at a time — the upper-right one first, fully covered by 838, two
+more at 866, then the left of the screen, one fully covered at 883, the last
+non-player sprite at 906. **The order is the player's, so it differs between
+playthroughs; no frame number here is a target.**
+
+**It was never the flicker mod.** `SDB_TRACE_JSON`'s `oamn` (live OAM) against
+`pub` (the mod's published list) settles the question item 14 was shelved on: on
+**all 35 build frames `oamn − pub == 1`, exactly**, and stock emits *fewer*
+sprites than the mod config on 33 of 140 frames — never more. The game stops
+emitting a character at native column ≈250 (parts 8 → 4 → 1 → 0), which is its
+own off-screen cull, and **stock does the same**. The bug is that at 16:9 locked
+the canvas shows world `[32,457)` with the block at canvas column 8, so native
+column 250 is canvas column 258 with **167 columns of court to its right** —
+off the machine's screen, well inside the canvas, which is what the margin is for.
+
+**The margin held every one of them and then discarded them.** Record byte 0 is
+the object's **state byte `$43`**, all three draw sites led their identity test
+with `if (!cyc_mod_peek(rec)) continue`, and **the game parks an object at `$00`
+while still emitting it**. Measured: **216 of 252 capture events saw byte 0 ==
+`$00`, 155 of those objects were holding parts**, the margin **held 4570 parts
+over 141 frames and drew 719**, and `sdbR` never fired — the identity was stable
+and the parts were dropped anyway at presentation. One predicate now
+(`sdb_margin_live()`), shared by all three sites; `drawn` 880 → 3775, `peak`
+9 → 42, `captured`/`off-edge` identical at 917. Research §34, plan item 14.
+
+**Two lessons, both already paid for elsewhere in this file.** The `SDB_TRACE_JSON`
+reporter was a *fourth* copy of that rule and stricter than the draw sites, so it
+called six of seven live objects dead and made the margin look switched off when
+it was merely blind — the same failure as the missing newline and the misplaced
+closer, so **one predicate, called from every copy site, including the reporter**.
+And **this bug was invisible to every existing gate because it is inert on the
+stadium course**: the four vectors move `drawn` by −16/+44/+96/−105 over 3000
+frames. Only a course where the game parks objects at state 0 exposes it.
 
 ### Court input timings, measured — and input aimed earlier is silently dropped
 
@@ -529,7 +595,7 @@ over the flat court locks onto the wrong feature.
 
 ### docs/ Directory
 
-- **`docs/research.md`** — ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map (§13), MesenCE oracle (§16), NMI survey (§17), PPU overclocking (§23), VSync (§24), widescreen (§25), margin sprites (§26), the pan judder (§27)
+- **`docs/research.md`** — ROM specs, NESRecomp framework, NMI dispatcher/`$0100` map (§13), MesenCE oracle (§16), NMI survey (§17), PPU overclocking (§23), VSync (§24), widescreen (§25), margin sprites (§26), the pan judder (§27), **the Bean Ball margin fix (§34)**
 - **`docs/plan.md`** — Living project plan and todo list
 
 ## NESRecomp Submodule Status
@@ -838,12 +904,20 @@ line means the capture is off, not that there is nothing to capture.**
    it on all four vectors and **with and without the reveal** (`SDB_OVERSCAN=0`).
 2. **Machine columns untouched — and this is also the no-doubling proof.** Compare
    a `--present-out` run with margin sprites on against the same run with
-   `--margin-sprites 0`: the machine's 256 columns must differ by **0 pixels** on
-   every frame, while the canvas as a whole differs by a million-odd pixels. At
-   every aspect and both reveal states. With the reveal on, exclude the 8 revealed
-   columns from the comparison — revealing them is the point. It holds by
-   construction (the blit is clipped to the columns the machine does not own), but
-   measure it, do not reason about it.
+   `--margin-sprites 0`. **Do not use "0 pixels in the 256 columns" as the
+   criterion: it has never been true** and a gate that cannot pass cannot have
+   been run. On the committed build, 400 frames of `sdb_sweep` at 16:9 with the
+   reveal on, the difference breaks down as band 0-14 **13229 px**, right seam
+   248-255 **3338 px**, and **136 px inside the machine's own run (15-247) on six
+   frames**. The first two are the feature working — the revealed band exists to
+   be drawn, and the right seam exists because the machine clips at 255. **The
+   figure to carry across builds is the third one: 136, and it is 136 on both
+   sides of the Bean Ball fix.** Use `tools/widescreen/native_cols.py`, which
+   reports the three regions separately and fails only on the third. At every
+   aspect and both reveal states. It holds by construction (the blit is clipped to
+   the columns the machine does not own), but measure it, do not reason about it.
+   **Note the tool's exit 2** — it means it compared nothing, and a clean-looking
+   pass over zero frames is the failure mode this project keeps hitting.
 3. **Per-sprite audit** — `tools/widescreen/margin_track.py`. This is the gate that
    catches the artifacts the others cannot see, and it is the one to reach for when
    something looks wrong near an edge:
@@ -1239,10 +1313,10 @@ Reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/m
 | `tas/vectors/sdb_pan.input` | 24-frame LEFT/RIGHT alternation from frame 500; a still camera hides every margin boundary artefact |
 | `tas/vectors/sdb_sweep.input` | 72-frame holds alternating, i.e. the full 512-pixel world each way. Every margin artefact found so far needed a character to walk clean across an edge |
 | `tas/vectors/sdb_bar.input` | Court input repro (research §27): a left tap at 617 starts a run, then right, then down ×4. Built on the measured 412/594/617 timings — **input aimed before 594 is dropped** |
-| `tas/vectors/sdb_beanball.input` | **Recorded**, not written: a played Bean Ball run across the full map, the repro for the open flicker-mod list degeneration (research §26, plan item 14). Replay in a window, not headless |
+| `tas/vectors/sdb_beanball.input` | **Recorded**, not written: a played Bean Ball run across the full map. **Now the repro for a FIXED bug, not an open one** — the margin was capturing the characters walking off the end of the pitch and discarding them (research §34, plan item 14). Keep it: it is the only committed vector reaching a course where the game parks objects at state `$00`, and that is the only thing that exposes that class of bug — the four stadium vectors are inert against it. Replay in a window, not headless |
 | `tas/vectors/sdb_probe.input` | Diagnostic, not a test vector: LEFT in 4-frame pulses from frame 600, which is how **594** was measured as the frame the court starts accepting input (research §27 timings above). Keep it — it is the reproduction for the timing facts, and the facts cost three failed repros to establish |
 | `tools/flicker/` | Analysis scripts behind the research.md §2/§2.1 claims (OAM/record dumps, ref-finder, memdiff) + toolkit README |
-| `tools/widescreen/` | Analysis behind research.md §25-26, §30 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge (corr-explained shifts report as `cshift`, exit 0); `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite; **`json_trace.py` — reads the `SDB_TRACE_JSON=<from>-<to>` stream, one JSON object per line, which is what plan item 14 needs (`flicker` puts live OAM and the mod's published list side by side in one frame)**; **`bounds_gate.py` — asserts nothing is drawn past the court's own bounds `[40,480)` (the camera window, not the drawn extent `[32,480)`) on the presented PNGs; it exits 2 when it examined no frames, because the host's literal `%05d` output prefix makes a naive filename format read zero files and report a clean pass**; **`anchor_gate.py` — the camera anchor's gate (research §28): is the view still, is the court on its own picture, and are the machine's own 256 columns untouched. Needs THREE runs (locked, follow, stock) and `SDB_TRACE_JSON` on, because it is a comparison and not a single file; **run it against the follow capture too and it must FAIL**. Two index traps are documented at the constant: the anchor record with `f = N` belongs to presented file `N-1`, and one run's pixels must never be compared to another's**; **`cycframe.py` — the shared `--frame-log` reader the other four sit on, since four copies of the header parser meant a format change would break three tools silently**. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame; **`dupes.py` — duplicated margin parts, in BOTH shapes a duplicate takes: same row closer than 8 columns, and same column 1–7 rows apart. Its first version checked only the first shape and reported 0 failures on a build that visibly doubled a running player (research §30) — the artefact is the mirror image — so always confirm it FAILS on a known-broken build before believing a pass. **Exit 0 pass / 1 fail / 2 measured nothing.** The stacked count is comparative, not absolute — committed baselines are 367 (locked) and 37 (follow) against 3114 and 1668 for a build that doubles — so the threshold is `--max-stacked` (default 500, above both baselines). Needs `SDB_TRACE_CAPTURES` or it exits 2 having measured nothing**) |
+| `tools/widescreen/` | Analysis behind research.md §25-26, §30, §34 (`nametable.py` — the court's 512-px looping world and the `$23C0` attribute region; `blank_extent.py` — the per-row/per-column ink measurement the overscan crop is chosen from; `objects.py` — the per-object display records at `$0618`, and how many objects the game culls off-screen; `margin_track.py` — the per-sprite, per-frame audit of the margin sprites, and the gate to reach for when something looks wrong near an edge (corr-explained shifts report as `cshift`, exit 0) — **but its recorded baseline does not reproduce: 20 anomalies on `sdb_sweep` and 12 on `sdb_pan` where this file records one `cshift` and none on pan (plan item 19)**; `band_fault.py` — bar discontinuity across the revealed band, split into reconstruction vs margin-sprite; **`json_trace.py` — reads the `SDB_TRACE_JSON=<from>-<to>` stream, one JSON object per line; `flicker` puts live OAM and the mod's published list side by side in one frame, which is what settled plan item 14 (research §34: `oamn − pub == 1` on every build frame), and `margin` does the same for the margin objects**; **`bounds_gate.py` — asserts nothing is drawn past the court's own bounds `[40,480)` (the camera window, not the drawn extent `[32,480)`) on the presented PNGs; it exits 2 when it examined no frames, because the host's literal `%05d` output prefix makes a naive filename format read zero files and report a clean pass**; **`anchor_gate.py` — the camera anchor's gate (research §28): is the view still, is the court on its own picture, and are the machine's own 256 columns untouched. Needs THREE runs (locked, follow, stock) and `SDB_TRACE_JSON` on, because it is a comparison and not a single file; **run it against the follow capture too and it must FAIL**. Two index traps are documented at the constant: the anchor record with `f = N` belongs to presented file `N-1`, and one run's pixels must never be compared to another's**; **`cycframe.py` — the shared `--frame-log` reader the other four sit on, since four copies of the header parser meant a format change would break three tools silently**; **`native_cols.py` — GATE 2 as an instrument: margin-on against `--margin-sprites 0` on the presented PNGs, breaking the difference into band 0-14 / seam 248-255 / the machine's own run 15-247, because the gate's "0 pixels in the 256 columns" has never been true (13229 / 3338 / **136** on the committed build, research §34). Only the third is a failure, and it is the number to compare across builds. Exits 2 when it compared nothing**. **`band_fault.py`'s `BAR` colour is a placeholder and must be sampled before its output means anything** — a wrong colour reports "continuous" on every frame; **`dupes.py` — duplicated margin parts, in BOTH shapes a duplicate takes: same row closer than 8 columns, and same column 1–7 rows apart. Its first version checked only the first shape and reported 0 failures on a build that visibly doubled a running player (research §30) — the artefact is the mirror image — so always confirm it FAILS on a known-broken build before believing a pass. **Exit 0 pass / 1 fail / 2 measured nothing.** The stacked count is comparative, not absolute, so the threshold is `--max-stacked` (default 500). **But the recorded baselines — 367 locked / 37 follow — DO NOT REPRODUCE: the committed build reports 574 (sweep) and 934 (pan) over a 1168-frame follow-mode window, on this build and the one before it.** Treat a pass or a fail here as meaningless until the baseline is re-established against a stated frame range (plan item 19). Needs `SDB_TRACE_CAPTURES` or it exits 2 having measured nothing**) |
 | `tools/play_record.sh` | Play the game in a window and record the session as a replayable `--input` vector plus `SDB_TRACE=1` and per-frame screenshots, into `tmp/<name>/`. Pins `WindowScale`/Fullscreen/VSync, or the screenshots make the game run in slow motion. `SDB_UNLIMITED=1` drops `--exit-after` and runs until you close the window; closing it normally still flushes the vector's frame count (it is written from the destructor), but SIGKILL does not. `SDB_TCP=<port>` exposes the debug server so `tools/cheats/ram_tap.py` can sample the live window. `SDB_VECTOR=<file>` replays a recorded vector through the window unattended — the only way to capture without a person, and therefore the only way to gate the anchor. **It also writes a save state** (`state.bin`, `SDB_ANCHOR=<frame>`, default 600) so the run can be REPLAYED rather than merely re-executed: a vector carries the inputs to a run, not the run, and this game is random. The windowed host has no `--save-state`, so `tools/state/state_anchor.py` takes it over TCP. `SDB_ANCHOR_PROBE=<frames>` takes a second state later for `tools/state/state_check.py` to compare against — **defaults to 0, and that is measured**: two 450 KB states cannot be taken closer than ~6 frames apart on a 16.6 ms host loop, so a probe never reaches the frames where the machines still agree, and a check that reported drift on every run would be noise, not a gate. **There is no cheat flag**: for a recorded session *with* a cheat on, drive `nes_game` directly with `--record-input` and `--tcp` (README, "Recording a playthrough"), because the in-game Cheats menu is a mouse widget no script can drive. Never pass `--present-out` at fullscreen scale.
 | `tools/state/` | The capture's save-state anchor (`state_anchor.py`, `state_check.py`, README, research §33). Loading the capture's state puts a headless replay **exactly** back on the played machine — CPU, RAM, PPU, picture and the mods' records byte for byte. **How long that holds is NOT a frame count and must never be written down as one: measured guest-clean at +3 on both captures, then 85 bytes of guest drift by +9 on a scripted vector and ZERO on a played session.** The onset is content-dependent. Ruled out, so nobody redoes them: **not an index error** (both states record the same frame in their own header at offset 28, and sliding ±10 frames puts the minimum exactly on it — which is also how `--save-state F-1` was confirmed rather than assumed); **not the APU** (~15–24 bytes differ from the very first frame after the anchor while every other chunk is identical there, a standing offset, and `--wav-out` does not remove it: 1112→1108); **not input timing** (both hosts apply input before `cyc_session_frame_begin`). So it is a second *measurement* of the open windowed/headless divergence from a known-good starting point, not an explanation — **do not guess at it from here**. Two traps: `ping` then `read_ram` is two round trips inside a 16.6 ms frame, so RAM read that way belongs 2–3 frames past its label (measured 3), which made the first version report 160–460 differing bytes at every frame and read as a different machine — a probe *state* is used instead because it says what frame it is; and taking a state costs the window 3–6 frames, so two states cannot be closer than ~6 apart and the verification probe is off by default |
 | `cheats/` | `Super Dodge Ball (USA).cht`, the cheat file, copied beside the executable at build time and loaded at power-on. All 13 entries ship **disabled** — a cheat file is a menu, not a decision, and libretro-database ships it the same way. The 13 original entries come from libretro-database and are largely **unverified**: measured, `$058B:FF` and `$0019:8F` land but `$043B:00` and `$007B:80` do nothing measurable, and the four "Infinite Health (Possibility N)" codes freeze a byte that does not look like health (research.md §32). Codes we add go below them under their own heading. `cheats/README.md` has the format table and the provenance |
