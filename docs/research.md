@@ -300,7 +300,7 @@ is not "byte-identical", and the docs should say so.
 ## 2. Sprite Flickering Analysis
 
 > **Measured, not inferred.** Everything below is from `--frame-log` OAM/CIRAM dumps of the
-> cycle backend plus 6502 disassembly (`tools/dis65.py`). Analysis scripts lived in `tmp/scan/`
+> cycle backend plus 6502 disassembly (`tools/dis65.py`). Analysis scripts live in `tools/`
 > (scratch, gitignored). The earlier "Method 2 software sprite removal" hypothesis is **wrong**.
 
 ### The Symptom
@@ -1880,9 +1880,9 @@ were actually in force for it, and at the new ones:
 | capture | build | frames | judged at | result |
 |---|---|---|---|---|
 | stadium `sdb_sweep` | new | 770 court | `[40,480)` | **0 fail** |
-| `tmp/level-2-boundary-try2` | new | 2617 | `[40,480)` | **0 fail** |
-| `tmp/level-2-boundary` (try1) | old | 681 | `[0,512)` | 0 fail |
-| `tmp/level-2-boundary` (try1) | old | 681 | `[40,480)` | **275 fail**, top hits 4176–4183 |
+| level 2, second attempt | new | 2617 | `[40,480)` | **0 fail** |
+| level 2, first attempt | old | 681 | `[0,512)` | 0 fail |
+| level 2, first attempt | old | 681 | `[40,480)` | **275 fail**, top hits 4176–4183 |
 
 The last row is the control: the same capture and the same gate, judged at the
 new bounds, and the failures bracket the reported frame 4172. The try2 session is
@@ -2421,7 +2421,7 @@ rejected: stand the presentation down when the game's OAM page is entirely
 hidden.** It was rejected for missing a frame. That frame does not occur, and why
 it does not is the finding.
 
-`tmp/mysession` is a played session (level 1 into the between-rounds screen) with
+The capture is a played session (level 1 into the between-rounds screen) with
 its save state, and the guest says exactly what happens at the transition:
 
     window   sdb peak   presented list   OAM slots hidden
@@ -2507,8 +2507,9 @@ ghost. The **margin** had the same ghost from the other side and needed a
 different signal, because on that screen the page is not clear: the game is
 emitting 19 legitimate menu sprites the whole time.
 
-Measured on `tmp/mysession2`, a played session (level 1 into the between-rounds
-screen), where the right margin carried two figures from frame ~1250 to 1547:
+Measured on a played level-1 session into the between-rounds screen (captured with
+`tools/play_record.sh`, 1905 frames), where the right margin carried two figures from
+frame ~1250 to 1547:
 
     object      last emission   next      gap    screen columns
         6               1053      1557    504    271..290
@@ -2533,8 +2534,8 @@ having if the two states are separated:
 
     largest gap between two emissions of one object, in play
       sdb_sweep / sdb_throw / sdb_idle / sdb_pan, 3000 frames each    140
-      tmp/mysession2, 1905 frames                                      144
-    smallest gap that spans a menu, tmp/mysession2                      352
+      the played level-1 session, 1905 frames                            144
+    smallest gap that spans a menu in that session                        352
 
 Every in-play maximum is object 8 — the object research 26 already names as
 emitted least often and as one of the two standing in the margins — so this is
@@ -2579,7 +2580,8 @@ not the same rule, and only one of them was measuring the game.
 
 ### §26b — A re-identified slot resurrects the previous occupant's sprites — FIXED
 
-Found by playing, in `tmp/mysession3` (stage 2). Eleven tiles in a strip the game
+Found by playing, in a stage-2 session captured with `tools/play_record.sh`.
+Eleven tiles in a strip the game
 had not emitted for 595 frames slide out of the left edge from frame 1676, grow
 until 1693, and then sit there; pan left and the machine's own picture covers
 them, pan back and they return.
@@ -2670,7 +2672,7 @@ for a worse one**, which is why none shipped:
 | rule | what it fixed | what it broke |
 |---|---|---|
 | reject the list when any entry disagrees with OAM | the ghost | **87 of 128 disagreements are the attribute byte alone** — the game flipping a sprite's palette mid-build. Suppressed the mod through a whole super-throw capture: a character lost body parts on 8 frames |
-| reject when OAM is entirely empty | the ghost | correct, and it is the fix that shipped; the objection was that it "misses the frame the machine has already started the new screen (1 live sprite, 8 stale)". **No such frame exists in `tmp/mysession`** — the page reads 3 hidden or 64 hidden, never in between, and the next screen arrives with its own list |
+| reject when OAM is entirely empty | the ghost | correct, and it is the fix that shipped; the objection was that it "misses the frame the machine has already started the new screen (1 live sprite, 8 stale)". **No such frame exists in that capture** — the page reads 3 hidden or 64 hidden, never in between, and the next screen arrives with its own list |
 | reject when the presented list exceeds the machine's live sprite count | the ghost | **structurally impossible**: the mod presents up to 77 sprites and OAM holds 64, so exceeding it is the truncation fix working. Fired on 34 sweep frames |
 | `sdb_publish` stamps the frame the list was CAPTURED, not handed over | the ghost | correct in isolation, and it fixes the blob — but it also refuses the stale fallback on ordinary build transitions, where the published list is the right thing to show |
 
@@ -3383,11 +3385,27 @@ which is why `native_x0` has always been the right place for them. Hence two
 offsets, and the band is decided per row by measurement
 (`cyc_render_line_scroll_x(y) == s_ws_court`), never by hardcoding 48.
 
+**This is about the BACKGROUND and only the background.** It was read as settling
+the sprite layer's column too, which it does not, and the cost was the
+court-camera step below. Two offsets for the background are right because the
+background really is two windows. A sprite is not windowed at all.
+
 No margin sprite has been observed in the held band — 3333 parts over 81
 captured frames of a pan, rows 102..217 — so this only decides background rows
 and the native block's placement. It is per row anyway so that a row's scroll
 and its offset are always read together and cannot disagree, which is the
 "basis split" §26 records as a character drawn at a sixteenth of his width.
+
+**CORRECTION (2026-10-19), and it is only about the background.** Two offsets
+for the *background* is right and still is. Two offsets for the *sprite layer*
+was wrong, and it is what put the 84-column step in the court camera — see "The
+sprite layer gets ONE origin" below. The argument above ("anchoring the whole
+canvas on the court slides the HUD") is true and still true, and it is a
+statement about `native_x0` versus `s_ws_x0_court` for rows 0-47. It says
+nothing about which column a *sprite* belongs in, and reading it as if it did is
+what produced the jump. A sprite is not windowed: the game subtracts the camera
+from its X and stores a screen column, so it belongs to the court's world on
+every row.
 
 ### `cyc_render_set_native_origin` is what this was for
 
@@ -3567,10 +3585,114 @@ Follow mode has exactly one `(x0, xh)` pair per aspect (`152/152`, `299/299`),
 which is the proof that the per-row helper is a no-op there and stock is
 untouched.
 
+### The sprite layer gets ONE origin — the 84-column step, RESOLVED
+
+Reported from play, 2026-10-19, on a court-cam capture (`tools/play_record.sh`,
+locked, 16:9): a thrown ball **jumped** across the top of the picture as it
+crossed row 48, then jumped back. Not torn — whole, and moving 2 px a frame the
+rest of the time. Frames 524 → 525 stepped **−76**, and 556 → 557 stepped
+**+92**.
+
+**The measurement that identifies it.** The ball's canvas column over 516–566,
+against what the game's own cadence says it should be (2 px a frame, 8 every
+four, the same cadence §27 attributes to the game and MesenCE reproduces):
+
+```
+516..524   216 224 224 224 224 232 232 232 232      +8 every four frames
+525        156                                      ← −76, then +8 every four again
+529..556   164 172 180 188 196 204 212 212 ...      unbroken
+557        304                                      ← +92, then +8 every four again
+```
+
+−76 is −84 + 8 and +92 is +84 + 8. **84 is `s_ws_x0_court - s_ws_x0_held`** =
+169 − 85 — the gap between the court's anchored column and the centred one that
+rows 0–47 use. The ball is crossing the band's edge and being placed from two
+different canvas columns.
+
+**Why per row is right for the background and wrong for sprites.** These are
+different kinds of thing, and conflating them is the whole bug:
+
+- The **background** really is two windows. This game splits its scroll
+  mid-frame: rows 0–47 hold scroll 0 and carry the roster, rows 48–239 hold the
+  camera. Each window's columns have to go where that window's content is, so
+  the per-row offset is correct.
+- The **sprite layer** is one window. The machine has one OAM, one 256-wide
+  buffer, one canvas column per sprite. The game subtracts the camera from its X
+  and stores a plain screen column (`$823E/$8246: SEC / SBC $C3 / SBC $C4`), so a
+  sprite belongs to the court's world *whatever row it lands on*.
+
+Placing that one layer at two canvas columns is the artefact. `sdb_ws_sprite_origin()`
+now returns `s_ws_x0_court` for every entry. Unconditional, and therefore safe by
+construction rather than by measurement: on a declined frame and in follow mode
+`s_ws_x0_court == s_ws_x0_held == native_x0`, which is exactly what
+`sdb_ws_row_x0(y)` returned for every row.
+
+**The cost, and the measurement that defused it.** One origin means a sprite above
+row 48 sits 84 columns from the roster behind it. The first measurement of that
+was alarming: on the sweep vector, a high ball lands on roster ink on **68 of 68**
+such frames. But the same measurement on the **stock** 4:3 picture — no mods,
+follow mode, same vector — is also **68 of 68**. The ball genuinely flies over the
+roster in this game; it is a high throw over the crowd and the game draws it
+there itself. What one origin changes is *which* 85 columns of roster it covers,
+not whether it covers any. The displacement is **stable, not a slide**: measured
+at exactly 85 over 68 consecutive frames, because the game's own X is already
+camera-relative and the camera's contribution cancels.
+
+**Three rejected alternatives, all measured** (sweep vector, 16:9, locked,
+1000 frames, flicker mod on):
+
+| rule | torn | jumps | what it costs |
+|---|---|---|---|
+| per entry (original) | 16 / 95 | — | object cut in half, 84 columns apart |
+| per object | 0 | 2 / 50 | whole, but steps 84 on the frame the majority band flips |
+| **one sprite origin** | **0** | **0** | a high sprite is 85 columns from the roster — which stock does too |
+| one origin for the background too | 0 | 0 | the roster **slides**: 16 distinct left edges over 401 frames, 2–4 px steps, and its left edge leaves the canvas |
+
+The last one is the instructive one. `s_ws_x0_court` is `s_ws_court - s`, and
+`s_ws_court` *is the camera*, so anchoring the background on the court moves the
+roster with the camera — the objection §28's "why the offset is per row" records,
+and it is correct. It is only about the background.
+
+A fifth variant was derived and **not** shipped: put the held band at the *world*
+origin (`-s`, a constant, so the roster does not slide) and the sprite layer at
+the court's. It needs the compositor to clip the native-block copy, which
+**segfaults** today — `sdb_ws_anchor_frame`'s clamps exist precisely to keep that
+block on the canvas, so a negative origin violates the invariant they maintain.
+At 16:9 it would also clip 29 columns off the roster's left edge.
+
+**Gate.** Replayed through a window from the capture's own vector
+(`SDB_VECTOR=… tools/play_record.sh`), 702 frames, all three mods, 262 scanlines —
+the window because a headless replay of a recorded vector is a different machine
+from frame 4 (§ Known Issues):
+
+- ball's canvas column, 516–566: **2 teleports before, 0 after**
+- sweep, locked, 1000 frames: **3 court teleports before, 0 after** (`f598 +93`,
+  `f630 +77`, `f830 +84` — all three the 84±8 signature; the low-frame hits at
+  f15–346 are before the court exists at 412)
+- **follow mode byte-identical**, 701 of 701 presented frames at 16:9
+- `widescreen:` seam diff **0 px**, 1 pillarbox of 969; `margin sprites:` 41641
+  drawn, peak 70, backstop 0
+- `bounds_gate.py` (follow mode, the configuration its docstring documents):
+  **0 frames carry ink past the bounds**
+
+**Two traps in this measurement**, both of which produced a wrong answer first:
+
+- **`--camera locked` does not beat `state.toml`.** `build-cycle/mods/state.toml`
+  carries `camera = "locked"` under `[feature.values]`, and the launcher applies
+  it. A "follow mode" run without editing the catalog ran *locked*, and the gate
+  passed for the wrong reason. Derive a catalog per run, as every other gate here
+  does.
+- **`bounds_gate.py` does not support `--camera locked`.** It derives world
+  columns from the presented scroll, which is exactly what the anchor changes. It
+  reports ~9400 px of violation on **569 of 569** frames on the pre-change build
+  too — an identical failure, so not a regression, but a gate being run outside
+  its domain.
+
 ## 29. The margin seam: a character drawn in part at the handover
 
 Reported from play, 2026-10-16, on the locked-camera 21:9 capture
-(`tmp/margin-locked`): a player at the right edge of the court is whole, then
+(a court-cam capture made with `tools/play_record.sh`): a player at the right edge
+of the court is whole, then
 missing the top of his head, then whole again, with no input pressed. "Parts of
 his body start disappearing since that appears to be the border." A second
 player, rightmost in green, from frame 836. The margin-left and margin-right
@@ -3845,7 +3967,8 @@ with the camera following.
 
 ### What it looked like
 
-Reported from play, 2026-10-16, on a follow-camera capture (`tmp/follow1`):
+Reported from play, 2026-10-16, on a follow-camera capture made with
+`tools/play_record.sh`:
 player 1 running left is doubled. Not a gap this time — the seam artefact is
 gone — a ghost silhouette down the player's left side and a hole in the torso.
 
@@ -4085,8 +4208,8 @@ Measured on the played captures, after the correction:
 | | committed | this build |
 |---|---|---|
 | right seam, object 3, frames 805–820 | 2 bad | **0 bad** |
-| right margin, object 3 at f=712 (played, `tmp/right-follow`) | 5 parts | **8 parts** |
-| left margin, object 1 at f=816→817 (played, `tmp/lm-follow`) | 2 parts lost | **0 lost** |
+| right margin, object 3 at f=712 (played session) | 5 parts | **8 parts** |
+| left margin, object 1 at f=816→817 (played session) | 2 parts lost | **0 lost** |
 | `peak` / `backstop` | 76 / 22 | **48 / 0** |
 | gate 1, guest state | — | byte-identical |
 | gate 2, native columns | 54 fr / 1242 px | unchanged |
@@ -4094,7 +4217,7 @@ Measured on the played captures, after the correction:
 | `dupes.py`, locked capture | 0 / 12 / 367 | **0 / 0 / 355** |
 
 The A/B is on a **played** capture and the same vector replayed both ways, not on
-two sessions: `tmp/right-follow`, no fix versus fix, gives **620 → 0 px at f=712**
+two played sessions, no fix versus fix, gives **620 → 0 px at f=712**
 and **256 → 0 at f=716**. A played capture is the only trustworthy instrument here
 (research §30), and re-deriving the fix against it rather than asking for another
 session was the right call.

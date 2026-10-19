@@ -316,9 +316,9 @@ frame's own backdrop. Results:
 | capture | frames | judged at | result |
 |---|---|---|---|
 | stadium sweep | 770 court | `[40,480)` | **0 fail** |
-| `tmp/level-2-boundary-try2` | 2617 | `[40,480)` | **0 fail** |
-| `tmp/level-2-boundary` (old build) | 681 | `[0,512)` | 0 fail |
-| `tmp/level-2-boundary` (old build) | 681 | `[40,480)` | **275 fail** |
+| level 2, second attempt | 2617 | `[40,480)` | **0 fail** |
+| level 2, first attempt (old build) | 681 | `[0,512)` | 0 fail |
+| level 2, first attempt (old build) | 681 | `[40,480)` | **275 fail** |
 
 The last row is the control: same capture, same gate, new bounds — and the
 failures bracket the reported frame 4172.

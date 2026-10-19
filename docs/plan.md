@@ -176,10 +176,11 @@
 
     ### Getting the capture again — do not refer to scratch
 
-    The original capture is `tmp/bar-artifact-2/` (1.4 GB, **scratch, gitignored,
-    and not a source of truth**). Do not cite it and do not expect it to exist.
-    **Ask the owner to re-record it** — they are the only one who can play the
-    route; it is a specific mode plus a specific run:
+    The original capture was 1.4 GB of **scratch, gitignored, and not a source of
+    truth**. Do not cite a capture folder and do not expect one to exist — cite the
+    vector and the number instead (AGENTS.md, "Never cite a `tmp/` capture as the
+    source of a number"). **Ask the owner to re-record it** — they are the only one
+    who can play the route; it is a specific mode plus a specific run:
 
     ```bash
     SDB_SCALE=2 SDB_UNLIMITED=1 tools/play_record.sh bar-artifact-2
@@ -235,7 +236,7 @@
 
     **Item closed.** Both halves of the seam problem are fixed; the second was a basis disagreement rather than this one-build lag, and the two had been reported as one symptom for several passes. What structurally remains is that a straddling character is drawn by two sources at all.
 
-16. ~~**The menu ghost: a stale sprite list outliving its screen**~~ — **DONE** (research §26, "The menu ghost"). Fixed by `sdb_page_clear()`: when all 64 OAM slots are hidden, the machine is painting nothing, so the mod presents nothing. The signal the four failed rules lacked was not *the screen changed* but *is anything on screen at all*. Measured on a played session (`tmp/mysession`, level 1 into the between-rounds screen): the page goes from 3 hidden to 64 in one frame at window 868 and stays at 64 for **90 frames** while the mod's 60-sprite list is frozen — that is the ghost. Gates: the match (window 605-866) is **262/262 frames bit-identical** to the pre-fix build; `hid == 64` with a list held happens once in 3000 frames on each of throw / sweep / idle / pan, at frame 40 where the machine is empty; margin parts withheld on a match: **0**. Two traps cost a real bug each and are written up: read **`cyc_render_oam()`**, not `$0200` (the DMA source runs a frame ahead and blanked 6 frames of title screen), and do **not** make it a per-entry test on the entry's own slot (fires on slot 63 alone for 107 play frames — the mod's own cursor pin — and takes the legs off a player). The **margin** had the same ghost from the record-liveness side and is gated by the same test.
+16. ~~**The menu ghost: a stale sprite list outliving its screen**~~ — **DONE** (research §26, "The menu ghost"). Fixed by `sdb_page_clear()`: when all 64 OAM slots are hidden, the machine is painting nothing, so the mod presents nothing. The signal the four failed rules lacked was not *the screen changed* but *is anything on screen at all*. Measured on a played level-1 session into the between-rounds screen (captured with `tools/play_record.sh`): the page goes from 3 hidden to 64 in one frame at window 868 and stays at 64 for **90 frames** while the mod's 60-sprite list is frozen — that is the ghost. Gates: the match (window 605-866) is **262/262 frames bit-identical** to the pre-fix build; `hid == 64` with a list held happens once in 3000 frames on each of throw / sweep / idle / pan, at frame 40 where the machine is empty; margin parts withheld on a match: **0**. Two traps cost a real bug each and are written up: read **`cyc_render_oam()`**, not `$0200` (the DMA source runs a frame ahead and blanked 6 frames of title screen), and do **not** make it a per-entry test on the entry's own slot (fires on slot 63 alone for 107 play frames — the mod's own cursor pin — and takes the legs off a player). The **margin** had the same ghost from the record-liveness side and is gated by the same test.
 
 17. ~~**Cheat support**~~ — **DONE** (research §32). RetroArch/libretro `.cht` files load, with all four code kinds: `AAAA:VV`, `AAAA?CC:VV`, 8-hex Pro Action Replay, and 6/8-character Game Genie. Game Genie needed a new engine primitive (`patches/008`, a ROM read substitution) because the cycle backend had no way to substitute a value the CPU *reads*. Reached through the in-game menu — `Escape` → `Cheats`, one toggle per entry, applied on the spot — plus `--cheat` / `--cheats` / `--no-cheats` for headless work and a `cheat` TCP command for scripts. A freeze restores the byte it displaced when switched off, and a one-shot kind (`cheatN_once`) exists for event-shaped codes. libretro-database's 13 codes for this ROM load unchanged and **are largely not doing what they claim** — see research §32.
 

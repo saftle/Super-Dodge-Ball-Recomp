@@ -149,7 +149,8 @@ Three options (setup.sh uses Option C by default):
 - Debug byte dumps belong in `tmp/` (gitignored scratch), never in `src/`. Confirm offsets with `tools/dis65.py` plus a python byte-compare against the ROM before coding
 - **Every screenshot/frame-dump run gets its own subfolder under `tmp/`** (`tmp/<what-it-is>/`), never the shared `tmp/` top level and never an existing investigation's folder. A per-frame `--present-out`/`--screenshot`/`--frame-log` run writes tens of thousands of files and gigabytes; loose in `tmp/` they are impossible to tell apart and impossible to delete selectively. Delete the folder when the investigation is over, and say what it was before you do
 - `tmp/` is scratch, so **anything a reproduction depends on does not live there**: input schedules and vectors go in `tas/vectors/`, analysis scripts that back a research.md claim go in `tools/`
-- Pre-commit self-check: `git status --short` and `git ls-files | grep -Ei '\.(nes|png|ppm|bin)$'` must show no game-derived blobs; any new `static const uint8_t …[]` in `src/` needs ROM-provenance justification or gets rejected
+- **Never cite a `tmp/` capture as the source of a number in a tracked file.** A capture is scratch and gets deleted; the durable record is the figure, the vector that reproduces it (`tas/vectors/`) and the tool that derives it (`tools/`). Write "a played session, captured with `tools/play_record.sh`" and keep the number — naming the folder makes the claim unverifiable the moment the folder is gone, and the repo already carried dozens of them pointing at captures that no longer exist. Naming a `tmp/` path in a tracked file is fine when **a command in that same file creates it** (a recipe's own output directory, an `--out`/`--present-out`/`--frame-log` argument, a redirect); it is not fine when the path is the *evidence*.
+- Pre-commit self-check: `git status --short` and `git ls-files | grep -Ei '\.(nes|png|ppm|bin)$'` must show no game-derived blobs; any new `static const uint8_t …[]` in `src/` needs ROM-provenance justification or gets rejected. Also `git grep -n 'tmp/[a-z0-9-]' -- '*.md'` — read every hit and confirm a command in the same file creates that folder
 - Every third-party addition ships with provenance + license + posture, recorded at add time (never as later cleanup): who made it, under what license (or "no license file found"), and how redistribution is avoided — submodule pointer (own license, never vendored), gitignored + user-fetched (test ROMs, oracle binaries), or credited test fixture (vectors keep in-file + README author credit, link pages instead of re-hosting). Code/deps go in `NOTICE.md`; test data goes in the nearest README
 - Installed packages (pip/apt) are not distributed — no attribution needed. Code you write from specs (parsers, harnesses) is yours. Data files you didn't create keep their credits intact — never strip author info
 - **nesrecomp submodule tracks pristine `origin/master`** (currently `mstan/nesrecomp` @ `2b4fcdb` — the pin must stay fetchable upstream; never commit in the submodule). The **checked-out tree is expected to be dirty** when a patch is applied: `setup.sh` applies `patches/*.patch` after every checkout, so `git -C external/nesrecomp status` showing a patched file is normal, not a mistake. `git -C external/nesrecomp status` must otherwise be clean. Active patches must be **strictly additive** and are headed for upstream PRs — see `patches/README.md`, `patches/active-patches.md`
@@ -303,8 +304,8 @@ published sprite list arrives empty and rebuilds over the first frame or two.
 A menu screen's roster is retired by the game writing `y=$F0` over every OAM slot
 and then emitting nothing. `s_build_count` is not reset per frame (the build spans
 two), so the flicker mod repainted its frozen list for as long as the silence —
-**90 frames** on `tmp/mysession`, the whole level-1 roster around a between-rounds
-menu. The margin repainted one of them too, from the display records it never
+**90 frames** on a played level-1 session (captured with `tools/play_record.sh`),
+the whole roster around a between-rounds menu. The margin repainted one of them too, from the display records it never
 re-checks against OAM.
 
 `src/sdb_host_extras.c:sdb_page_clear()` — all 64 OAM slots hidden means the
@@ -324,7 +325,7 @@ bit-identical to the pre-fix build; `hid == 64` with a list held happens once in
   alone for 107 frames of ordinary play — slot 63 is where the mod's own cursor pin
   parks the game, so the game's tail-hide lands on entries the mod must draw — and
   the picture is a character losing its legs. The global test reads 64 or it reads
-  1..63; on `tmp/mysession` the only 64s are the 90 menu frames.
+  1..63; on the played level-1 session the only 64s are the 90 menu frames.
 - **`--load-state` restarts `s_frame` at 0**, so `SDB_TRACE_CAPTURES=a-b` and
   `SDB_TRACE_JSON=a-b` are relative to the *loaded* frame, not the host frame
   number. Asking for 600-900 on a run loaded at 605 prints nothing and
@@ -334,7 +335,7 @@ bit-identical to the pre-fix build; `hid == 64` with a list held happens once in
   passes because of it.
 - **Never run two `nes_game` against one mods dir**, not even two `--mods-root`
   copies of the same catalog state. Four concurrent gate runs left
-  `tmp/mysession/mods/state.toml` with all three features `enabled = false` and the
+  one capture's `mods/state.toml` with all three features `enabled = false` and the
   next replay ran stock — a different guest, so the diff reported 77 frames
   "changed" that had not. Copy the catalog per run.
 
@@ -675,9 +676,9 @@ Gates:
    legitimately shows the end wall and pillarbox a correct frame. Gate it on the output with
    `tools/widescreen/bounds_gate.py`, which reads the PNGs: every margin column whose world
    column is outside the bounds must be the frame's **own backdrop**, which is palette entry 0
-   and therefore not always black. Results: stadium `sdb_sweep` 770 court frames **0 fail**;
-   `tmp/level-2-boundary-try2` (new build, first session to reach camera 224) 2617 frames **0
-   fail**. The control is `tmp/level-2-boundary` (old build) judged at the new bounds: **275 of
+   and therefore not always black. Results: stadium `sdb_sweep` 770 court frames **0 fail**; a
+   level-2 played session on the new build (the first to reach camera 224) 2617 frames **0
+   fail**. The control is the *same* level-2 session on the old build, judged at the new bounds: **275 of
    681 fail**, top hits 4176–4183, bracketing the reported 4172 — judged at the bounds it
    actually ran with (`[0,512)`) it is 0 fail, which is what "no bound was in force" looks like.
    **This gate was wrong five times and every error produced a false POSITIVE**, so treat a new
@@ -1014,7 +1015,8 @@ whose job is to suppress them — until the game emitted the new occupant, the
 capture refreshed the identity, the gate started agreeing, and the old parts came
 back wearing the new one's name.
 
-From a played session (`tmp/mysession3`, stage 2), object slot 0 in three lines:
+From a played stage-2 session (captured with `tools/play_record.sh`), object slot 0
+in three lines:
 
 ```
 f=96     n=8   identity 00/48    the menu's object

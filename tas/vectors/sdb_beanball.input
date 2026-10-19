@@ -1,7 +1,7 @@
 # Super Dodge Ball (USA) - "bean ball run" input schedule.
 #
-# RECORDED, not written. This is `tmp/bar-artifact-2/repro.input`, captured with
-# `nes_game --record-input` by playing the game, in game mode BEAN BALL, then
+# RECORDED, not written. Captured with `nes_game --record-input` (or
+# `tools/play_record.sh`) by playing the game, in game mode BEAN BALL, then
 # running across the full map. Kept because the Bean Ball sprite-list
 # degeneration (research.md 26, plan.md item 14) needs a run in that mode, and
 # no hand-written schedule reproduces it: the camera has to travel the whole map

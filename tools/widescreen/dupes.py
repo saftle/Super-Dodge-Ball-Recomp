@@ -28,7 +28,7 @@ is the shape the artefact actually has rather than a guess at a tolerance.
   python3 tools/widescreen/dupes.py TRACE [from] [to]
 
 The 8 is not a guess. Measured over the 1232-frame played capture in
-tmp/doubling, every same-row pair the game emits is exactly 8 apart -- the
+a played session, every same-row pair the game emits is exactly 8 apart -- the
 histogram has a single bucket -- because a character is sixteen columns of two
 eight-wide sprites. Anything closer than 8 on one row is therefore two parts
 where there should be one.

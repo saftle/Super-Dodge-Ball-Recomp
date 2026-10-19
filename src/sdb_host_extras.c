@@ -246,6 +246,8 @@ static int s_ws_here;            /* this frame: did the anchor engage? */
 /* Where native column 0 sits, for one screen row. Forward-declared for
  * sdb_present; defined with the anchor arithmetic. */
 static int sdb_ws_row_x0(int y);
+static int sdb_ws_sprite_origin(void);
+static int sdb_ws_margin_shift(int prow, int origin);
 
 /* The frame counter and capture-trace range live here (rather than with the
  * flicker state below) because the object-index callback above needs them. */
@@ -339,7 +341,8 @@ static int  s_margin_peak;          /* most sprites painted in one frame */
  * The record is the wrong thing for this question, though: the between-rounds
  * screens leave every record standing while the game stops emitting the whole
  * roster, so the margin keeps repainting whatever stood off the right edge of
- * the pitch. Measured on a played session (`tmp/mysession2`), the object list
+ * the pitch. Measured on a played level-1 session (1905 frames, captured with
+ * `tools/play_record.sh`), the object list
  * goes quiet between frames 1041-1205 and resumes at 1557 -- objects 6, 7 and
  * 8 stand in the right margin at screen columns 271-330 for that whole
  * stretch, drawn from a capture the game made 504 frames earlier and has not
@@ -347,8 +350,8 @@ static int  s_margin_peak;          /* most sprites painted in one frame */
  *
  *     largest gap between two emissions of one object, in play:
  *       sdb_sweep / sdb_throw / sdb_idle / sdb_pan, 3000 frames each    140
- *       tmp/mysession2, 1905 frames                                   144
- *     smallest gap that spans a menu, tmp/mysession2                   352
+ *       the played level-1 session, 1905 frames                       144
+ *     smallest gap that spans a menu in that session                   352
  *
  * Every one of those in-play maxima is object 8 -- the object research 26
  * already names as emitted least often and as one of the two that stand in the
@@ -902,7 +905,8 @@ static int sdb_margin_capture(uint16_t addr)
      * NEW identity, the gate now agrees, and every part the OLD occupant left in
      * `o->parts` becomes drawable again.
      *
-     * Measured on a played session (`tmp/mysession3`, stage 2). Object slot 0:
+     * Measured on a played stage-2 session (captured with
+     * `tools/play_record.sh`). Object slot 0:
      *
      *     f=96     n=8   identity 00/48    the menu's object
      *     f=1081   n=19  identity 00/48    11 more parts arrive, same identity
@@ -1546,7 +1550,7 @@ static void sdb_margin_blit(const SdbMargin *m, int px0, uint32_t *out, int widt
  * The mod's list is a build old by construction (research 26: one to three
  * frames during play), which is a price worth paying -- but the game is allowed
  * to stop emitting entirely, and then "one build old" is a lie that lasts as
- * long as the silence. Measured on a played session (`tmp/mysession`): the last
+ * long as the silence. Measured on a played level-1 session: the last
  * capture is frame 867 with 60 sprites, `peak` is 0 on every one of frames
  * 868-956, and the mod repaints those same 60 for all 89 of them -- the whole
  * level-1 roster standing around a between-rounds menu for a second and a half.
@@ -1792,8 +1796,8 @@ static void sdb_ws_prune_margin(void)
             /* RETIRE ONLY IF THE MACHINE OWNS *ALL* OF THE PART.
              *
              * This was "did the machine paint ANY of this part's columns", and
-             * that drops the band. Measured at frame 817 of the played capture
-             * tmp/lm-follow: object 1 holds a part at sx = 4, which spans columns
+             * that drops the band. Measured at frame 817 of a played session:
+             * object 1 holds a part at sx = 4, which spans columns
              * 4-11. Columns 4-7 are inside the clip band and PPUMASK means the
              * machine can never paint them -- the margin is the only renderer
              * there. Columns 8-11 are in the machine's run and it DID paint
@@ -1819,8 +1823,8 @@ static void sdb_ws_prune_margin(void)
                  * buffer ends at 255 -- so it is the margin's exclusive
                  * territory and nothing can own it. Skipping these columns
                  * instead of claiming them retired the right-margin sprites:
-                 * measured at frames 711->712 and 715->716 of the played capture
-                 * tmp/right-follow, object 3 lost the parts at c=257 and c=256,
+                 * measured at frames 711->712 and 715->716 of a played session,
+                 * object 3 lost the parts at c=257 and c=256,
                  * which are exactly the parts covering 256-265, and a bald
                  * character in the right margin lost its pixels on both.
                  *
@@ -1920,7 +1924,7 @@ static int sdb_ws_margin_pass(uint32_t *canvas, int cw)
             int scroll = cyc_render_line_scroll_x(prow);
             int rx0 = sdb_ws_row_x0(prow);
             int sx = (rec_x + corr) + m->dx - scroll - 4;
-            int px0 = sx + rx0;
+            int px0 = sx + rx0 + sdb_ws_margin_shift(prow, rx0 - scroll);
             /* ONLY parts that STRADDLE THE RIGHT EDGE of the native block, and
              * only the columns inside it. Three restrictions, each earned:
              *
@@ -2101,12 +2105,47 @@ static const uint32_t *sdb_present(void *ctx, int *width, int *height)
          * one x0 per call and a character's parts share a row band, so this is
          * per entry and not per part -- the split that research 26 records as a
          * character drawn at a sixteenth of his width would be a per-part
-         * decision, and this is not one. */
+         * decision, and this is not one.
+         *
+         * KNOWN WRONG, AND NOT FIXABLE HERE. `sdb_ws_row_x0` wants a row and this
+         * passes the sprite's OAM Y, which is the line ABOVE the first one
+         * `sdb_blit` paints. A sprite whose OAM Y sits in the held band while its
+         * drawn rows are court rows is therefore placed at the held offset, and
+         * one object comes apart by exactly the difference between the two
+         * offsets. Measured on a court-cam played session, ball pass at frame
+         * 612: the ball's top pair has OAM Y = 46 and paints rows 47-54 -- 46 is
+         * held, 47-54 are all court -- so it went to 85 and landed at canvas
+         * 140..155 while its bottom half, OAM Y 54, went to 169 and landed at
+         * 224..239. One ball, two places, 84 columns apart.
+         *
+         * `y + 1` is more nearly right and measurably fixes nothing: the sprite
+         * is two rows into the held band, not one, and any sprite can be a
+         * different distance in.
+         *
+         * Taking the band from the sprite's LAST drawn row instead does fix
+         * those 16 frames -- and breaks 16 others that this version gets right,
+         * with NO overlap between the two sets (old 611-618 and 647-654; last-row
+         * 619-626 and 639-646). So it trades one set of tears for another rather
+         * than removing them, and it was reverted on that measurement: 16 of 95
+         * frames tear either way.
+         *
+         * What the disjoint sets mean is that a rule DOES exist that gets both
+         * right, and what it needs is the object's other parts: the 611 case wants
+         * the court's offset because the ball is mostly in court rows, and the 619
+         * case wants the held offset for the same ball because it is mostly in
+         * held rows. Neither is decidable from one sprite alone -- it is a
+         * per-OBJECT decision, and this list is flat, one entry per hardware
+         * sprite. Grouping it is the same identity work research 31 does with the
+         * game's own sprite index ($4D).
+         *
+         * Until then: `camera = locked` only, and only for objects crossing the
+         * game's own scroll split at row 48. Ball cam has one offset for every
+         * row, so the question never arises and the picture is correct. */
         for (int i = count - 1; i >= 0; i--)
-            sdb_blit(&list[i], s_canvas, cw, *height, sdb_ws_row_x0(list[i].y));
+            sdb_blit(&list[i], s_canvas, cw, *height, sdb_ws_sprite_origin());
         const uint8_t *oam = cyc_render_oam();
         SdbSprite front = { oam[0], oam[1], oam[2], oam[3] };
-        sdb_blit(&front, s_canvas, cw, *height, sdb_ws_row_x0(front.y));
+        sdb_blit(&front, s_canvas, cw, *height, sdb_ws_sprite_origin());
         /* LAST, because everything above overwrites the native columns. The
          * margin's own columns outside the block are already correct from the
          * compositor and are left alone. */
@@ -2914,11 +2953,94 @@ static void sdb_ws_anchor_frame(int width, int native_x0)
  * 81 captured frames of a pan, rows 102..217 -- so this only decides background
  * rows and the native block's own placement. It is per row rather than a single
  * offset anyway so that the row's scroll and its offset are always read
- * together, and cannot disagree. */
+ * together, and cannot disagree.
+ *
+ * BACKGROUND ONLY. This is NOT the right function for a sprite: the sprite layer
+ * is one window and this splits it in two, which is the 84-column court-camera
+ * step. See `sdb_ws_sprite_origin` below. Nothing above this line is wrong --
+ * the two offsets are correct for the background, which really is two windows
+ * -- and reading the argument above as if it settled the sprite layer's column
+ * as well is what produced that step. */
 static int sdb_ws_row_x0(int y)
 {
     if (y < 0) y = 0; else if (y > 239) y = 239;
     return cyc_render_line_scroll_x(y) == s_ws_court ? s_ws_x0_court : s_ws_x0_held;
+}
+
+/* Where native column 0 sits for the SPRITE LAYER -- one value, every row.
+ *
+ * `sdb_ws_row_x0` is right for the BACKGROUND and wrong for sprites, and the
+ * reason is that they are not the same kind of thing. The background really is
+ * two windows: this game splits its scroll mid-frame, rows 0-47 hold scroll 0
+ * and carry the roster, rows 48-239 hold the camera, and each window's columns
+ * have to go where that window's content is. The sprite layer is ONE window,
+ * because the machine has one OAM, one 256-wide buffer and one canvas column per
+ * sprite -- the game subtracts the camera from its X and stores a plain screen
+ * column, so a sprite belongs to the court's world whatever row it lands on.
+ * Placing that one layer at two canvas columns is what makes an object crossing
+ * row 48 come apart, or step, by `s_ws_x0_court - s_ws_x0_held` (169 - 85 = 84).
+ *
+ * MEASURED on a court-cam played session, a thrown ball crossing row 48. The
+ * ball moves 2 px a frame and steps 8 every four, like everything else in this
+ * game and like MesenCE's copy of it; the only jumps in its canvas column are
+ * between frames 524 and 525 (-76) and between 556 and 557 (+92), each one 84
+ * plus the 8 columns of real motion. Ball camera never sees it and never could:
+ * in follow mode both offsets are `native_x0`, so the question does not arise.
+ *
+ * THE COST, AND WHY IT IS NOT A NEW ONE. One origin means a sprite above row 48
+ * sits 84 columns from the roster behind it -- a stable displacement, measured
+ * at exactly 85 over 68 consecutive high-ball frames, because the game's own X
+ * is already camera-relative and the camera's contribution cancels.
+ *
+ * It looks alarming, because 68 of 68 high balls then overlap roster ink. But
+ * so does the STOCK picture: measured on the same vector at 256x240 with no
+ * mods and follow mode, 68 of 68 as well. The ball genuinely flies over the
+ * roster in this game -- it is a high throw over the crowd -- and the game
+ * draws it there itself. What one origin changes is which 85 columns of roster
+ * it covers, not whether it covers any.
+ *
+ * The two rejected alternatives are worse, and both were measured on the sweep
+ * vector, 16:9, locked, 1000 frames, flicker mod on:
+ *
+ *   per entry (what this replaces) -- the object is whole but steps 84 on the
+ *     one frame the band holding most of its rows changes: 2 such frames per 50
+ *     of the court-cam ball window, and 3 more over 1000 sweep frames. Per entry
+ *     rather than per object it TORN instead, on 16 of 95, which is why the
+ *     per-object rule existed first. Two rules, two defects, one cause: both
+ *     asked this function's answer for a layer it does not describe.
+ *   one origin for the BACKGROUND too -- no step at all, and the roster slides:
+ *     16 distinct left edges over 401 frames in 2-4 px steps, because
+ *     `s_ws_x0_court` is `s_ws_court - s` and `s_ws_court` is the camera. Its
+ *     left edge also leaves the canvas. Both plainly visible.
+ *
+ * Unconditional, because on a declined frame and in follow mode
+ * `s_ws_x0_court == s_ws_x0_held == native_x0` and this is then exactly what
+ * `sdb_ws_row_x0(y)` returned for every row -- so follow mode cannot move. */
+static int sdb_ws_sprite_origin(void)
+{
+    return s_ws_x0_court;
+}
+
+/* How far a margin part's placement shifts, so the margin takes one anchor too.
+ *
+ * A margin part is placed at `world + (row offset - row scroll) - 4`: its
+ * object's world column, put through the same anchor as its row's background.
+ * `row offset - row scroll` IS that anchor, so it still differs by band once
+ * both offsets are equal -- 169 on a held row (scroll 0), -47 on a court row
+ * (scroll 216) -- and a margin sprite would take the same step across row 48
+ * the collapse just removed from the machine's own sprites.
+ *
+ * Zero unless the anchor is engaged. In follow mode and on a declined frame this
+ * expression is already the identity, so the default camera is untouched by
+ * construction rather than by measurement. No margin part has ever been observed
+ * in the held band (3333 parts over 81 captured frames of a pan, rows 102-217),
+ * so this does not fire in practice -- it is here so that the margin cannot
+ * develop the same artefact the moment one does. */
+static int sdb_ws_margin_shift(int prow, int origin)
+{
+    (void)prow;
+    if (!s_ws_here) return 0;
+    return (s_ws_x0_court - s_ws_court) - origin;
 }
 
 /* Put the anchor back to "one offset, the centred one the engine chose" and say
@@ -3209,8 +3331,8 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
              * lives -- which is longer than the object does. A between-rounds
              * screen leaves every record standing and stops emitting the whole
              * roster, and the margin then repaints whatever stood off the right
-             * edge of the pitch for the length of the menu. Measured on
-             * `tmp/mysession2`: objects 6, 7 and 8 held screen columns 271-330
+             * edge of the pitch for the length of the menu. Measured on a played
+             * level-1 session: objects 6, 7 and 8 held screen columns 271-330
              * from frame 1250 to 1547 off a capture made at frame 1053, 504
              * frames earlier and never touched since.
              *
@@ -3329,7 +3451,8 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * court band's columns move and the held band's do not, and the
                  * two are read together with the scroll above. */
                 int rx0 = sdb_ws_row_x0(prow);
-                int sx = (rec_x + corr) + m->dx - scroll - 4;
+                int sx = (rec_x + corr) + m->dx - scroll - 4
+                       + sdb_ws_margin_shift(prow, rx0 - scroll);
                 /* Completing a sprite the PPU clipped is the one case the margin
                  * owns rather than the machine. */
                 /* THE LEFT MIRROR OF THE RIGHT STRADDLE, and the same test.
