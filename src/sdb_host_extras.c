@@ -206,9 +206,41 @@ typedef struct {
 
 /* The world's own bounds, moved up from the compositor because the post-stamp
  * margin pass in sdb_present needs them and runs before it. */
-#define SDB_WS_CAM_MIN 40          /* $E6AF: LDA #$28 */
-#define SDB_WS_CAM_MAX 224         /* $E6B9: LDA #$E0 */
+#define SDB_WS_CAM_MIN 40          /* $A6AF: LDA #$28 -- where the camera RESTS */
+#define SDB_WS_CAM_MAX 224         /* $A6B9: LDA #$E0 */
 #define SDB_WS_VIEW_W  256         /* the viewport's width, in world columns */
+/* How far past [CAM_MIN, CAM_MAX] the camera may actually reach, and so how far
+ * the anchor's "is this a court frame" test has to tolerate before standing the
+ * anchor down. NOT a fudge: the game's own clamp at $A6AF is one-sided (BCC skips
+ * the store when $61 is already below 40), so $C3 receives a lower target
+ * verbatim, and the camera really does go left of 40 -- measured on a court-cam
+ * played session, it holds $C3 = 32 for 32 frames while a ball is thrown left,
+ * and standing the anchor down there re-centres the whole canvas, which is a
+ * 93-column jump. See the note at the test.
+ *
+ * 8 is measured, not chosen. Over 3457 in-match samples -- the played session
+ * plus four vectors -- $C3 spans 32..216, i.e. 8 past CAM_MIN at the left and
+ * never past CAM_MAX at the right. A slack of 8 therefore admits the whole
+ * observed range while leaving the menu screens (scroll 0) comfortably outside,
+ * which is what the test is for. Widening it to cover CAM_MAX + slack as well
+ * was measured and is WRONG: it lets the block run 10 columns off the right edge
+ * at the camera's far end (16 of 1085 sweep frames), because the interval it
+ * has to fit in is already empty at 16:9 and every column of slack spent at one
+ * end is a column stolen at the other. */
+#define SDB_WS_CAM_SLACK 8
+
+/* The range the camera ACTUALLY reaches, as distinct from the clamp it is given.
+ * Measured over 3457 in-match samples -- a court-cam played session plus four
+ * vectors -- $C3 spans [32, 216], not the nominal [40, 224]. Both ends matter.
+ * The left one is the slack above; the right one matters because the anchor's
+ * interval is ALREADY EMPTY at 16:9 (the canvas holds 170 columns and the
+ * camera spans 184), so every column admitted at one end is a column stolen at
+ * the other. Using the nominal 224 there admitted 8 columns the game never asks
+ * for and pushed 10 columns of the block off the canvas's right edge -- measured
+ * 16 of 1085 sweep frames, a hard vertical seam in the court at f=267. */
+#define SDB_WS_CAM_LO_SEEN 32       /* measured, not nominal */
+#define SDB_WS_CAM_HI_SEEN 216
+
 #define SDB_WS_LO (SDB_WS_CAM_MIN)
 #define SDB_WS_HI (SDB_WS_CAM_MAX + SDB_WS_VIEW_W)
 static int s_ws_reveal;         /* overscan: the clip is being revealed */
@@ -246,6 +278,7 @@ static int s_ws_here;            /* this frame: did the anchor engage? */
 /* Where native column 0 sits, for one screen row. Forward-declared for
  * sdb_present; defined with the anchor arithmetic. */
 static int sdb_ws_row_x0(int y);
+static int sdb_ws_band_native(int rx0);
 static int sdb_ws_sprite_origin(void);
 static int sdb_ws_margin_shift(int prow, int origin);
 
@@ -2076,8 +2109,15 @@ static const uint32_t *sdb_present(void *ctx, int *width, int *height)
          * the machine's, including the clip the game asked for, so the band is
          * correct and must be kept. */
         {
-            int first = s_ws_reveal ? SDB_WS_CLIP : 0;
-            if (x0 >= 0 && x0 + 256 <= cw && ch >= 240 && first < 256)
+            /* ZERO, like the compositor's own stamp, and for the same reason:
+             * the machine's native 0..7 are black because PPUMASK hides them, and
+             * that is the machine's content for those columns. Skipping them here
+             * made this a canvas-column skip, which is the same eight columns only
+             * while the block is at canvas 0 -- and with the camera locked it is
+             * not. It also would have left the flicker mod's own sprite list
+             * un-stamped in eight columns it draws into, which is a third consumer
+             * of the same wrong number. */
+            if (x0 >= 0 && x0 + 256 <= cw && ch >= 240)
                 /* PER ROW, not one x0 for the whole picture: with the camera
                  * locked the compositor puts the court band and the held band at
                  * two different canvas columns, and rows 0-47 -- the skyline, the
@@ -2093,6 +2133,8 @@ static const uint32_t *sdb_present(void *ctx, int *width, int *height)
                 for (int y = 0; y < 240; y++) {
                     int rx0 = sdb_ws_row_x0(y);
                     if (rx0 < 0 || rx0 + 256 > cw) continue;
+                    int first = sdb_ws_band_native(rx0);
+                    if (first >= 256) continue;
                     memcpy(s_canvas + (size_t)y * cw + rx0 + first,
                            s_picture + (size_t)y * 256 + first,
                            (size_t)(256 - first) * sizeof(uint32_t));
@@ -2900,33 +2942,159 @@ static void sdb_ws_anchor_frame(int width, int native_x0)
      * (measured: anchor f=12..140 all read `scroll 0, x0 20` where the centred
      * position is 152).
      *
-     * The test is the game's OWN camera window -- the clamp at $E6AB, the same
-     * [40, 224] the bound is built from. During play the camera cannot leave it,
-     * so this costs nothing where it matters and catches exactly the frames the
-     * clamp does not govern: title, menus, and the locked intro camera that
-     * $DBBB sets to 0 for ~204 frames at the start of a course. The last of those
-     * is already documented above as "a cosmetic cost for a locked intro
-     * camera, and the right way round"; this makes it true of the picture too
-     * rather than only of the margin.
+     * The test is the game's OWN camera window -- the clamp at $A6AB, the same
+     * [40, 224] the bound is built from -- plus slack, and the slack is not a
+     * fudge. Read the clamp:
      *
-     * Menus then render exactly as they do in follow mode, which is to say
-     * centred. */
-    if (s_ws_court < SDB_WS_CAM_MIN || s_ws_court > SDB_WS_CAM_MAX) {
+     *     A6AB: A9 00  LDA #$00    / STA $C2
+     *     A6AF: A9 28  LDA #$28    / CMP $61   / BCC $A6B9   ; $61 < 40 -> skip
+     *     A6B5:        STA $61                     ; else $61 = 40
+     *     A6B9: A9 E0  LDA #$E0    / CMP $61   / BCS $A6C1   ; $61 >= 224 -> skip
+     *     A6BF:        STA $61                     ; else $61 = 224
+     *     A6C1: A5 61  LDA $61     / STA $C3
+     *
+     * It clamps the TARGET, and it is one-sided: `BCC` skips the store when
+     * `$61` is already below 40, so `$C3` receives 32 verbatim. **The camera can
+     * and does go left of 40** -- measured on a court-cam played session, the
+     * game asks for `$C3 = 32` and holds it for 32 frames (f621..f652) while a
+     * ball is thrown left, which is exactly when the player notices the whole
+     * picture jump.
+     *
+     * So [40, 224] is where the camera RESTS, not where it can reach, and
+     * testing `scroll` against it with no slack stood the anchor down for those
+     * 32 frames. Standing the anchor down is not a small thing: it re-centres
+     * the picture, so declining and re-engaging moves the entire canvas, and
+     * that -- not the camera's own 8-column step -- was the 93-column jump.
+     * Measured, 16:9, same session: `f623 anchor 40 -> -53` and
+     * `f655 anchor -53 -> 40`, 93 columns each way.
+     *
+     * The slack has to cover the reachable range and nothing more, because the
+     * test's real job is still to catch title screens, menus and the $DBBB intro
+     * camera -- all of which sit at scroll 0, far outside it. 32 is the furthest
+     * the camera has been observed to go left; the right-hand end is the mirror
+     * of the clamp's own limit. Menus then still render exactly as they do in
+     * follow mode, which is to say centred. */
+    if (s_ws_court < SDB_WS_CAM_MIN - SDB_WS_CAM_SLACK ||
+        s_ws_court > SDB_WS_CAM_MAX) {
         s_ws_x0_court = s_ws_x0_held = native_x0;
         s_ws_anchor = s_ws_court - native_x0;
         s_ws_framed++;
         return;
     }
 
-    /* Centre the court's own window on the canvas, then move it only as far as
-     * keeping the machine's own 256 columns on the canvas requires. Two clamps,
-     * both about the native block's placement rather than the court's:
-     * `s > court` would put native column 0 at a negative canvas column (the
-     * $DBBB intro sets the camera to 0, so this bites), and the other would run
-     * the block off the right edge at the camera's extremes. */
+    /* THE ANCHOR IS A FUNCTION OF THE WIDTH AND OF NOTHING ELSE. That is the
+     * whole contract of this mode: `s` is the world column the canvas's column 0
+     * shows, so if it moves, the entire picture moves, and everything this mode
+     * exists to do is undone in one frame.
+     *
+     * It was not. Both clamps below used `s_ws_court`, which is the game's
+     * camera, so the anchor inherited every step the camera took whenever the
+     * clamp fired -- and the left clamp fires for the entire time the camera is
+     * left of centre. Measured on a court-cam played session, 16:9: four
+     * distinct anchor values over 681 frames where there must be one, and the
+     * view jerking on four of them --
+     *
+     *     f=591  scroll=45   anchor  47 ->  45    -2 columns
+     *     f=595  scroll=40   anchor  45 ->  40    -5
+     *     f=623  scroll=32   anchor  40 -> -53   -93   <- the one that reads as
+     *     f=655  scroll=40   anchor -53 ->  40   +93      "the camera jumped"
+     *
+     * The mechanism is one line. With the left clamp engaged, `s == s_ws_court`,
+     * and then `s_ws_x0_court = s_ws_court - s` is identically ZERO: the native
+     * block is pinned to canvas column 0 whatever the camera does. The camera
+     * moving 40 -> 32 moves the block's world content by 8 columns while the
+     * block itself stays put, so the world slides under a fixed block. On the
+     * way back it slides the other way. The step is the camera's, the 93-column
+     * jump is the clamp letting go, and both are the anchor's fault rather than
+     * the game's.
+     *
+     * WHY IT WAS WRITTEN THAT WAY, because the reasoning is not wrong, only the
+     * scope is. Both clamps are about keeping the machine's own 256 columns ON
+     * THE CANVAS: `s > court` would put native column 0 at a negative canvas
+     * column, and the other would run the block off the right edge. That is a
+     * real constraint, at the camera's extremes -- but it is a constraint on
+     * WHERE THE BLOCK MAY SIT, not on which world column the canvas shows, and
+     * satisfying it per frame by moving the anchor destroys the mode. It has to
+     * be satisfied by choosing an anchor that is valid across the WHOLE camera
+     * range, once.
+     *
+     * So: pick the anchor from the width, clamp it ONCE against the camera's
+     * full range rather than against this frame's camera. Note that the right
+     * end of the court's own test is still the nominal `CAM_MAX` and NOT
+     * `CAM_HI_SEEN`: the game has never been observed past 216, but a target
+     * above `CAM_MAX` is a frame the clamp itself would have rewritten, so
+     * standing down there costs nothing and keeps the test honest about what it
+     * is -- "the camera is somewhere the clamp could have sent it". The left end
+     * is the opposite, because the clamp does NOT rewrite a low target.
+     *
+     * `want` is the ideal: centre the court's 440 columns on the canvas. It can
+     * be negative -- at 16:9 the court is wider than the canvas, so the view
+     * starts inside the court's left edge -- and that is fine and intended; a
+     * negative anchor means canvas column 0 shows world column `|want|`.
+     *
+     * The two clamps below then ask the only question left, which is whether a
+     * single anchor can keep the block on canvas for EVERY camera:
+     *
+     *   s_ws_x0_court = s_ws_court - s   must be in [0, width-256]
+     *
+     * which for `s` over the camera's measured range means
+     *
+     *   s >= SDB_WS_CAM_HI_SEEN - (width - 256)   (the most negative x0_court)
+     *   s <= SDB_WS_CAM_LO_SEEN                   (the most positive one)
+     *
+     * At 16:9 (width 426) that is s in [46, 32] -- EMPTY, so no single anchor
+     * exists and something has to give. The court's 440 columns cannot fit in a
+     * 426-wide canvas at every camera position, which is a fact about the level
+     * and not about this code. What matters is that the SAME anchor is used at
+     * every camera, so the choice is made once and the picture is still, and
+     * that whichever end is given up is given up CONSISTENTLY -- which is what
+     * the clamp order below decides, and getting it wrong costs the seam check.
+     * See the note there.
+     *
+     * `anchor_gate.py` asserts exactly this -- one value over the frames the
+     * anchor engaged on -- and it is why this is a gate failure rather than a
+     * preference. It had been passing on the sweep vector, whose camera spends
+     * most of its time inside the unclamped middle; only a played session put
+     * the camera hard against the left clamp, which is the entire left half of
+     * `sdb_ws_sweep`'s pan and was sitting there unnoticed. */
     int s = (SDB_WS_LO + SDB_WS_HI - width) / 2;
-    if (s > s_ws_court) s = s_ws_court;
-    if (s < s_ws_court - (width - 256)) s = s_ws_court - (width - 256);
+    /* Then the two clamps, and they are NOT symmetric and cannot be: the block
+     * has to be ON the canvas, all 256 of its columns, because three consumers
+     * assume it and none of them can be taught otherwise in this pass --
+     *
+     *     the seam check        out + y*width + row_x0 + x, x in 0..255, and a
+     *                          negative row_x0 indexes before the row
+     *     the stamp             memcpy of the whole 256-wide row there
+     *     the owner map         sdb_ws_build_owner indexes native columns 0..255
+     *
+     * With `s` out of range the seam check reads out of bounds and the frame is
+     * pillarboxed: measured 1192 px of seam diff and 33 pillarboxed frames over
+     * 670, from picking the nearer end of an empty interval. That is worse than
+     * anything it fixed, and the mistake was treating "keep the block on canvas"
+     * as symmetric when the block can only be off one end at a time.
+     *
+     * So: s_lo first (block's right edge on canvas), then s_hi (left edge). On an
+     * empty interval -- 16:9, where the court is 440 wide and the canvas 426 --
+     * the second wins and `s` ends at s_hi, which keeps the block's LEFT edge on
+     * the canvas at every camera and lets it run off the right at the far end of
+     * the pan. The compositor already has the answer for columns outside the
+     * canvas: the margin is painted from the nametable and bounded by
+     * `sdb_ws_in_bounds`. What is not acceptable, and is all this fixes, is the
+     * anchor moving.
+     *
+     *   width 426: ideal 47, interval [54,32] empty -> s = 32, x0_court 0..184
+     *     over the measured camera range 32..224 (canvas room 0..170, so the last
+     *     14 columns of the block leave the right edge at the far end and are
+     *     margin-filled)
+     *   width 560: ideal -20, interval [-80,32]     -> -20, clean, 52..244
+     *   width 854: ideal -167, interval [-374,32]   -> -167, clean, 199..391
+     *
+     * Measured after both fixes on that session: ONE anchor value per aspect, no
+     * anchor changes, seam diff back to 0, and none of the four jerks. */
+    int s_lo = SDB_WS_CAM_HI_SEEN - (width - 256);
+    int s_hi = SDB_WS_CAM_LO_SEEN;
+    if (s < s_lo) s = s_lo;
+    if (s > s_hi) s = s_hi;
     s_ws_anchor = s;
     s_ws_x0_court = s_ws_court - s;
     s_ws_x0_held = native_x0;
@@ -2965,6 +3133,124 @@ static int sdb_ws_row_x0(int y)
 {
     if (y < 0) y = 0; else if (y > 239) y = 239;
     return cyc_render_line_scroll_x(y) == s_ws_court ? s_ws_x0_court : s_ws_x0_held;
+}
+
+/* The first NATIVE column the block must not stamp over, given where the block
+ * sits on the canvas.
+ *
+ * THE BAND IS CANVAS COLUMNS 0..SDB_WS_CLIP-1. `SDB_WS_CLIP` was being applied as
+ * a NATIVE offset instead, and those are the same eight columns only while the
+ * block sits at canvas 0 -- never true with `camera = locked`, because the block
+ * then slides inside the canvas as the camera steps inside the court's window.
+ * Measured at 16:9 on a court-cam capture, `row_x0` is 8 at scroll 40 and 0 at
+ * scroll 32, so the two readings differ by a whole camera step on a regular basis
+ * and the skip moved with it.
+ *
+ * Returned in native columns because that is what all three consumers index by:
+ * the compositor's stamp, `sdb_present`'s own stamp, and the seam check.
+ *
+ *     the block's native column n is at canvas rx0 + n
+ *     the HIDDEN columns are native 0..7, at canvas rx0..rx0+7
+ *
+ * So the band follows the BLOCK, not the canvas edge, and that is the whole
+ * point. It was expressed as a canvas band (canvas 0..7) applied to native
+ * columns, which are the same eight only while `rx0 == 0`, and with
+ * `camera = locked` they never are: `row_x0` is `scroll - anchor`, measured 8 at
+ * scroll 40 and 0 at scroll 32 at 16:9, so the two readings come apart by a whole
+ * camera step on a regular basis.
+ *
+ * THE FLAVOUR THAT MATTERS. A canvas-anchored band asks "are canvas columns 0..7
+ * hidden?", and the answer flips with the camera -- which is the reported artefact.
+ * A block-anchored band asks "are the block's own hidden columns on the canvas?",
+ * and the answer is a property of the block: yes whenever `rx0 <= 7`, no when the
+ * block has slid clear of them. That is stable, it does not depend on the camera's
+ * parity, and when the answer is no there is genuinely nothing to reveal because
+ * canvas 0..7 was never the block's -- it is margin, and out of court bounds, so
+ * it is black for an unrelated and correct reason.
+ *
+ * When `rx0 < 0` the block hangs off the left and all eight hidden columns are on
+ * the canvas at canvas `rx0..rx0+7`, so all eight are revealed and the skip is the
+ * full `SDB_WS_CLIP`.
+ *
+ * Returns 0 when the reveal is off, which is the pre-existing behaviour exactly:
+ * all 256 columns are the machine's, the clip the game asked for included.
+ *
+ * MEASURED, replay against replay (two builds, same vector, court cam 16:9), art
+ * pixels in canvas columns 0..7:
+ *
+ *   before:  739 / 0 / 745  flipping every time the camera crossed 8
+ *   after:   0 art on every frame in the window, no flip
+ *
+ * The gate is the band itself, not a whole-image diff. The band's contents depend
+ * on where the block sits, so a whole-frame comparison shows the band MOVING
+ * rather than showing it fixed -- and a capture-versus-replay diff is meaningless
+ * here for a second reason: a windowed capture is 239 rows and a headless replay
+ * is 240, so every row is off by one. */
+static int sdb_ws_band_native(int rx0)
+{
+    /* `rx0` IS consulted, and it is the only thing that makes the band stop
+     * travelling. See the long note below.
+     *
+     * The band is the BLOCK'S OWN hidden columns -- native 0..SDB_WS_CLIP-1 --
+     * which the machine leaves black because PPUMASK hides them, and which the
+     * reveal exists so the compositor's reconstruction shows through instead.
+     * `SDB_WS_CLIP` is the native index, so this is the number that was always
+     * right.
+     *
+     * It was worth having one function rather than three copies of
+     * `s_ws_reveal ? SDB_WS_CLIP : 0`, because the question "which eight columns
+     * are hidden" has two answers the moment the camera is locked: the block's own
+     * (native 0..7) or the canvas's leading edge, and those are the same eight
+     * only while the block sits at canvas 0. With `camera = locked` the block
+     * slides inside the canvas -- `row_x0` is `scroll - anchor`, measured 8 at
+     * scroll 40 and 0 at scroll 32 at 16:9 -- so the band's meaning flipped as the
+     * camera stepped. Measured on a court-cam capture with the ball thrown left,
+     * replayed against itself over frames 600..699: the art count in canvas
+     * columns 0..7 alternated between 739 and 0 on every camera crossing, and a
+     * sprite standing in those eight columns was swallowed while it read wrong.
+     *
+     * Neither of the two repairs is right. Making the band follow the canvas is
+     * what it already did. Making it follow the block fixes the flicker and stops
+     * the reveal doing anything at all -- measured, 167 frames of visible work
+     * became 0 -- because the block's hidden columns are only on the canvas about
+     * half the time. So the reveal is turned OFF under `camera = locked`, where
+     * the two readings cannot be told apart, and left exactly as it was
+     * everywhere else. See `sdb_ws_set_camera`.
+     *
+     * THE BAND FOLLOWS THE BLOCK, AND IT IS ALWAYS `SDB_WS_CLIP` COLUMNS WIDE.
+     * `rx0` does not change its width, it only changes how much of it survives
+     * when the block hangs off the left edge:
+     *
+     *     the block's native column n is at canvas rx0 + n
+     *     the HIDDEN columns are native 0..SDB_WS_CLIP-1, at canvas rx0..rx0+7
+     *
+     * `rx0 >= 0` -- all eight are on the canvas, so skip all eight. There is no
+     * upper test here and there never should be: `rx0` is 0, 8 or 207 across a
+     * locked 16:9/32:9 run, and an earlier version that read `rx0 >=
+     * SDB_WS_CLIP` as "slid clear, nothing to reveal" left the machine's backdrop
+     * in place at `rx0 == 0`, so the band came back black there. Measured: 1912
+     * black of 1912 in those eight columns on every frame the camera sat at 32.
+     *
+     * `rx0 < 0` -- the block hangs off the left, and the columns still on the
+     * canvas are canvas 0..rx0+7, which is `rx0 + SDB_WS_CLIP` of them.
+     *
+     * So the answer is the full width, clamped against zero for the hanging
+     * case.
+     *
+     * WHAT IT IS NOT, and the earlier version of this function was exactly this
+     * and was wrong: a guard of the form `if (rx0 >= SDB_WS_CLIP) return 0`,
+     * reading "the hidden columns are off-canvas". Under a locked camera that is
+     * true and correct -- there is nothing of the block's to reveal, canvas 0..7 is
+     * margin. Under a FOLLOW camera `rx0` is `native_x0` = 85 and the same guard
+     * fires too, so it silently turned the reveal off for the entire default
+     * camera: measured **650 of 701** follow frames changed against the binary
+     * before it. `rx0` alone cannot distinguish "slid clear" from "centred".
+     *
+     * So there is no early return, and the caller decides: the reveal is a
+     * whole-frame decision made in `sdb_ws_set_camera`, not a per-row one. */
+    if (!s_ws_reveal) return 0;
+    int skip = rx0 >= 0 ? SDB_WS_CLIP : rx0 + SDB_WS_CLIP;
+    return skip < 0 ? 0 : skip;
 }
 
 /* Where native column 0 sits for the SPRITE LAYER -- one value, every row.
@@ -3176,7 +3462,27 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
          * clears it, and getting the polarity backwards paints real court in
          * the eight columns the PPU painted with the backdrop. The clip is in
          * screen columns, so it lands on the native 256, not on the world. */
-        int clip = s_ws_reveal ? 0 : ((cyc_render_line_mask(y) & 0x02) ? 0 : SDB_WS_CLIP);
+        /* THE CLIP IS IN NATIVE COLUMNS, WHICH IS CORRECT, AND IT WAS ALSO BEING
+         * OVERRIDDEN BY `s_ws_reveal` IN A WAY THAT PUT THE BANDS IN TWO PLACES.
+         *
+         * The band the player sees is the BLOCK's own PPUMASK-hidden native 0..7,
+         * which lands at canvas `row_x0 .. row_x0+7`. Under a locked camera
+         * `row_x0` is `scroll - anchor` and so slides with the camera -- measured
+         * 8 at scroll 40 and 0 at scroll 32 at 16:9 -- so the band slides too.
+         *
+         * With the reveal forced to 0 here (so the reconstruction draws the world
+         * everywhere) and `keep` skipping native 0..7 in the stamp (so the machine's
+         * PPUMASK backdrop is not put back), the two agree and the band is filled.
+         * With the reveal forced OFF, `keep` became 0, the stamp wrote the
+         * machine's backdrop into native 0..7, and the band came back as a hard
+         * 8-column black bar travelling with the camera. That is the artefact.
+         *
+         * So the reveal is ON here again and the skip in the stamp is what has to
+         * follow the block. See `sdb_ws_band_native`. */
+        int clip = (s_ws_reveal || (cyc_render_line_mask(y) & 0x02)) ? 0 : SDB_WS_CLIP;
+        /* Native columns the stamp below will NOT put back, so this loop owns
+         * them outright -- see `sdb_ws_band_native`. */
+        int keep = sdb_ws_band_native(row_x0);
         uint32_t *row = out + (size_t)y * width;
         for (int x = 0; x < width; x++) {
             int off = x - row_x0;
@@ -3192,8 +3498,22 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
              * those columns, so bounding them would report a reconstruction
              * failure for a camera position that legitimately shows the end wall
              * -- measured at 225..240 -- and pillarbox a frame that is correct.
-             * The margin is ours alone, so bounding it is free of that. */
-            if ((off < 0 || off >= 256) && !sdb_ws_in_bounds(wx)) {
+             * The margin is ours alone, so bounding it is free of that.
+             *
+             * AND THE REVEALED BAND IS NOT "THE NATIVE 256" -- THAT IS THE BUG
+             * THIS PARAGRAPH HAD. The band is native 0..7, it is ours, and it
+             * gets the same bounds test the margin does. Without that it was
+             * exempt purely for being inside the block, and the exemption showed:
+             * canvas columns 0..7 are world 32..39 under `camera = locked` at
+             * EITHER camera position, but the block sits over them only when it
+             * is flush left (`row_x0 == 0`). Block flush left, the columns took
+             * the margin path and read black; block slid right (`row_x0 == 8`),
+             * the same world columns came through the block's exemption and drew
+             * 745 nametable pixels that are outside the court. So the band's
+             * appearance flipped on every camera step -- one transition instead
+             * of the flip-per-step it was, and the same defect. */
+            if ((off < 0 || off >= 256 || (off >= 0 && off < keep)) &&
+                !sdb_ws_in_bounds(wx)) {
                 row[x] = cyc_render_color(0);
                 continue;
             }
@@ -3201,14 +3521,35 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
         }
     }
 
-    /* The revealed columns are meant to differ, so they are not compared. */
-    int first = s_ws_reveal ? SDB_WS_CLIP : 0;
+    /* The revealed columns are meant to differ, so they are not compared.
+     *
+     * AND THE BLOCK MAY HANG OFF AN EDGE, so this is clipped. A still anchor
+     * cannot always keep all 256 columns on the canvas: at 16:9 the canvas has
+     * room for 170 and the camera's measured range spans 184, so 14 columns of
+     * the block sit off the right edge at the far right of a pan whichever
+     * anchor is chosen. The old code avoided that by MOVING the anchor, which is
+     * the 93-column jump this whole change exists to stop -- so the overhang is
+     * accepted and clipped here instead.
+     *
+     * Clipping is what the canvas is for: the columns that fall off are margin,
+     * already reconstructed from the nametable by the loop above and bounded by
+     * `sdb_ws_in_bounds`. What must not happen is indexing past the end of a
+     * row -- `out + y*width + row_x0 + x` with row_x0 + x >= width reads the
+     * NEXT row and compares the wrong thing, which is how the unclipped version
+     * reported 1192 px of seam diff and pillarboxed 33 frames of 670. */
+    /* In canvas space, like everything else that touches the band. */
+    int first = sdb_ws_band_native(sdb_ws_row_x0(0));
     long diff = 0;
     if (cyc_render_background(s_ws_native_bg)) {
         for (int y = 0; y < 240; y++) {
-            const uint32_t *row = out + (size_t)y * width + sdb_ws_row_x0(y);
+            int rx0 = sdb_ws_row_x0(y);
+            int lo = first, hi = 256;
+            if (rx0 + lo < 0) lo = -rx0;               /* off the left edge */
+            if (rx0 + hi > width) hi = width - rx0;    /* off the right edge */
+            if (lo >= hi) continue;
+            const uint32_t *row = out + (size_t)y * width + rx0;
             const uint32_t *bg = s_ws_native_bg + (size_t)y * 256;
-            for (int x = first; x < 256; x++) {
+            for (int x = lo; x < hi; x++) {
                 if (opaque && !opaque[(size_t)y * 256 + x]) continue;
                 if (row[x] != bg[x]) diff++;
             }
@@ -3240,10 +3581,31 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
     sdb_ws_build_owner(native);
     sdb_ws_prune_margin();
 
-    int keep = s_ws_reveal ? SDB_WS_CLIP : 0;
-    for (int y = 0; y < height; y++)
-        memcpy(out + (size_t)y * width + sdb_ws_row_x0(y) + keep,
-               native + (size_t)y * 256 + keep, (256 - keep) * sizeof(uint32_t));
+    /* Clipped for the same reason as the seam check above, and this one is not
+     * merely a wrong comparison: an unclipped memcpy of 256 columns at row_x0
+     * 180 on a 426-wide canvas writes 10 pixels past the end of every row but
+     * the last, into the next row's first columns. The canvas is
+     * `width * height` with nothing after it, so the last row's overrun is a
+     * heap write off the end of the buffer.
+     *
+     * The skip is in CANVAS columns, translated per row. `SDB_WS_CLIP` was applied
+     * as a NATIVE offset, which is the same eight columns only while the block sits
+     * at canvas 0 -- never true with `camera = locked`, where the block slides
+     * inside the canvas as the camera steps. Measured at 16:9 on a court-cam
+     * capture, `row_x0` is 8 at scroll 40 and 0 at scroll 32, so the skip moved
+     * with the camera: it ate eight real columns of court on one side of a step
+     * and left eight unwritten on the other, which is the black band appearing
+     * and disappearing and a sprite standing in it being swallowed. See
+     * `sdb_ws_band_native` for the arithmetic and the measurement. */
+    for (int y = 0; y < height; y++) {
+        int rx0 = sdb_ws_row_x0(y);
+        int lo = sdb_ws_band_native(rx0), hi = 256;
+        if (rx0 + lo < 0) lo = -rx0;
+        if (rx0 + hi > width) hi = width - rx0;
+        if (lo >= hi) continue;
+        memcpy(out + (size_t)y * width + rx0 + lo,
+               native + (size_t)y * 256 + lo, (hi - lo) * sizeof(uint32_t));
+    }
 
     /* Declare where the native picture actually went. The flicker mod's wide
      * path reads this (cyc_render_native_origin) to place its own sprite list,
@@ -3774,6 +4136,20 @@ static void sdb_ws_set_overscan(int on)
 static void sdb_ws_set_camera(int locked)
 {
     s_ws_lock = locked ? 1 : 0;
+    /* Nothing about the reveal is decided here, and that took a measurement to
+     * establish. It was: `if (s_ws_lock) s_ws_reveal = 0`, on the reading that
+     * canvas columns 0..7 have one meaning under a locked camera and another under
+     * a follow one. They do -- but the band is the BLOCK's own PPUMASK-hidden
+     * native 0..7, which travels with the block, so it can be anchored to the
+     * block and both cameras keep it. Turning the reveal off instead left the
+     * machine's backdrop in those eight columns and produced a hard 8-column
+     * black bar sweeping left and right with the camera, which is the same
+     * artefact by the other route.
+     *
+     * The fix is `sdb_ws_band_native`, which skips as many native columns as the
+     * block's hidden columns actually occupy on the canvas. See there for the
+     * `rx0`-guard that looked equivalent and was not: it cannot tell "slid clear"
+     * from "centred" and it changed 650 of 701 follow frames. */
 }
 
 /* Reset callbacks run before every activation pass, so a disabled feature

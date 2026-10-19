@@ -3675,7 +3675,272 @@ from frame 4 (§ Known Issues):
 - `bounds_gate.py` (follow mode, the configuration its docstring documents):
   **0 frames carry ink past the bounds**
 
-**Two traps in this measurement**, both of which produced a wrong answer first:
+### The anchor itself moved — the court camera's real bug, RESOLVED
+
+Reported from play, 2026-10-19, on a court-cam capture (`tools/play_record.sh`,
+locked, 16:9): **the entire picture jerks left when the ball is thrown left**,
+and back when it returns. Frames 622 → 623. It also happens in ball cam, "a
+little bit, only slightly" — which is the clue, because ball cam's picture is
+*supposed* to move with the camera.
+
+**Measured, and it was two bugs stacked.**
+
+*The anchor, not the camera.* `s_ws_anchor` is the world column canvas column 0
+shows, so if it moves the whole picture moves. It is supposed to be a function of
+the width and nothing else. It was not — **four distinct values over 681 frames**:
+
+```
+f=591  scroll=45   anchor  47 ->  45    -2
+f=595  scroll=40   anchor  45 ->  40    -5
+f=623  scroll=32   anchor  40 -> -53   -93   <- the visible one
+f=655  scroll=40   anchor -53 ->  40   +93
+```
+
+One line did it:
+
+```c
+int s = (SDB_WS_LO + SDB_WS_HI - width) / 2;
+if (s > s_ws_court) s = s_ws_court;      /* <-- inherits the camera */
+```
+
+With the left clamp engaged, `s == s_ws_court`, and then
+`s_ws_x0_court = s_ws_court - s` is identically **zero** — the block is pinned to
+canvas column 0 whatever the camera does, for as long as the camera is left of
+centre. The camera moving 40 → 32 slides the world's content 8 columns under a
+fixed block. The step is the camera's; the 93 is the clamp letting go.
+
+*The decline.* At f623 the anchor is stood down entirely (`here=0`), because
+`scroll=32` fails the "is this a court frame" test `scroll < 40`. Standing down
+re-centres the picture, which is a 93-column jump by itself.
+
+**`[40, 224]` is where the camera RESTS, not where it can reach.** The game's own
+clamp, `$A6AB`:
+
+```
+A6AB: A9 00  LDA #$00  / STA $C2
+A6AF: A9 28  LDA #$28  / CMP $61  / BCC $A6B9    ; $61 < 40 -> SKIP the store
+A6B5:              STA $61                        ; else $61 = 40
+A6B9: A9 E0  LDA #$E0  / CMP $61  / BCS $A6C1    ; $61 >= 224 -> skip
+A6BF:              STA $61                        ; else $61 = 224
+A6C1: A5 61  LDA $61   / STA $C3
+```
+
+It clamps the **target** `$61`, and it is **one-sided**: `BCC` skips the store
+when `$61` is already below 40, so `$C3` receives a lower value verbatim. The
+camera really does go left of 40 — it holds `$C3 = 32` for 32 frames (f621..f652)
+on exactly the throw the player noticed. Measured range over 3457 in-match
+samples (this session plus four vectors): **`$C3` spans [32, 216]**, not the
+nominal [40, 224].
+
+**The fix, in three parts.**
+
+1. The anchor is computed from the **width and the measured camera range**, never
+   from this frame's camera, and clamped **once**:
+   `s_lo = CAM_HI_SEEN - (width-256)`, `s_hi = CAM_LO_SEEN`.
+2. The court-frame test tolerates `SDB_WS_CAM_SLACK` (8) on the left. The test's
+   real job is still to catch title screens, menus and the `$DBBB` intro camera,
+   all of which sit at scroll 0 — far outside.
+3. **Three consumers are clipped**, because a still anchor cannot always keep all
+   256 columns on canvas. At 16:9 the canvas holds 170 columns and the camera
+   spans 184, so 14 columns of the block hang off an edge at the far end of a pan
+   *whichever anchor is chosen*. The old code avoided that by moving the anchor —
+   which is the bug. So the overhang is accepted and clipped: the seam check, the
+   `memcpy` that stamps the machine's own picture back, and (by inspection) the
+   owner map. The `memcpy` is the one that matters — unclipped, it writes 22
+   pixels past the end of the buffer on the last row.
+
+**The interval is EMPTY at 16:9, and that is a fact about the level.** The court's
+440 columns do not fit a 426-wide canvas at every camera position. The clamps
+resolve it by order (`s_lo` then `s_hi`, so `s_hi` wins), which keeps the block's
+LEFT edge on canvas at every camera and lets it hang off the right. The columns
+that hang off are margin, already reconstructed from the nametable and bounded by
+`sdb_ws_in_bounds`; measured, the presented frame's right edge is continuous
+content to the last column, no seam and no black band.
+
+**Gate.** Four vectors × three aspects, locked, flicker mod on:
+
+| | anchor | mid-match moves | x0 range | pillarboxed |
+|---|---|---|---|---|
+| sweep / pan / idle, 16:9 | one value (32) | **0** | 8..192 | **1** (was 65) |
+| throw, 16:9 | one value (32) | **0** | 8..192 | **1** (was 101) |
+| sweep / pan, 21:9 | one value (−20) | **0** | 60..244 | 1 |
+| sweep / pan, 32:9 | one value (−167) | **0** | 207..391 | 1 |
+
+Seam diff 0 px everywhere (2 px on `sdb_throw`, its normal value). Follow mode
+**byte-identical**, 701/701 on both `sdb_sweep` and `sdb_pan`. On the reported
+capture the whole-picture shift is **zero on every frame of 400–699**; the
+`f622 → f623` case is 0 columns where it was −8.
+
+**Ball cam is not affected, and was never broken.** Over f560..699 the picture
+moves on 6 frames, by 5–8 columns each, and every one is the game's own camera
+easing `65 → 58 → 52 → 45 → 40 → 32` — the 6–7 px staircase of §27, which ball cam
+is *supposed* to follow. The player was right that it happens there too and right
+that it is much smaller: in follow mode the picture moves by the camera's step and
+nothing else.
+
+**Three traps here, each of which produced a wrong answer first:**
+
+- **Reading the clamp as a bound.** `$A6AF` looks like "the camera is clamped to
+  [40,224]" and the note in the source said "during play the camera cannot leave
+  it". The `BCC` says otherwise: it never *raises* a low target. Every other
+  number in this section came from reading the bytes.
+- **Making the clamps symmetric.** The two constraints (block's left edge on,
+  block's right edge on) are not symmetric, because the block can only be off one
+  end at a time and the seam check reads `out + y*width + row_x0 + x` — a
+  negative `row_x0` indexes before the row. Choosing the *nearer* end of an empty
+  interval gave `x0 = −22` and **1192 px of seam diff with 33 pillarboxed frames**,
+  which is worse than the bug. Clamp order matters and is not a style choice.
+- **Using the nominal range instead of the measured one.** `CAM_MAX` is 224 but the
+  camera has never been observed past 216, and at 16:9 — where the interval is
+  already empty — every column admitted at one end is stolen at the other. The 8
+  phantom columns pushed the block 10 columns off canvas on 16 of 1085 sweep
+  frames, a hard vertical seam at f=267.
+
+**`bounds_gate.py` still cannot be run under `--camera locked`** and was not: it
+derives world columns from the presented scroll, which is exactly what the anchor
+changes. It reports ~9400 px on **769 of 769** frames on the pre-fix build too, so
+its locked-mode failure is pre-existing and not a regression. Run it in follow
+mode, which is where its docstring puts it: 0 frames carry ink past the bounds.
+
+**`margin_track.py` is unchanged by this, verified as a control rather than
+assumed.** Its 1252 `gone` and 46 `shift` on `sdb_sweep` at locked 16:9 are
+**identical to the digit** before and after — the same pre-existing figures the
+anchor gate has always reported. Its `gone` test reads the record's native column
+and compares it against where it thinks the block is, so the block moving is
+exactly the sort of thing it could get wrong; it did not, because the margin's
+own placement moves with the anchor. Worth re-running rather than reasoning
+about: the numbers being *equal* is the evidence, not the numbers being zero.
+
+### The 8-column band: it belongs to the block, and it must be bounded like the margin
+
+Found in the same capture, and it is a different defect from the anchor. It took
+**four** wrong repairs to fix, and each one is recorded because the way it failed
+is the way the next one looked reasonable.
+
+#### What the band is
+
+The machine leaves **its own native columns 0–7** black, because this game clears
+PPUMASK bit 1 and the PPU therefore never paints background there. Those eight
+columns are *the block's*, and the block sits at canvas `row_x0`, so they land at
+canvas `row_x0 .. row_x0+7`. Under `camera = locked` `row_x0` is
+`scroll - anchor` — measured 8 at scroll 40, 0 at scroll 32 at 16:9 — **so the
+band travels with the camera.**
+
+The reveal is what refills them. Its job is the same at both camera positions:
+keep the court's left edge (world 40) at canvas 8.
+
+#### Wrong repair 1 — anchor the band to the canvas
+
+That is what the code already did (`first = s_ws_reveal ? SDB_WS_CLIP : 0`, a
+native offset, which is canvas columns only while `row_x0 == 0`). Measured
+replay-against-replay on a court-cam capture with the ball thrown left: the art
+count in columns 0–7 flipped between 739 and 0 on every camera crossing, and a
+sprite standing in those eight columns was swallowed while the band read wrong.
+
+#### Wrong repair 2 — guard it on `rx0`
+
+```c
+if (rx0 >= SDB_WS_CLIP) return 0;      /* "the hidden columns are off-canvas" */
+```
+
+Correct under a locked camera, wrong under a follow one — where `rx0` is
+`native_x0` = 85 at 16:9, i.e. *the block is centred*. The guard cannot tell
+"slid clear" from "centred". Measured: **650 of 701** follow frames changed.
+
+#### Wrong repair 3 — turn the reveal off under `camera = locked`
+
+Reading the two "meanings" as a contradiction between the cameras. The flicker
+went to **0 transitions** and the ball came back — and it introduced a worse
+artefact: with no skip, the machine's PPUMASK backdrop went back into those eight
+columns and the band became **a hard 8-column black bar sweeping left and right
+as you play**, because it sits at `row_x0` and `row_x0` moves. Reported from
+play immediately.
+
+#### Wrong repair 4 — block-anchored, but width decided by `rx0`
+
+`return rx0 < 0 ? SDB_WS_CLIP : rx0;` skips nothing at `rx0 == 0`, so at the
+camera's leftmost position the band's own eight columns were stamped with the
+machine's backdrop again — **1912 black of 1912** on every frame the camera sat
+at 32.
+
+**The band is always `SDB_WS_CLIP` wide.** `rx0` does not change its width; it only
+changes how much of it survives when the block hangs off the left:
+
+```c
+int skip = rx0 >= 0 ? SDB_WS_CLIP : rx0 + SDB_WS_CLIP;
+return skip < 0 ? 0 : skip;
+```
+
+#### And the real second half: the band is not "the native 256"
+
+With the skip right, columns 0–7 still flipped once per camera step — 1167 black
+at `row_x0 == 0`, 1912 at `row_x0 == 8`. One transition instead of many is still
+a transition.
+
+The cause is the bounds test. `sdb_ws_composite` deliberately skips
+`sdb_ws_in_bounds()` for anything inside the native 256, because those columns are
+the machine's own picture and bounding them would report a reconstruction failure
+against the end wall (§25). **The band is ours, not the machine's**, and it was
+inheriting that exemption:
+
+- `row_x0 == 8` → columns 0–7 are `off` −8..−1, the **margin** path → bounds
+  test → world 32–39 is outside `[40,480)` → black.
+- `row_x0 == 0` → columns 0–7 are `off` 0..7, the **block** path → exemption →
+  `sdb_ws_pixel(32..39)` → **745 nametable pixels outside the court**.
+
+Same eight world columns, two different answers, decided by where the block
+happened to be sitting. The exemption now covers the band explicitly:
+
+```c
+if ((off < 0 || off >= 256 || (off >= 0 && off < keep)) && !sdb_ws_in_bounds(wx))
+```
+
+#### Result
+
+Canvas columns 0–7 are world 32–39 at **every** camera position, and world 32–39
+is outside the court, so they are black — which is also what the PPU painted.
+Black count in those eight columns, court-cam 16:9, frames 600–699:
+
+| | distinct values | transitions |
+|---|---|---|
+| before | 1167 / 1912, flipping per camera step | many |
+| after | **1912 only** | **0** |
+
+The court's left edge sits at canvas 8 in every frame of a played step, and the
+revealed band now carries the court whenever the camera is inside its range.
+
+**Follow mode is byte-identical**: 701/701 frames on `sdb_sweep`, `sdb_pan` and
+`sdb_throw`, zero columns touched, against the committed baseline. Anchor still
+one value with zero mid-match moves at all three aspects on two vectors.
+`bounds_gate` in its documented domain: 0 frames past the bounds. `margin_track`
+on the locked sweep: **1252 gone / 46 shift**, identical to the pre-change figures.
+Seam diff 0, one pillarbox.
+
+#### Two instruments that gave wrong answers here, both mine
+
+- **A whole-image diff.** `976 differing pixels` between f617 and f622 reads as
+  negligible and is not: 742 of them are in eight columns. Per-column first,
+  whole-image last.
+- **A windowed capture diffed against a headless replay.** The capture is 239 rows
+  and the replay is 240, so every row is off by one and the diff is meaningless —
+  AGENTS.md says these runs are different machines, and here it showed up as 21958
+  differing pixels with columns 0–7 identical. Any A/B on a capture has to be
+  replay-against-replay.
+
+#### What this does not fix
+
+- **The ball's missing half.** Independently verified and unrelated: the game's
+  own OAM carries only 2 of the ball's 4 tiles from f618 (`$C5`,`$C7`, both at
+  the same X, attr `$83`), recovering at f646 and halving again at f654. It
+  reproduces with the flicker mod off and widescreen out of the picture entirely,
+  and it is not the sprite budget (`$0617` peaks at 176 of 256 with 44 emitters).
+- **The HUD still slides** if the background is anchored on the court — that is
+  the rejected alternative above, and a different question from this one.
+- **Bean Ball** is unmeasured under this mode. Its world is not the 440-wide
+  court, and both the anchor's interval and `sdb_ws_in_bounds` are built from
+  that width, so both may be wrong for it.
+
+#### Two traps in this measurement, both of which produced a wrong answer first
 
 - **`--camera locked` does not beat `state.toml`.** `build-cycle/mods/state.toml`
   carries `camera = "locked"` under `[feature.values]`, and the launcher applies
@@ -3684,9 +3949,9 @@ from frame 4 (§ Known Issues):
   does.
 - **`bounds_gate.py` does not support `--camera locked`.** It derives world
   columns from the presented scroll, which is exactly what the anchor changes. It
-  reports ~9400 px of violation on **569 of 569** frames on the pre-change build
-  too — an identical failure, so not a regression, but a gate being run outside
-  its domain.
+  reports ~9400 px of violation on every frame on the pre-change build too — an
+  identical failure, so not a regression, but a gate being run outside its domain.
+
 
 ## 29. The margin seam: a character drawn in part at the handover
 
