@@ -56,6 +56,12 @@ jobs:
           sh -n tools/release/appimage/AppRun.in || true   # a template, not a script
           sh -n tools/release/appimage/test_appimage_layout.sh
           sh -n tools/release/build.sh
+          # The Windows cross build. It cannot RUN here -- it needs a ROM
+          # and a mingw toolchain -- but a syntax error in it would be
+          # found only on release day.
+          bash -n tools/release/build-mingw.sh
+          bash -n tools/release/fetch_mingw_sdl2.sh
+          bash -n tools/release/gate-mingw.sh
 
       - name: The release scripts parse
         run: python3 -m compileall -q tools/release/

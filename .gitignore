@@ -96,6 +96,9 @@ cmake_install.cmake
 Makefile
 *.cmake
 **/CMakeFiles/
+# ...but the hand-written CMake toolchain file is source, not cache: the
+# blanket *.cmake above is for CMake's own generated files.
+!tools/release/mingw-toolchain.cmake
 
 # Auto-generated CSVs from NESRecomp
 *_auto_entries.csv
