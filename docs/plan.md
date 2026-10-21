@@ -239,7 +239,7 @@
 
     Whatever route the ROM travels, the workflow already deletes it from the runner's workspace before any upload, and it deletes `build-release/cycle-nes_game` — the **generated C, which is the translated game in readable form** (the codegen folds constant ROM bytes into immediates, so ~28% of the cartridge's PRG appears in it as literal constants; measured). That source form is never published: not in the repo (gitignored by policy), not in any release archive, and now not in a workflow artifact either. **Publish the verification, not the translation** — the tools, the frame-log comparisons and the MesenCE diffs are ours, and they let a reader confirm the translation is faithful without ever seeing a line of it.
 
-22. **The Windows build, cross-compiled from Linux — IN PROGRESS, and the point is that no ROM has to leave the machine.** The alternative to putting the ROM in GitHub is not "find a Windows box": the engine **explicitly supports cross builds** (`runner/cyc/project.cmake`: *"Cross builds require RECOMPILER pointing to a runnable host NESRecomp"*), and the code is portable enough to cross-compile. Measured, in order:
+22. **The Windows build, cross-compiled from Linux — DONE, and the point is that no ROM had to leave the machine.** The alternative to putting the ROM in GitHub is not "find a Windows box": the engine **explicitly supports cross builds** (`runner/cyc/project.cmake`: *"Cross builds require RECOMPILER pointing to a runnable host NESRecomp"*), and the code is portable enough to cross-compile. Measured, in order:
 
     - **The engine's `_MSC_VER` uses are all guarded feature switches**, not blockers: `__forceinline` vs `static inline`, `_BitScanForward` vs `__builtin_ctz` (GCC has it), and the legacy runner's symbol aliasing is in a branch this project does not build. `runner/cyc/cyc_host_extras_none.c`, `hw_internal.h`, `ppu_hle_kernel.h` and `vendor/emu2413/emu2413.c` all have a working `#else`.
     - **Our own code is portable.** `src/sdb_host_extras.c` uses an MSVC linker-section trick (`__declspec(allocate(".CRT$XCU"))`) to get a static constructor; the `#else` is `__attribute__((constructor))`, which GCC and mingw support, so the mod registration behaves identically.
@@ -249,28 +249,37 @@
 
     | piece | source | note |
     |---|---|---|
-    | cross compiler | `apt install g++-mingw-w64-x86-64` | 13.2.0 in apt; **needs the maintainer's password** — `sudo` is not passwordless here |
+    | cross compiler | `apt install g++-mingw-w64-x86-64` | 13.2.0 in apt, **win32 thread model**; **needs the maintainer's password** — `sudo` is not passwordless here |
     | SDL2 for mingw | `SDL2-devel-2.30.0-mingw.tar.gz` | the engine's vendored SDL2 is the **MSVC** one (SDL2.lib + SDL2.dll) and is useless for mingw. SHA-256 `d44bd8cd869219f43634a898d7735d0c92d4b2cca129f709dc8b98402b36d5f3`, 15,904,676 bytes — **fetched and checksummed in this session, so the number is measured, not looked up**. It unpacks to `x86_64-w64-mingw32/{bin/SDL2.dll, include/SDL2, lib/cmake/SDL2}` |
     | host recompiler | `cmake -S external/nesrecomp/recompiler -B build-recompiler` | **must be built for Linux**: with a toolchain file the engine's own bootstrap would build a *Windows* recompiler, which is why the engine refuses a cross build without `NESRECOMP_HOST_COMPILER` |
     | CRT | `-static-libgcc -static-libstdc++` | the MSVC static-CRT advice does not apply to mingw; without it the exe needs two DLLs beside it |
-    | smoke test | `apt install wine` (9.0 in apt) | lets the Windows exe be **run** on this machine, which neither the CI route nor a Windows box would have done for us |
+    | smoke test | `apt install wine wine64` (9.0 in apt) | lets the Windows exe be **run** on this machine, which neither the CI route nor a Windows box would have done for us. **`wine64` is not optional**: `wine` alone installs only the 32-bit loader, and it answers a 64-bit exe with *"Bad EXE format"* |
 
-    **What the cross build buys, and what it costs.** The ROM never leaves the machine, no CI runner is needed for the Windows artifact, no secret exists, and (with Wine) the artifact can be *run* before it ships — a runtime check the CI-MSVC route cannot give. The cost is honest: it is a **mingw** binary, not MSVC, so it is not the same artifact SMB and Zelda ship — a different CRT, a different `SDL2.dll`, and a different compiler. Both routes should therefore exist: the cross build for the release, MSVC on CI when an MSVC binary is wanted.
+    **What was built, and what it measures.** Four files, and the gates all pass:
 
-    **Order of work, and the gates:**
+    | file | what it is |
+    |---|---|
+    | `tools/release/mingw-toolchain.cmake` | the toolchain: `CMAKE_SYSTEM_NAME Windows`, the mingw compilers, the sysroot as `CMAKE_FIND_ROOT_PATH`, `-static-libgcc -static-libstdc++`, and the find-root modes (`PROGRAM NEVER` — the host's python3 runs the code generator; `LIBRARY`/`INCLUDE ONLY` — nothing of the host's can be linked into a PE) |
+    | `tools/release/fetch_mingw_sdl2.sh` | fetches and checksums the mingw SDL2 into `build-release/mingw-tools`, the way `build_appimage.sh` pins linuxdeploy |
+    | `tools/release/build-mingw.sh` | builds the **host** recompiler for Linux, then the game with the toolchain file |
+    | `tools/release/gate-mingw.sh` | the four gates below |
 
-    1. `sudo apt install g++-mingw-w64-x86-64 wine` (the maintainer runs this; `sudo` needs a password here).
-    2. Fetch and unpack the mingw SDL2 to a **pinned, checksummed** location, the way `tools/release/appimage/build_appimage.sh` pins linuxdeploy and appimagetool.
-    3. Write `tools/release/mingw-toolchain.cmake` (compiler set, `CMAKE_SYSTEM_NAME Windows`, `CMAKE_FIND_ROOT_PATH` at the SDL2 prefix, `CMAKE_FIND_ROOT_PATH_MODE_*` so host tools are still found).
-    4. Build the **host** recompiler for Linux and pass `-DNESRECOMP_HOST_COMPILER=<path>`.
-    5. Configure and build the game with the toolchain file, `-DSDL2_DIR=<mingw sdl2>/lib/cmake/SDL2`, and the static-libgcc/libstdc++ flags.
-    6. **Gate: the executable is a PE32+ binary, and it links.** `file SuperDodgeBallRecomp.exe` must say PE32+; `x86_64-w64-mingw32-objdump -p` must show the imports the runtime needs (`SDL2.dll`, `opengl32.dll`, `dwrite.dll`, `d2d1.dll`, `ws2_32.dll`) and **no** `libgcc_s_*.dll` / `libstdc++-6.dll`.
-    7. **Gate: it runs.** Under Wine, with the mingw `SDL2.dll` beside it, `--frames 200` must exit 0 and print the same cycle count as the Linux build over the same vector. A Wine failure is **not** proof the exe is broken (Wine is not Windows) — but a *pass* is a real signal, and a failure must be diagnosed before shipping, not dismissed.
-    8. **Gate: the guest state matches.** `--frame-log` from the Windows binary over 3000 frames must be **byte-identical** to the Linux build's (the same 381,900,012 bytes the native/interpreted comparison produced). This is the real test: it says the cross build executes the same machine.
-    9. Package it as `super-dodge-ball-recomp-<v>-windows-x64.zip` with the mingw `SDL2.dll` beside the exe, and **nothing else** — no `libgcc`/`libstdc++` DLLs, because they are static.
-    10. Record the result here, and in `tools/release/README.md`, with the exact toolchain versions.
+    **The gates, and their measured results** (mingw GCC 13.2.0, binutils 2.41.90, cmake 3.28.3, Wine 9.0, SDL2 2.30.0-mingw):
 
-    **If it fails**, the fallback is the documented one: CI with MSVC and the ROM fetched from a private repository (option A above). The cross build is an improvement, not a dependency — the release must not depend on it.
+    1. **PE32+.** `PE32+ executable (console) x86-64, for MS Windows, 19 sections`. The subsystem is `Windows CUI` — a console application, like the MSVC build, because the engine's entry point is `main()` and nobody wrote a `WinMain`.
+    2. **The imports.** `comdlg32, d2d1, DWrite, KERNEL32, msvcrt, ole32, OPENGL32, SDL2, SHELL32, USER32, WS2_32` — and **no** `libgcc_s_seh-1.dll`, `libgcc_s_dw2-1.dll`, `libstdc++-6.dll` or `libwinpthread-1.dll`. The published ZIP needs `SDL2.dll` beside the exe and nothing else.
+    3. **It runs.** Under Wine: exit 0, `mode=native frames=400 cycles=11909820 native_cycles=11891913 (99.8%)`, and **the same cycle count as the Linux build over the same vector**.
+    4. **The guest state matches.** `--frame-log` over 3000 frames of `sdb_throw`: **381,900,012 bytes on each side, byte-identical** — the same figure the native/interpreted comparison produced. The cross build executes the same machine.
+
+    **Three things that each cost a bug, all of them about the host pretending to be the target:**
+
+    - **The engine's vendored MSVC SDL2 wins the `find_package(SDL2 CONFIG)` search on every platform** — its cmake dir is on `CMAKE_PREFIX_PATH` — so `-DSDL2_DIR` at the mingw package is not optional, and the config it finds otherwise points at an MSVC import library. `build-mingw.sh` checks the CMake cache actually took the mingw path and fails the build if it did not, because the alternative is an exe that links and cannot run.
+    - **Wine's `wine` wrapper on Debian and Ubuntu prefers the 32-bit loader** and answers a 64-bit PE with *"Bad EXE format"* — which reads like a broken executable and is not. The 64-bit loader is `/usr/lib/wine/wine64` (the `wine64` package), and a prefix created by the 32-bit loader is refused by it (*"is a 32-bit installation"*). The gate names the loader and rebuilds the prefix rather than reporting either as a failure of the binary.
+    - **Ubuntu's mingw is the `win32` thread model**, so `FindThreads`' `-lpthread` resolves to the Win32 API and no `libwinpthread-1.dll` is imported. A posix-thread mingw would import it, and the ZIP would need one more file.
+
+    **What the cross build buys, and what it costs.** The ROM never leaves the machine, no CI runner is needed for the Windows artifact, no secret exists, and (with Wine) the artifact is *run* before it ships — a runtime check the CI-MSVC route cannot give. The cost is honest: it is a **mingw** binary, not MSVC, so it is not the same artifact SMB and Zelda ship — a different CRT, a different `SDL2.dll` and a different compiler. **Both routes should therefore exist**: the cross build for the release that can be produced today, MSVC on CI when an MSVC binary is wanted and the split-secrets fetch (item 21) exists.
+
+    **The fallback, if it ever fails**, is the documented one: CI with MSVC and the ROM fetched from a private repository (option A above). The cross build is an improvement, not a dependency — the release must not depend on it.
 
 ## What Other Successful NESRecomp Projects Do Differently
 

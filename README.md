@@ -31,7 +31,7 @@ Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley �
 
 Prebuilt binaries are published on the
 [releases page](https://github.com/saftle/Super-Dodge-Ball-Recomp/releases).
-The latest is **1.0.0**:
+The 1.0.0 release provides:
 
 | Platform | File | What it needs |
 |---|---|---|
@@ -475,6 +475,7 @@ by content.
 | [`CMakeLists.txt`](CMakeLists.txt) | The game project. Wraps the engine's own project file and adds what that file cannot express, which is why the submodule stays pristine |
 | [`VERSION`](VERSION) | The release version, baked into the binary |
 | [`tools/release/`](tools/release/) | The release recipe: the per-platform builds, the packager, the AppImage, the Flatpak manifest, and the box art |
+| [`tools/release/build-mingw.sh`](tools/release/build-mingw.sh) | The Windows build, cross-compiled from Linux — no ROM secret, and the result can be run under Wine before it ships |
 | [`NOTICE.md`](NOTICE.md) · [`LICENSE.md`](LICENSE.md) | Attribution for everything this is built on, and the licence |
 | `external/nesrecomp/` | Pinned engine submodule, **pristine** — this port carries no engine patches |
 | `external/recomp-ui/` | Pinned launcher and in-game menu |
@@ -509,7 +510,9 @@ Super Dodge Ball Recomp/
 │   ├── mesence/                   # MesenCE (pinned submodule; binary fetched at setup)
 │   └── nes-test-roms/             # blargg suite (gitignored, via setup.sh)
 ├── tools/
-│   ├── release/                   # the release build, packaging and CI recipe
+│   ├── release/                   # the release builds (including the
+│   │                              #   Linux -> Windows cross build), packaging
+│   │                              #   and the CI recipe
 │   ├── widescreen/                # compositor measurement: nametable, objects,
 │   │                              #   margin audit, bounds, anchor, JSON trace
 │   ├── tas/                       # co-simulation harness (run_tas / diff_tas / judder)
