@@ -51,7 +51,7 @@ A cycle-accurate recompilation of Super Dodge Ball (USA). The game's 6502 code
 is recompiled ahead of time; the picture, sound and music are the original
 cartridge's, so you need your own copy of the ROM to play.
 
-  1. Run {exe}{exe_suffix}.
+  1. Run {exe}.
   2. The launcher opens. Point it at your own copy of the ROM
      (Super Dodge Ball (USA).nes) when it asks.
   3. Play.
@@ -338,10 +338,13 @@ def main() -> int:
         shutil.copy2(source_path, licences / target_name)
 
     # 7. the readme
+    # The platform is spelled for a reader here ("Windows"), while the
+    # archive's own name keeps the lowercase form the conventions use.
+    platform_label = {"linux": "Linux", "windows": "Windows",
+                      "macos": "macOS"}.get(args.platform, args.platform)
     (stage / "README.txt").write_text(
-        README_TEMPLATE.format(version=version, platform=args.platform, arch=arch,
+        README_TEMPLATE.format(version=version, platform=platform_label, arch=arch,
                                 exe=exe_name,
-                                exe_suffix=".exe" if args.platform == "windows" else "",
                                 revision=revision or "unknown"),
         encoding="utf-8")
 
