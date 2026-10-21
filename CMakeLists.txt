@@ -25,7 +25,13 @@ set(NESRECOMP_FDS_BIOS "" CACHE FILEPATH "FDS BIOS (optional; default game.toml 
 set(NESRECOMP_BOXART "" CACHE FILEPATH "Launcher box art, 24-bit .tga (optional)")
 # Manifests target this id plus the image identity (CRC-32 of the cartridge
 # payload after the iNES header): "689971f9" for roms/Super Dodge Ball (USA).nes.
-set(NESRECOMP_GAME_ID "super-dodgeball" CACHE STRING "Id mod manifests target")
+# The id the mod manifests target. FORCED, not merely defaulted: the
+# manifests in mods/packages/ declare this id, and a CMake cache entry left
+# over from an earlier configure would keep the OLD id while the manifests
+# name the new one -- and then every mod silently refuses to load, with
+# "This feature does not support the selected stock ROM" and nothing in the
+# build output to explain it.
+set(NESRECOMP_GAME_ID "super-dodge-ball" CACHE STRING "Id mod manifests target" FORCE)
 option(NESRECOMP_HEADLESS "Build without SDL window/audio support" OFF)
 
 include("${CMAKE_CURRENT_LIST_DIR}/external/nesrecomp/runner/cyc/project.cmake")

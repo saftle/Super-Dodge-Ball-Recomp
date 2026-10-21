@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Round-trip verification pipeline for Super Dodgeball NES.
+Round-trip verification pipeline for Super Dodge Ball NES.
 
 ROM -> (bytes) -> (assembly with .db directives) -> (nesasm) -> ROM comparison.
 
@@ -42,7 +42,7 @@ def generate_assembly_from_rom(rom_path, output_asm_path):
     chr_data = data[prg_start + prg_size:prg_start + prg_size + chr_size]
     
     lines = []
-    lines.append("; Super Dodgeball (USA) - Round-trip verification assembly")
+    lines.append("; Super Dodge Ball (USA) - Round-trip verification assembly")
     lines.append("; All bytes preserved for assembly")
     lines.append("")
     lines.append(f".inesprg {prg_banks}")
@@ -113,7 +113,7 @@ def assemble_rom(asm_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Round-trip ROM verification for Super Dodgeball NES")
+    parser = argparse.ArgumentParser(description="Round-trip ROM verification for Super Dodge Ball NES")
     parser.add_argument("rom_path", help="Path to NES ROM file")
     parser.add_argument("output_asm", nargs="?", default="roundtrip.asm", help="Output assembly file")
     parser.add_argument("--save-nes", action="store_true", help="Save assembled ROM as .nes file")
@@ -128,7 +128,7 @@ def main():
         print(f"Error: ROM file not found: {rom_path}")
         sys.exit(1)
     
-    print("=== Super Dodgeball Round-Trip Verification ===")
+    print("=== Super Dodge Ball Round-Trip Verification ===")
     print(f"ROM: {rom_path}")
     print("")
     

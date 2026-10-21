@@ -22,7 +22,7 @@ movie pages rather than re-hosting.
   `oracle_dump.lua` Start@11-12 convention).
 * `tas/vectors/sample_smb2_warp.fm2` — parser test vector only (SMB2 Japan
   8-1 warp, 1016 frames, savestate-anchored → converts but not harness-
-  runnable; movie author credited in-file as `Invariel`). No USA Dodgeball `.fm2` exists on TASVideos (only `.fcm`
+  runnable; movie author credited in-file as `Invariel`). No USA Dodge Ball `.fm2` exists on TASVideos (only `.fcm`
   #742 / `.bk2` #4976); manufacturing one = FCEUX `Tools → Convert FCM`
   on the #742 `.fcm` (`fceux --convert`), sync not guaranteed.
 

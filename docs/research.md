@@ -1,4 +1,4 @@
-# Research Notes — Super Dodgeball NES Recompilation
+# Research Notes — Super Dodge Ball NES Recompilation
 
 > Living notes. RetroPortingToolKit docs reference: https://github.com/RetroPortingToolKit/RetroPortingToolkit.com/tree/main/data/docs
 
@@ -22,7 +22,7 @@ classes turned up afterwards that no cursor-bump hook could see.
    refuses. Three gates on that path (`$E34A`, `$828A`, `$8200`), all overridden. Box-ink
    stdev 55.0 → 16.6 with zero frames still culled.
 
-Shipped as the opt-in `super-dodgeball.character-flicker` mod (off by default pending a full-playthrough test; 10 hook sites,
+Shipped as the opt-in `super-dodge-ball.character-flicker` mod (off by default pending a full-playthrough test; 10 hook sites,
 `src/cycle_seeds.txt` so the hooked code is recompiled — hook sites do not exist on the
 interpreter). Fix 1 is presentation only; **fix 2 is not** — it makes the guest emit more
 sprites, so its cycle count and NMI phasing shift slightly (§2.1). Two more sprite classes
@@ -31,8 +31,8 @@ team-select position numbers (§2.1).
 
 Frame comparison (MesenCE reference) and the blargg suite are the standing gates.
 
-**Presentation mods: three, all opt-in** — `super-dodgeball.character-flicker` (§2, §2.1),
-`super-dodgeball.ppu-overclock` (§23) and `super-dodgeball.widescreen` (§25, §26). The
+**Presentation mods: three, all opt-in** — `super-dodge-ball.character-flicker` (§2, §2.1),
+`super-dodge-ball.ppu-overclock` (§23) and `super-dodge-ball.widescreen` (§25, §26). The
 widescreen package is one feature: it presents the wider canvas, reveals the clipped
 left-hand columns and draws the players the game culled off-screen, because the same
 compositor does all three. Only the flicker fix changes guest behaviour, and only in
@@ -400,7 +400,7 @@ priority bit.
 
 ### SNES Port
 
-Rumbleminze's SNES port (`rumbleminze/super-super-dodgeball`) needs no software fix — the SNES has
+Rumbleminze's SNES port (`rumbleminze/super-super-dodge-ball`) needs no software fix — the SNES has
 128 OAM slots and 32 sprites/scanline, so the same game logic runs with far more headroom.
 
 ---
@@ -620,9 +620,9 @@ addr = 0xA570, bank = 1
 - **`game_dispatch_override()`**: **Only handles SRAM remapping** (`0x6C90`-$7FFF → bank 1 `$A500`+). **Does NOT handle controller polling.**
 - **Entity diagnostics**: `game_fill_frame_record()`, `game_handle_debug_cmd()` with `entity_snapshot`, `entity_slot` commands
 
-### Key Differences from Super Dodgeball
+### Key Differences from Super Dodge Ball
 
-| Aspect | Zelda | Super Dodgeball |
+| Aspect | Zelda | Super Dodge Ball |
 |--------|-------|-----------------|
 | `bank_switch` | `[0xFFAC]` (proper MMC1 routine) | `[0xFF08]` (proper MMC1 routine) |
 | `game_dispatch_override` | SRAM remapping only | Narrow `0xFE8A` PPUCTRL-shadow arm only |
@@ -652,9 +652,9 @@ addr = 0xA570, bank = 1
 **Status**: Fully playable
 **249 commits**, mapper 0 (NROM) — no bank switching
 
-### Key Differences from Super Dodgeball
+### Key Differences from Super Dodge Ball
 
-| Aspect | SMB | Super Dodgeball |
+| Aspect | SMB | Super Dodge Ball |
 |--------|-----|-----------------|
 | **Mapper** | NROM (0) — no bank switching | MMC1 (1) — working via `bank_switch=[0xFF08]` |
 | **game.toml** | Has `[[mod_function_hook]]`, `[[ram_read_hook]]`, `[[inline_dispatch]]` | Minimal: `fixed` + bank-0 `extra_func` + `replace_func $FCA0` |
@@ -852,7 +852,7 @@ annotations from there).
 - NESdev Forum: https://forums.nesdev.org/
 - Romhacking.net game page: https://www.romhacking.net/games/814
 - StrategyWiki: https://strategywiki.org/wiki/Super_Dodge_Ball_(NES)
-- SNES Port repo: https://github.com/rumbleminze/super-super-dodgeball
+- SNES Port repo: https://github.com/rumbleminze/super-super-dodge-ball
 - Partial NES disassembly (WIP, byte-modified ROM): https://ajworld.net/sdb/
 - wideNES (the approach §25 deliberately is not): https://github.com/daniel5151/ANESE, https://prilik.com/blog/post/widenes/
 - TASVideos submission #4976 (the co-simulation input, §21): https://tasvideos.org/4976
@@ -902,7 +902,7 @@ backend this project plays on. The full attribution is in `NOTICE.md`.
 - **Generated C code**: `build-cycle/cycle-nes_game/<rev>/generated/game_cyc*.c`, gitignored, one revision dir per ROM/config revision
 - **Builds**: `build-cycle/` only (the legacy `build/` and `build-diag/` are gone with the legacy runner)
 - **Config**: `src/game.toml` carries the display name plus twelve `[[mod_function_hook]]` sites (ten for the character-flicker mod, two for the widescreen margins) and a `cycle_seed_file`; no `extra_func`, no `force_interp`, no discovery tuning needed for the stock ROM
-- **Mods**: `super-dodgeball.character-flicker`, `super-dodgeball.ppu-overclock` and `super-dodgeball.widescreen`, all off by default; the widescreen package is **one feature** (`widescreen`, with an `aspect` choice) that also reveals the clipped left-hand columns and draws the off-screen players. Packages preloaded into `build-cycle/mods/` at build time; window picks them up via the launcher, headless needs `--mods-root build-cycle/mods`. A `state.toml` naming a feature this build does not have (e.g. one written before the overscan fold) **hard-fails the whole catalog** rather than degrading — delete it and let the launcher rewrite it. VSync is a launcher Graphics setting (upstream PR #67), not a mod. Reproduction vector for both flicker fixes: `tas/vectors/sdb_idle.input`
+- **Mods**: `super-dodge-ball.character-flicker`, `super-dodge-ball.ppu-overclock` and `super-dodge-ball.widescreen`, all off by default; the widescreen package is **one feature** (`widescreen`, with an `aspect` choice) that also reveals the clipped left-hand columns and draws the off-screen players. Packages preloaded into `build-cycle/mods/` at build time; window picks them up via the launcher, headless needs `--mods-root build-cycle/mods`. A `state.toml` naming a feature this build does not have (e.g. one written before the overscan fold) **hard-fails the whole catalog** rather than degrading — delete it and let the launcher rewrite it. VSync is a launcher Graphics setting (upstream PR #67), not a mod. Reproduction vector for both flicker fixes: `tas/vectors/sdb_idle.input`
 - **Native share**: ~60–77% of cycles run recompiled code, the rest via the interpreter — bit-exact either way, informational only, never a gate. `src/cycle_seeds.txt` roots the sprite emitter natively so the mod's hooks can exist there at all; total cycle count unchanged by it
 - **Verification**: 400-frame TAS byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25
 - **Venv**: `nesasm` 0.0.8 only (pip broken); system `python3` has Pillow + numpy
@@ -954,7 +954,7 @@ A true C→6502→ROM round-trip would require decompiling the generated C back 
 
 ## 13. NMI Dispatcher, RESET Sequence, Title writer (from SNES Port Fixed-Bank Bytes)
 
-Source: `rumbleminze/super-super-dodgeball` `src/bank7.asm` (verbatim NES fixed-bank bytes with annotations). No public full disassembly or RAM map exists elsewhere.
+Source: `rumbleminze/super-super-dodge-ball` `src/bank7.asm` (verbatim NES fixed-bank bytes with annotations). No public full disassembly or RAM map exists elsewhere.
 
 ### NMI dispatcher (`$FF3A`) — 4-way decode of `$0100` (N=bit7, V=bit6)
 
@@ -1252,7 +1252,7 @@ so upstream's, not ours):
 - HANGs: APU-length-counter `$4015` spins (branch family) and periodic-NMI
   waits (`cpu_timing_test6`).
 - Lap-growth corroboration: `instr_01` template helpers (`E442`/`E458`/
-  `E8CF`) stack 510 deep like Dodgeball's `F1AA`/`F13A` (§19.5) — same
+  `E8CF`) stack 510 deep like Dodge Ball's `F1AA`/`F13A` (§19.5) — same
   `call_by_address` lap class, independent ROM.
 Patches exonerated twice over (construction + pristine A/B with identical
 verdicts and HANG stall frames); details in `tools/blargg/README.md`.
@@ -1270,7 +1270,7 @@ survived it.)
 - **Vectors**: TASVideos #4976 (ShesChardcore & Dasrik 2022, BizHawk 2.8,
   19692 frames, hardest difficulty) in `tas/vectors/sdb_4976.bk2` —
   headerless MD5 matches our ROM (`6e44871b…`), first Start at frame 11
-  (matches `oracle_dump.lua` Start@11-12). No USA Dodgeball `.fm2` exists
+  (matches `oracle_dump.lua` Start@11-12). No USA Dodge Ball `.fm2` exists
   anywhere (only `.fcm` #742 + `.bk2` #4976); `fm2_to_tas.py` covers text +
   binary logs and is validated on an SMB2 `.fm2` sample (1016 frames as
   listed; `RLDUTSBA→0xFF` unit-checked). Manufacturing a USA `.fm2` =
@@ -1506,7 +1506,7 @@ A second effect matters: `cyc_state.c` validates a loaded state's
 written while overclocking would have been *rejected on load* for MMC1. The
 patch is what makes the feature save-state-safe.
 
-**The mod** is `super-dodgeball.ppu-overclock` (manifest-only, like the flicker
+**The mod** is `super-dodge-ball.ppu-overclock` (manifest-only, like the flicker
 one), with an integer `[[option]]` so the launcher exposes the scanline count.
 Implementation is section 4 of `src/sdb_host_extras.c`: it only picks a value
 for the backend setting. Off by default -- it deliberately changes timing.
@@ -1582,7 +1582,7 @@ creation, which could not be undone. Guest clock untouched at
 any refresh rate — 60/120/144 Hz all just repeat finished frames as needed.
 No save-state footprint. Windowed `--exit-after 60` exit 0 both ways;
 `VSync = 1` logs the renderer line under xvfb. (This started as a
-`super-dodgeball.vsync` mod with live runtime toggles; it worked, but the
+`super-dodge-ball.vsync` mod with live runtime toggles; it worked, but the
 in-game menu has no vsync row and cannot gain one without editing the pinned
 recomp-ui — and a `state.toml` entry for a deleted mod hard-blocks boot
 ("does not provide this trusted plugin"), so the mod was deleted outright
@@ -2031,7 +2031,7 @@ A consequence worth recording, because it is a hard failure and not a soft one:
 and the whole catalog then refuses to run** —
 
 ```
-[Mods] super-dodgeball.widescreen/overscan: The executable does not provide this trusted plugin.
+[Mods] super-dodge-ball.widescreen/overscan: The executable does not provide this trusted plugin.
 mods: Resolve the highlighted mod conflicts before Play.
 ```
 

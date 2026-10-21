@@ -25,7 +25,7 @@
  * byte the CPU reads out of PRG ROM), so unlike the widescreen and flicker
  * presentation paths there is no "presentation only" claim to make: with a
  * freeze armed the game computes different things. Hence the separate, default-
- * off super-dodgeball.cheats package, and hence every gate here is "cheats OFF
+ * off super-dodge-ball.cheats package, and hence every gate here is "cheats OFF
  * is byte-identical to stock", not "cheats ON looks right".
  *
  * Two mechanisms, because the cycle backend has two ways to read a byte:
@@ -564,7 +564,7 @@ void sdb_cheats_power_on(void)
 {
     /* Load the default cheat file when nothing else supplied one, so the
      * in-game Cheats section is simply there. This used to be gated behind the
-     * super-dodgeball.cheats feature, which meant the player had to switch
+     * super-dodge-ball.cheats feature, which meant the player had to switch
      * "cheats" on and then pick individual codes, and doing only the first did
      * nothing. The gate bought nothing: no row armed means no write, so "every
      * row off" is the same default-off guarantee stated per cheat.
@@ -662,7 +662,7 @@ int sdb_cheats_load_default(void)
 {
     static const char *names[] = {
         "cheats/Super Dodge Ball (USA).cht",
-        "cheats/super-dodgeball.cht",
+        "cheats/super-dodge-ball.cht",
         "../cheats/Super Dodge Ball (USA).cht",
     };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {

@@ -11,7 +11,7 @@ fixes in `src/sdb_host_extras.c`:
    leaves one object off each frame (`$E34A` gate + `$828A` gate + `$8200` gate),
    rotating which character. Fixed by overriding all three gates.
 
-All three fixes ship as the opt-in `super-dodgeball.character-flicker` mod (off by default; pass `--remove-character-flicker` headless).
+All three fixes ship as the opt-in `super-dodge-ball.character-flicker` mod (off by default; pass `--remove-character-flicker` headless).
 
 ---
 

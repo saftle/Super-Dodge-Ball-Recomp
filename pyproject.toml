@@ -1,5 +1,5 @@
 [project]
-name = "super-dodgeball-recomp"
+name = "super-dodge-ball-recomp"
 version = "1.0.0"
 description = "Super Dodge Ball (NES) static recompilation via NESRecomp"
 requires-python = ">=3.10"

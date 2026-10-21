@@ -2,7 +2,7 @@
 
 `Super Dodge Ball (USA).cht` is a **RetroArch / libretro cheat file**. It is
 copied beside `nes_game` at build time and loaded when the
-`super-dodgeball.cheats` feature is on, or with `--cheats <path>`.
+`super-dodge-ball.cheats` feature is on, or with `--cheats <path>`.
 
 ## What the format is, and where it came from
 

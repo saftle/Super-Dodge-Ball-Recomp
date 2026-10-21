@@ -1,4 +1,4 @@
-# Super Dodgeball Recomp
+# Super Dodge Ball Recomp
 
 **Super Dodge Ball** (NES, 1989, Technōs Japan) recompiled to native C and running on your PC.
 
@@ -16,7 +16,7 @@ You bring the ROM. Nothing from the cartridge ships here.
 | **Engine patches** | 0 — the three this port carried are upstream now (PRs #66, #67, #69) |
 | **Open bugs** | 2, both in the flicker mod's presentation layer |
 
-Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong [here](https://github.com/saftle/Super-Dodgeball-Recomp/issues). **This port is in active development; expect rough edges.**
+Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley — framework questions belong upstream, game-specific issues belong [here](https://github.com/saftle/Super-Dodge-Ball-Recomp/issues). **This port is in active development; expect rough edges.**
 
 > **Fan project.** Unaffiliated with and not endorsed by any rights holder — see
 > [Legal and project notices](#legal-and-project-notices). No game content is
@@ -443,7 +443,7 @@ by content.
 ### Project tree
 
 ```
-Super Dodgeball Recomp/
+Super Dodge Ball Recomp/
 ├── roms/                          # your ROM goes here (gitignored)
 ├── src/
 │   ├── game.toml                  # recompiler config + 12 hook sites
@@ -455,9 +455,9 @@ Super Dodgeball Recomp/
 │   ├── "Super Dodge Ball (USA).cht"
 │   └── README.md                  # format table + provenance
 ├── mods/packages/                 # manifest-only packages, one per mod
-│   ├── super-dodgeball.character-flicker/1.0.0/manifest.toml
-│   ├── super-dodgeball.ppu-overclock/1.0.0/manifest.toml
-│   └── super-dodgeball.widescreen/1.0.0/manifest.toml
+│   ├── super-dodge-ball.character-flicker/1.0.0/manifest.toml
+│   ├── super-dodge-ball.ppu-overclock/1.0.0/manifest.toml
+│   └── super-dodge-ball.widescreen/1.0.0/manifest.toml
 ├── external/
 │   ├── nesrecomp/                 # engine (pinned submodule, pristine)
 │   ├── recomp-ui/                 # launcher + in-game menu (pinned submodule)
@@ -985,7 +985,7 @@ still needs upstreaming, and the record of the three that landed upstream
 
 ### This game
 
-- **[SNES port (Rumbleminze)](https://github.com/rumbleminze/super-super-dodgeball)** —
+- **[SNES port (Rumbleminze)](https://github.com/rumbleminze/super-super-dodge-ball)** —
   the closest existing reference and the only public annotated source for this game's
   fixed bank. Its `RTS ; disable sprite flickering` comment is what identified the
   second flicker.

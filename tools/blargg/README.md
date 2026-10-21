@@ -87,8 +87,8 @@ by design:
 |---|---|---|
 | `external/nesrecomp` sources (recompiler, cycle backend) | Yes — rebuilds + reruns everything | — |
 | Submodule bumps (unreviewed upstream code) | Yes — verdict deltas show it | — |
-| `src/game.toml` (Dodgeball discovery/display) | No (no game config) | TAS state match + title check |
-| Gameplay regressions in Dodgeball | No | TAS runs to team-select |
+| `src/game.toml` (Dodge Ball discovery/display) | No (no game config) | TAS state match + title check |
+| Gameplay regressions in Dodge Ball | No | TAS runs to team-select |
 
 In short: blargg guards the shared engine; the TAS runs guard the game.
 An engine change needs both green.

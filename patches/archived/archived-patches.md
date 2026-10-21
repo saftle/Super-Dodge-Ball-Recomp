@@ -44,7 +44,7 @@ switch; kept as design record.)
 **What:** in `nes_interp_dispatch_bank`'s RAM/SRAM path, pre-push a dummy
 6502-stack pair before `interp_run`, and strip it on exit if untouched.
 Native JSR/JMP sites are C calls that push no return address, but RAM code
-routinely ends in RTS (Super Dodgeball's `$07B4` STA-trampoline:
+routinely ends in RTS (Super Dodge Ball's `$07B4` STA-trampoline:
 `JMP $07B4` executes `STA $40xx` + RTS). Without the pair the terminal RTS
 pops two bytes of live caller data (+2 S per call).
 

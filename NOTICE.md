@@ -1,4 +1,4 @@
-# Super Dodgeball Recomp
+# Super Dodge Ball Recomp
 
 ## Attribution
 
@@ -8,7 +8,7 @@
 - Licensed under the PolyForm Noncommercial License 1.0.0, see [LICENSE.md](LICENSE.md)
 
 **"Remove Character Flicker" mod** (`src/sdb_host_extras.c`,
-`mods/packages/super-dodgeball.character-flicker/`)
+`mods/packages/super-dodge-ball.character-flicker/`)
 
 - Copyright 2026 Saftle
 - Licensed under the PolyForm Noncommercial License 1.0.0, the same terms as

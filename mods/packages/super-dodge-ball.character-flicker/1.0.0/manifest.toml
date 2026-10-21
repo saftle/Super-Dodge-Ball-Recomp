@@ -13,7 +13,7 @@
 # docs/MOD_PACKAGES.md), so the licence here necessarily matches the licence of
 # the code that does the work; it is not separately licensed.
 format_version = 1
-id = "super-dodgeball.character-flicker"
+id = "super-dodge-ball.character-flicker"
 version = "1.0.0"
 name = "Remove Character Flicker"
 author = "Super Dodge Ball Recomp"
@@ -24,7 +24,7 @@ save_compatibility = "shared"
 
 # Lowercase CRC-32 of the cartridge payload after the iNES header.
 [[target]]
-game_id = "super-dodgeball"
+game_id = "super-dodge-ball"
 rom_crc32 = "689971f9"
 
 [[feature]]
@@ -40,4 +40,4 @@ default_enabled = false
 # not manifest plugins of their own.
 [[plugin]]
 feature = "remove-character-flicker"
-id = "super-dodgeball.character-flicker"
+id = "super-dodge-ball.character-flicker"

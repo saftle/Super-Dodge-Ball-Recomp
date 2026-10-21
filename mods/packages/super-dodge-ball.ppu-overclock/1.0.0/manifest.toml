@@ -12,7 +12,7 @@
 # docs/MOD_PACKAGES.md), so the licence here necessarily matches the licence of
 # the code that does the work; it is not separately licensed.
 format_version = 1
-id = "super-dodgeball.ppu-overclock"
+id = "super-dodge-ball.ppu-overclock"
 version = "1.0.0"
 name = "PPU Overclocking"
 author = "Super Dodge Ball Recomp"
@@ -23,7 +23,7 @@ save_compatibility = "shared"
 
 # Lowercase CRC-32 of the cartridge payload after the iNES header.
 [[target]]
-game_id = "super-dodgeball"
+game_id = "super-dodge-ball"
 rom_crc32 = "689971f9"
 
 [[feature]]
@@ -53,4 +53,4 @@ step = 1
 # callback restores stock timing.
 [[plugin]]
 feature = "ppu-overclock"
-id = "super-dodgeball.ppu-overclock"
+id = "super-dodge-ball.ppu-overclock"

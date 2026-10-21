@@ -8,7 +8,7 @@
 +     * $6000-$7FFF window is PRG ROM and must retain normal strict dispatch.
 +     *
 +     * Native JSR/JMP sites are plain C calls that push no 6502 return
-+     * address, but RAM code routinely ends in RTS (e.g. Super Dodgeball's
++     * address, but RAM code routinely ends in RTS (e.g. Super Dodge Ball's
 +     * $07B4 STA-trampoline: JMP $07B4 executes STA abs + RTS). Without a
 +     * pushed pair the terminal RTS pops two bytes of live caller data
 +     * (lifting S by 2 per call), which eventually wraps S into the $0100

@@ -10,7 +10,7 @@ MESEN_BIN="${SCRIPT_DIR}/external/mesence/Mesen"
 FRAME_GEN_DIR="${SCRIPT_DIR}/tools/frame_gen"
 RECOMP_UI_DIR="${SCRIPT_DIR}/external/recomp-ui"
 
-echo "=== Super Dodgeball Recomp Setup ==="
+echo "=== Super Dodge Ball Recomp Setup ==="
 echo ""
 
 # ---- Build dependencies check ----

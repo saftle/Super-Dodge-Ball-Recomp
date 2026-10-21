@@ -250,9 +250,9 @@ esac
 FEATURES=(remove-character-flicker ppu-overclock widescreen)
 feat_pkg() {
     case "$1" in
-        remove-character-flicker) echo super-dodgeball.character-flicker ;;
-        ppu-overclock)           echo super-dodgeball.ppu-overclock ;;
-        widescreen)              echo super-dodgeball.widescreen ;;
+        remove-character-flicker) echo super-dodge-ball.character-flicker ;;
+        ppu-overclock)           echo super-dodge-ball.ppu-overclock ;;
+        widescreen)              echo super-dodge-ball.widescreen ;;
         *) return 1 ;;
     esac
 }

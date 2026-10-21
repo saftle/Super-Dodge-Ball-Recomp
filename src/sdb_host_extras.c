@@ -48,7 +48,7 @@
  * Indices past 63 exist in these lists, which is the whole point: the
  * character that OAM had no room for is drawn instead of dropped.
  *
- * Shipped as the opt-in `super-dodgeball.character-flicker` package
+ * Shipped as the opt-in `super-dodge-ball.character-flicker` package
  * (mods/packages/.../manifest.toml), toggleable from the launcher's Mods screen
  * or the runtime menu, headless via `--remove-character-flicker`. It stays off
  * by default until a full playthrough is tested (the level-switch screen shows
@@ -2660,19 +2660,19 @@ static void sdb_frame_end(void *ctx)
  * switch in front of per-cheat switches carries no information. */
 
 static const char *const SDB_HOOK_IDS[] = {
-    "super-dodgeball.oam.b5-8116",
-    "super-dodgeball.oam.b5-8338",
-    "super-dodgeball.oam.b5-84b6",
-    "super-dodgeball.oam.b4-a2f7",
-    "super-dodgeball.oam.b4-a330",
-    "super-dodgeball.obj.b5-8231",
-    "super-dodgeball.cull.b5-8200",
-    "super-dodgeball.list.f7-e378",
-    "super-dodgeball.num.b3-96b9",
-    "super-dodgeball.copy.b4-a394",
-    "super-dodgeball.margin.b5-8483",
-    "super-dodgeball.margin.b5-8302",
-    "super-dodgeball.margin.b5-8231",
+    "super-dodge-ball.oam.b5-8116",
+    "super-dodge-ball.oam.b5-8338",
+    "super-dodge-ball.oam.b5-84b6",
+    "super-dodge-ball.oam.b4-a2f7",
+    "super-dodge-ball.oam.b4-a330",
+    "super-dodge-ball.obj.b5-8231",
+    "super-dodge-ball.cull.b5-8200",
+    "super-dodge-ball.list.f7-e378",
+    "super-dodge-ball.num.b3-96b9",
+    "super-dodge-ball.copy.b4-a394",
+    "super-dodge-ball.margin.b5-8483",
+    "super-dodge-ball.margin.b5-8302",
+    "super-dodge-ball.margin.b5-8231",
 };
 
 static void sdb_enable(void)
@@ -2834,7 +2834,7 @@ static const CycHostOption SDB_OPTIONS[] = {
 };
 
 /* ------------------------------------------------------------------ *
- * 4. Widescreen and overscan (super-dodgeball.widescreen)
+ * 4. Widescreen and overscan (super-dodge-ball.widescreen)
  * ------------------------------------------------------------------ */
 
 /* PRESENTATION ONLY. The guest is never touched: no cycle added or removed,
@@ -4297,9 +4297,9 @@ static void sdb_ws_disable(void)
     memset(s_margin_obj, 0, sizeof s_margin_obj);
     s_margin_cur_obj = -1;
     s_margin_rec = 0;
-    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8483", 0);
-    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8302", 0);
-    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8231", 0);
+    nes_mod_set_function_hook_enabled("super-dodge-ball.margin.b5-8483", 0);
+    nes_mod_set_function_hook_enabled("super-dodge-ball.margin.b5-8302", 0);
+    nes_mod_set_function_hook_enabled("super-dodge-ball.margin.b5-8231", 0);
     cyc_render_set_compositor(NULL, NULL);
     cyc_video_set_mode(NES_VIDEO_STOCK);
 }
@@ -4359,7 +4359,7 @@ static int sdb_ws_aspect_from(const char *env, const char *option)
     char buf[32] = "";
     int mode = NES_VIDEO_STOCK;
     if (env && env[0] && nes_video_geometry_parse(env, &mode)) return mode;
-    if (nes_mod_option_value("super-dodgeball.widescreen", "widescreen",
+    if (nes_mod_option_value("super-dodge-ball.widescreen", "widescreen",
                              "aspect", buf, sizeof buf) &&
         nes_video_geometry_parse(buf, &mode))
         return mode;
@@ -4413,7 +4413,7 @@ static void sdb_ws_enable(void)
         char buf[16] = "";
         int locked = 0;
         if (cam && cam[0]) locked = !strcmp(cam, "locked") || !strcmp(cam, "1");
-        else if (nes_mod_option_value("super-dodgeball.widescreen", "widescreen",
+        else if (nes_mod_option_value("super-dodge-ball.widescreen", "widescreen",
                                       "camera", buf, sizeof buf))
             locked = !strcmp(buf, "locked") || !strcmp(buf, "1");
         sdb_ws_set_camera(locked);
@@ -4428,24 +4428,24 @@ static void sdb_ws_enable(void)
  * bit-identical with this on or off. */
 static void sdb_ms_enable(void)
 {
-    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8483", 1);
-    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8302", 1);
-    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8231", 1);
+    nes_mod_set_function_hook_enabled("super-dodge-ball.margin.b5-8483", 1);
+    nes_mod_set_function_hook_enabled("super-dodge-ball.margin.b5-8302", 1);
+    nes_mod_set_function_hook_enabled("super-dodge-ball.margin.b5-8231", 1);
     s_ws_margin = 1;
     s_margin_on = 1;
 }
 
 static void sdb_ms_disable(void)
 {
-    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8483", 0);
-    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8302", 0);
-    nes_mod_set_function_hook_enabled("super-dodgeball.margin.b5-8231", 0);
+    nes_mod_set_function_hook_enabled("super-dodge-ball.margin.b5-8483", 0);
+    nes_mod_set_function_hook_enabled("super-dodge-ball.margin.b5-8302", 0);
+    nes_mod_set_function_hook_enabled("super-dodge-ball.margin.b5-8231", 0);
     s_ws_margin = 0;
     s_margin_on = 0;
 }
 
 /* ------------------------------------------------------------------ *
- * 5. PPU overclocking (super-dodgeball.ppu-overclock)
+ * 5. PPU overclocking (super-dodge-ball.ppu-overclock)
  * ------------------------------------------------------------------ */
 
 /* The game feels slower than it should because its main loop is an NMI-synced
@@ -4500,7 +4500,7 @@ static void sdb_oc_enable(void)
 {
     const char *t = getenv("SDB_PPUSCAN");
     if (t && t[0]) { sdb_oc_apply(atoi(t)); return; }   /* headless A/B */
-    sdb_oc_apply(nes_mod_get_option_int("super-dodgeball.ppu-overclock",
+    sdb_oc_apply(nes_mod_get_option_int("super-dodge-ball.ppu-overclock",
                                         "ppu-overclock", "scanlines",
                                         SDB_OC_DEFAULT));
 }
@@ -4643,9 +4643,9 @@ static void register_sdb_mods(void)
         { 0x8302, sdb_margin_capture },
         { 0x8231, sdb_margin_object },
     };
-    if (!nes_mod_register_activation_plugin("super-dodgeball.character-flicker", sdb_enable) ||
-        !nes_mod_register_activation_plugin("super-dodgeball.ppu-overclock", sdb_oc_enable) ||
-        !nes_mod_register_activation_plugin("super-dodgeball.widescreen", sdb_ws_enable) ||
+    if (!nes_mod_register_activation_plugin("super-dodge-ball.character-flicker", sdb_enable) ||
+        !nes_mod_register_activation_plugin("super-dodge-ball.ppu-overclock", sdb_oc_enable) ||
+        !nes_mod_register_activation_plugin("super-dodge-ball.widescreen", sdb_ws_enable) ||
         !nes_mod_register_reset_callback(sdb_disable) ||
         !nes_mod_register_reset_callback(sdb_oc_disable) ||
         !nes_mod_register_reset_callback(sdb_ws_disable))
