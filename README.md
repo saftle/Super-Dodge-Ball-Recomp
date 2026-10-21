@@ -494,7 +494,7 @@ Super Dodge Ball Recomp/
 │   ├── cycle_seeds.txt            # discovery roots + the interpreter's
 │   │                              #   coverage list (99.8% native)
 │   ├── sdb_host_extras.c          # flicker / overclock / widescreen
-│   ├── sdb_cheats.c · .h         # .cht cheats (the one thing that writes the guest)
+│   ├── sdb_cheats.c · .h          # .cht cheats (the one thing that writes the guest)
 │   └── third_party/               # local build scratch, not shipped
 ├── cheats/                        # the .cht cheat file, copied beside the executable
 │   ├── "Super Dodge Ball (USA).cht"
