@@ -473,10 +473,13 @@ by content.
 | [`cheats/`](cheats/) | The `.cht` cheat file, copied beside the executable at build time. Every entry ships off |
 | `mods/packages/` | One manifest-only package per mod, copied beside the executable at build time |
 | [`CMakeLists.txt`](CMakeLists.txt) | The game project. Wraps the engine's own project file and adds what that file cannot express, which is why the submodule stays pristine |
+| [`VERSION`](VERSION) | The release version, baked into the binary |
+| [`tools/release/`](tools/release/) | The release recipe: the per-platform builds, the packager, the AppImage, the Flatpak manifest, and the box art |
+| [`NOTICE.md`](NOTICE.md) · [`LICENSE.md`](LICENSE.md) | Attribution for everything this is built on, and the licence |
 | `external/nesrecomp/` | Pinned engine submodule, **pristine** — this port carries no engine patches |
 | `external/recomp-ui/` | Pinned launcher and in-game menu |
 | `external/mesence/` | MesenCE, the reference emulator |
-| `tools/` | Measurement harnesses — see [verification](#verification) |
+| `tools/` | Measurement harnesses — see [verification](#verification) — and the release recipe in [`tools/release/`](tools/release/) |
 | `docs/` | [`research.md`](docs/research.md) (28 sections), [`plan.md`](docs/plan.md) (the open-issues list) |
 | `tas/vectors/` | Recorded input vectors, including one captured from a hand-played session |
 | `build-cycle/` | The build. Gitignored; holds the per-instruction generated C and `nes_game` |
@@ -488,9 +491,10 @@ Super Dodge Ball Recomp/
 ├── roms/                          # your ROM goes here (gitignored)
 ├── src/
 │   ├── game.toml                  # recompiler config + 12 hook sites
-│   ├── cycle_seeds.txt            # discovery roots for the hooked emitters
+│   ├── cycle_seeds.txt            # discovery roots + the interpreter's
+│   │                              #   coverage list (99.8% native)
 │   ├── sdb_host_extras.c          # flicker / overclock / widescreen
-│   ├── sdb_cheats.c               # .cht cheats (the one thing that writes the guest)
+│   ├── sdb_cheats.c · .h         # .cht cheats (the one thing that writes the guest)
 │   └── third_party/               # local build scratch, not shipped
 ├── cheats/                        # the .cht cheat file, copied beside the executable
 │   ├── "Super Dodge Ball (USA).cht"
@@ -505,6 +509,7 @@ Super Dodge Ball Recomp/
 │   ├── mesence/                   # MesenCE (pinned submodule; binary fetched at setup)
 │   └── nes-test-roms/             # blargg suite (gitignored, via setup.sh)
 ├── tools/
+│   ├── release/                   # the release build, packaging and CI recipe
 │   ├── widescreen/                # compositor measurement: nametable, objects,
 │   │                              #   margin audit, bounds, anchor, JSON trace
 │   ├── tas/                       # co-simulation harness (run_tas / diff_tas / judder)
@@ -512,6 +517,8 @@ Super Dodge Ball Recomp/
 │   ├── frame_gen/                 # MesenCE frame export + oracle Lua
 │   ├── overclock/                 # PPU-overclocking oracle harness
 │   ├── flicker/                   # OAM/record dumps behind the flicker analysis
+│   ├── cheats/                    # cheat-engine probes: TCP tap, Game Genie, toggle
+│   ├── state/                     # the save-state anchor and its drift check
 │   ├── compare_frames.py          # reference vs cycle screenshot comparison
 │   ├── dis65.py                   # dependency-free 6502 disassembler
 │   ├── rom_to_asm.py              # ROM → assembly listing helper
@@ -520,12 +527,18 @@ Super Dodge Ball Recomp/
 ├── tas/
 │   ├── vectors/                   # recorded input vectors
 │   └── runs/                      # per-run artefacts (gitignored)
-├── build-cycle/                   # the build (gitignored)
+├── .github/workflows/             # CI on every push; the release on a v* tag
+├── build-cycle/                   # the dev build (gitignored)
+├── build-release/                 # the release build (gitignored)
+├── release/                       # the staged archives (gitignored)
 ├── patches/                       # the mechanism for an engine change awaiting
 │                                  #   upstream (no active patches right now)
 ├── docs/                          # research.md, plan.md, assets/
+├── VERSION                        # the release version
 ├── setup.sh · build_and_run.sh · CMakeLists.txt
+├── pyproject.toml                 # the Python tooling's package metadata
 ├── AGENTS.md                      # operating manual for coding agents
+├── NOTICE.md · LICENSE.md         # attribution, and the licence
 └── README.md
 ```
 
