@@ -266,7 +266,7 @@
 
     **The gates, and their measured results** (mingw GCC 13.2.0, binutils 2.41.90, cmake 3.28.3, Wine 9.0, SDL2 2.30.0-mingw):
 
-    1. **PE32+.** `PE32+ executable (console) x86-64, for MS Windows, 19 sections`. The subsystem is `Windows CUI` — a console application, like the MSVC build, because the engine's entry point is `main()` and nobody wrote a `WinMain`.
+    1. **PE32+.** `PE32+ executable (console) x86-64, for MS Windows, 19 sections`. The subsystem is `Windows CUI` — a console application, because the engine's entry point is `main()` and nobody wrote a `WinMain`.
     2. **The imports.** `comdlg32, d2d1, DWrite, KERNEL32, msvcrt, ole32, OPENGL32, SDL2, SHELL32, USER32, WS2_32` — and **no** `libgcc_s_seh-1.dll`, `libgcc_s_dw2-1.dll`, `libstdc++-6.dll` or `libwinpthread-1.dll`. The published ZIP needs `SDL2.dll` beside the exe and nothing else.
     3. **It runs.** Under Wine: exit 0, `mode=native frames=400 cycles=11909820 native_cycles=11891913 (99.8%)`, and **the same cycle count as the Linux build over the same vector**.
     4. **The guest state matches.** `--frame-log` over 3000 frames of `sdb_throw`: **381,900,012 bytes on each side, byte-identical** — the same figure the native/interpreted comparison produced. The cross build executes the same machine.
@@ -279,9 +279,9 @@
     - **SDL's video driver is named for the target, not the display.** A Windows SDL2 has no `x11` driver; its default is `windows`, which Wine draws on X11 underneath. The launcher gate therefore *unsets* `SDL_VIDEODRIVER` rather than setting it — the headless gates set it to `dummy`, and a launcher told to use `dummy` fails to create a window, and one told to use `x11` says *"x11 not available"*. Both read like a broken build.
     - **Ubuntu's mingw is the `win32` thread model**, so `FindThreads`' `-lpthread` resolves to the Win32 API and no `libwinpthread-1.dll` is imported. A posix-thread mingw would import it, and the ZIP would need one more file.
 
-    **What the cross build buys, and what it costs.** The ROM never leaves the machine, no CI runner is needed for the Windows artifact, no secret exists, and (with Wine) the artifact is *run* before it ships — a runtime check the CI-MSVC route cannot give. The cost is honest: it is a **mingw** binary, not MSVC, so it is not the same artifact SMB and Zelda ship — a different CRT, a different `SDL2.dll` and a different compiler. **Both routes should therefore exist**: the cross build for the release that can be produced today, MSVC on CI when an MSVC binary is wanted and the split-secrets fetch (item 21) exists.
+    **What the cross build buys, and what it costs.** The ROM never leaves the machine, no CI runner is needed for the Windows artifact, no secret exists, and (with Wine) the artifact is *run* before it ships — a runtime check nothing else here can give. The cost is honest: it is a **mingw** binary, so it is not the same artifact SMB and Zelda ship — a different CRT, a different `SDL2.dll` and a different compiler. **There was an MSVC route here once** (`tools/release/build.ps1`, and a `windows-latest` job in the release workflow) and it is gone: it needed a Windows machine, nothing on this one could run it, and it could not be verified before it shipped. If an MSVC binary is ever wanted, the engine's own `external/nesrecomp/tools/build_cycle_windows.ps1` is the starting point.
 
-    **The fallback, if it ever fails**, is the documented one: CI with MSVC and the ROM fetched from a private repository (option A above). The cross build is an improvement, not a dependency — the release must not depend on it.
+    **The fallback, if the cross build ever breaks**, is a Windows machine with MSVC — the release's Windows artifact waits rather than shipping broken. The cross build is the only route, so it is a dependency of that one artifact and of nothing else.
 
 ## What Other Successful NESRecomp Projects Do Differently
 

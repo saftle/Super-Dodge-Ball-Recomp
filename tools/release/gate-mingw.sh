@@ -7,8 +7,8 @@
 #   2. Its imports are right: the DLLs the runtime needs are there, and the
 #      ones a published build must not need (libgcc_s_*, libstdc++-6.dll,
 #      libwinpthread-1.dll) are not.
-#   3. It RUNS -- under Wine, on this machine, which is the one check the
-#      CI-with-MSVC route cannot give -- and it costs the same cycles as
+#   3. It RUNS -- under Wine, on this machine, which is the one check no
+#      other route here can give -- and it costs the same cycles as
 #      the Linux build.
 #   4. Its guest state is byte-identical to the Linux build's. This is the
 #      gate that matters: it says the cross build executes the same machine.
@@ -87,7 +87,8 @@ echo "=============================================================="
 IMPORTS="$(x86_64-w64-mingw32-objdump -p "${WIN_EXE}" | sed -n 's/.*DLL Name: //p' | sort -u)"
 echo "${IMPORTS}" | sed 's/^/  /'
 # A PE's import table is case-insensitive, and the mingw linker writes
-# "OPENGL32.dll" where the MSVC one writes "opengl32.dll". Compare folded.
+# "OPENGL32.dll" where the spelling in the wanted list is lowercase.
+# Compare folded.
 for want in SDL2.dll opengl32.dll ws2_32.dll d2d1.dll dwrite.dll; do
     if echo "${IMPORTS}" | tr 'A-Z' 'a-z' | grep -qx "$(echo "${want}" | tr 'A-Z' 'a-z')"; then
         pass "imports ${want}"

@@ -12,9 +12,12 @@ name: Release
 # A single secret cannot hold this ROM: its base64 is 349,548 bytes and a
 # GitHub Actions secret is capped at 48 KB. It has to be reassembled from
 # parts, and the ROM's identity checked against its SHA-1 before the build
-# reads it. See docs/plan.md item 21 for the spec, and item 22 for the
-# alternative that needs no secret at all: cross-compiling the Windows
-# build from Linux.
+# reads it. See docs/plan.md item 21 for the spec.
+#
+# The Windows artifact is CROSS-COMPILED from Linux (docs/plan.md item 22):
+# a mingw-w64 build, gated by tools/release/gate-mingw.sh. There is no MSVC
+# route -- it needed a Windows machine and could not be run before it
+# shipped.
 
 on:
   push:
@@ -88,13 +91,21 @@ jobs:
           if-no-files-found: error
 
   windows:
-    name: Windows (zip)
-    runs-on: windows-latest
+    name: Windows (zip, cross-compiled)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
+
+      - name: Install the mingw-w64 cross compiler
+        # The Windows build is CROSS-COMPILED from Linux. There is no MSVC
+        # route in this project any more: it needed a Windows machine, and
+        # it could not be run or verified before it shipped.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -qy g++-mingw-w64-x86-64
 
       # The ROM is a build input, and it is fetched from the secret store
       # HERE -- but that step is not written yet. A single secret cannot hold
@@ -102,24 +113,26 @@ jobs:
       # be reassembled from parts. See docs/plan.md item 21 for the spec.
       # Until then the build step below fails on the missing ROM, which is
       # the honest failure.
+      #
+      # (The build also needs the ROM, because it recompiles the
+      # cartridge's code. Building the Windows artifact HERE rather than on
+      # a Windows machine does not change that: the ROM is a build input
+      # wherever the build runs.)
 
       - name: Build
-        shell: pwsh
-        run: ./tools/release/build.ps1 -Rom 'roms/Super Dodge Ball (USA).nes'
+        run: ./tools/release/build-mingw.sh --build-dir build-release/mingw
 
       # The ROM and the translated game code are build inputs and outputs,
       # not artifacts. Delete both before anything can be uploaded, so a
       # stray glob in a later edit cannot publish either.
       - name: Remove the ROM and the generated code from the workspace
-        shell: pwsh
         run: |
-          Remove-Item -Force 'roms/Super Dodge Ball (USA).nes' -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force 'build-release/cycle-nes_game' -ErrorAction SilentlyContinue
+          rm -f "roms/${ROM_NAME}"
+          rm -rf build-release/mingw/cycle-nes_game
 
       - name: Package
-        shell: pwsh
         run: |
-          python tools/release/package.py --build-dir build-release --platform windows --arch x64
+          python3 tools/release/package.py --build-dir build-release/mingw --platform windows --arch x64
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

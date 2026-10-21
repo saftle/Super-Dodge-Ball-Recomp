@@ -101,7 +101,7 @@ def find_executable(build_dir: Path, platform: str, exe_name: str) -> Path:
     name = f"{exe_name}.exe" if platform == "windows" else exe_name
     candidates = [
         build_dir / name,                                   # single-config generators
-        build_dir / "Release" / name,                       # Visual Studio, Release
+        build_dir / "Release" / name,                       # multi-config generators
         build_dir / "RelWithDebInfo" / name,
         build_dir / "MinSizeRel" / name,
     ]
@@ -272,7 +272,7 @@ def main() -> int:
     # The engine stages the launcher assets, the mod catalog and the cheat
     # file BESIDE THE EXECUTABLE, and where that is depends on the
     # generator: a single-config build puts them in the build directory's
-    # root, a Visual Studio build puts them in its Release/ subdirectory.
+    # root, a multi-config build puts them in its Release/ subdirectory.
     # Follow the executable rather than assuming a layout.
     exe_dir = exe.parent
     assets = exe_dir / "assets"

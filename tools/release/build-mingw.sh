@@ -56,9 +56,10 @@ error: no mingw-w64 cross compiler.
 
   sudo apt install g++-mingw-w64-x86-64
 
-A cross build is the only Windows route that keeps the ROM on this
-machine. (The other one is CI with MSVC, which needs the ROM in the
-secret store -- and one secret cannot hold it; see docs/plan.md item 21.)
+A cross build is the ONLY Windows route in this project. It keeps the
+ROM on this machine and needs no secret at all -- one GitHub Actions
+secret cannot hold this ROM (349,548 bytes of base64 against a 48 KB
+cap; see docs/plan.md item 21).
 EOF
     exit 2
 fi

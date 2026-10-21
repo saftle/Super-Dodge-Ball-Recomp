@@ -5,7 +5,6 @@ Everything a 1.0 release needs, and the measurements behind it.
 ```
 tools/release/
 ├── build.sh                     Linux / macOS: configure + build (Release)
-├── build.ps1                    Windows: configure + build (Release, MSVC)
 ├── build-mingw.sh               Windows: the same, cross-compiled from Linux
 ├── mingw-toolchain.cmake        the mingw-w64 toolchain file
 ├── fetch_mingw_sdl2.sh          fetch and checksum the mingw SDL2
@@ -54,9 +53,6 @@ is the same list the engine's own Windows packaging recipe uses.
 # Linux
 tools/release/build.sh --build-dir build-release
 
-# Windows (MSVC, Visual Studio 17 2022 x64) -- on a Windows machine
-tools\release\build.ps1 -Rom "roms\Super Dodge Ball (USA).nes"
-
 # Windows (mingw-w64), cross-compiled from Linux -- see below
 tools/release/build-mingw.sh
 
@@ -71,34 +67,40 @@ puts its cmake dir on `CMAKE_PREFIX_PATH`, where `find_package(SDL2 CONFIG)`
 finds it first, and a Linux link against it fails. Name the platform's own
 SDL2 with `-DSDL2_DIR` (the script does) or `SDL2_DIR` in the environment.
 
-The Windows build links the **static** CRT (`CMAKE_MSVC_RUNTIME_LIBRARY=
-MultiThreaded`), so the published ZIP needs no Visual C++ redistributable
-beside it. That is the single most common "it will not start" report for a
-Windows release.
+The Windows build links the **static** mingw runtime
+(`-static-libgcc -static-libstdc++`), so the published ZIP needs no C++
+runtime beside it. That is the single most common "it will not start"
+report for a Windows release.
 
-## The Windows build from Linux
+## The Windows build
 
-There are two Windows builds, and they are not the same artifact.
+It is **cross-compiled from Linux** with mingw-w64, and that is the only
+Windows route in this project.
 
-| | MSVC (`build.ps1`) | mingw (`build-mingw.sh`) |
-|---|---|---|
-| where it runs | a Windows machine, or a CI runner | this machine |
-| needs the ROM in a secret store | **yes** | **no** |
-| can be *run* before it ships | no | **yes**, under Wine |
-| the C++ runtime | static (MSVC) | static (mingw) |
-| the compiler | MSVC 17 x64 | mingw-w64 GCC 13.2.0, win32 threads |
-| the SDL2.dll | the engine's vendored MSVC one | the official mingw package, pinned |
+| | |
+|---|---|
+| where it runs | this machine, or a Linux CI runner |
+| needs the ROM in a secret store | **no** |
+| can be *run* before it ships | **yes**, under Wine |
+| the C++ runtime | static (mingw) |
+| the compiler | mingw-w64 GCC 13.2.0, win32 threads |
+| the SDL2.dll | the official mingw package, pinned by SHA-256 |
 
-**The reason the second one exists is the ROM.** The build recompiles the
+**The reason it is cross-compiled is the ROM.** The build recompiles the
 cartridge's code, so it needs the ROM; the ROM is not in GitHub and one
 GitHub Actions secret cannot hold it (349,548 bytes of base64 against a
 48 KB cap — see `docs/plan.md` item 21). Cross-compiling keeps the ROM on
 the machine that owns it and needs no secret at all.
 
-**The cost is honest:** it is a mingw binary, not an MSVC one. A different
-compiler, a different CRT and a different `SDL2.dll`. Both routes should
-exist — the cross build for the artifact that can be produced today, MSVC on
-CI when an MSVC binary is wanted.
+**What it costs, stated plainly:** it is a **mingw** binary, not an MSVC
+one. A different compiler, a different CRT and a different `SDL2.dll` from
+the artifact an MSVC build would produce, and the MSVC build is the one
+Super Mario Bros. and Zelda ship. There was an MSVC route here once
+(`build.ps1`) and it is gone: it needed a Windows machine, nothing on this
+one could run it, and it could not be verified before it shipped — which is
+exactly what the cross build can do. If an MSVC binary is ever wanted, the
+engine's own `external/nesrecomp/tools/build_cycle_windows.ps1` is the
+starting point.
 
 ```bash
 sudo apt install g++-mingw-w64-x86-64 wine wine64
@@ -119,8 +121,7 @@ that matters:
 
 1. **PE32+.** `PE32+ executable (console) x86-64, for MS Windows`. The
    subsystem is `Windows CUI`: the engine's entry point is `main()`, not a
-   `WinMain` nobody wrote, so the binary is a console application — as the
-   MSVC build is.
+   `WinMain` nobody wrote, so the binary is a console application.
 2. **The imports.** `SDL2.dll`, `OPENGL32.dll`, `WS2_32.dll`, `d2d1.dll`,
    `DWrite.dll` and the system DLLs — and **no** `libgcc_s_seh-1.dll`,
    `libgcc_s_dw2-1.dll`, `libstdc++-6.dll` or `libwinpthread-1.dll`. The
@@ -243,7 +244,8 @@ signature that every local compiler had only warned about.
 
 The tarball is the plain build; the AppImage bundles SDL2 and the other
 libraries, so it runs on a machine that has nothing installed. The Windows ZIP
-carries SDL2.dll and is statically linked against the CRT.
+carries SDL2.dll and is statically linked against the mingw runtime — and it
+is **cross-compiled on the Linux runner**, not on a Windows one.
 
 **The workflow cannot build yet, and says so in its own header.** Every job
 needs the ROM at build time and reads it from the secret store, and the fetch
@@ -254,9 +256,9 @@ and checked against its SHA-1 first — `docs/plan.md` item 21 has the spec.
 **So there are two ways to publish, and they are not the same thing.**
 
 - **By hand, from this machine.** Build the artifacts here, tag, and upload
-  them yourself (`gh release create v1.0.0 release/*`). The cross build makes
-  the *Windows* artifact possible on this route, because it needs no secret.
-  This is the SMB/Zelda model: the release is built where the ROM lives.
+  them yourself (`gh release create v1.0.0 release/*`). This is the
+  SMB/Zelda model: the release is built where the ROM lives, and the Windows
+  artifact needs no secret because it is cross-compiled.
 - **By the workflow, from a tag.** Once the split-secrets fetch exists, the
   workflow builds all four artifacts itself, and nothing has to be built by
   hand at all.
@@ -286,13 +288,6 @@ gh release create v1.0.0 \
   release/super-dodge-ball-recomp-1.0.0.flatpak \
   --title "Super Dodge Ball Recomp 1.0.0" --notes-file <notes>
 ```
-
-**The two Windows routes produce an archive with the same name**, so publish
-one of them, not both: `…-windows-x64.zip` is either the MSVC build or the
-mingw one, and the second upload would silently replace the first. The
-README.txt inside says nothing about which, because a player does not care
-— but the release notes might, and it is worth a line if the MSVC build is
-the one that ships.
 
 ## Before you publish
 
