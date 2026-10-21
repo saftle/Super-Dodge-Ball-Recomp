@@ -62,9 +62,10 @@ music out of it while the game runs -- which is why the archive is not a
 substitute for the original.
 
 If the launcher says the ROM is "not recognized", check that you have the
-right file before anything else:
-    CRC32  689971F9
-    SHA-1  42f954e9bd3256c011aba14c7e5b400abe35fde3
+right file before anything else. These are the WHOLE .nes file's hashes,
+the same ones `sha1sum` and a CRC-32 tool print:
+    SHA-1  75dad8b461864ddd396c75bdb68378bb2bc47d99
+    CRC32  9400BA7F
 
 Controls
   Arrow keys  D-pad          Z  A            X  B

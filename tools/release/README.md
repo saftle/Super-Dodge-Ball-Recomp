@@ -2,20 +2,39 @@
 
 Everything a 1.0 release needs, and the measurements behind it.
 
+**The whole release is one command:**
+
+```bash
+tools/release/release.sh              # build, gate, package, verify
+tools/release/release.sh --publish    # ... and publish the release
+```
+
+It builds all four artifacts (the Linux tarball, the AppImage, the Windows
+ZIP and the Flatpak), runs the Windows build's five gates, packages them,
+verifies that none of them carries a ROM and that the commit the binary
+names is the commit being released, writes the release notes, and — with
+`--publish` — creates the tag and the release.
+
+**There is no release workflow.** The release is built and published by hand,
+on the machine that owns the ROM, and the ROM never leaves it. See "The ROM
+never leaves this machine" below for why that was a decision and not a
+shortcut.
+
 ```
 tools/release/
-├── build.sh                     Linux / macOS: configure + build (Release)
-├── build-mingw.sh               Windows: the same, cross-compiled from Linux
-├── mingw-toolchain.cmake        the mingw-w64 toolchain file
-├── fetch_mingw_sdl2.sh          fetch and checksum the mingw SDL2
-├── gate-mingw.sh                the Windows build's five gates
-├── package.py                   Stage + archive, cross-platform
-├── exe.name                     the shipped executable's name, in one file
-├── make_boxart.py               draw the launcher's hero art
+├── release.sh                    build, verify and publish a release
+├── build.sh                      Linux / macOS: configure + build (Release)
+├── build-mingw.sh                Windows: the same, cross-compiled from Linux
+├── mingw-toolchain.cmake         the mingw-w64 toolchain file
+├── fetch_mingw_sdl2.sh           fetch and checksum the mingw SDL2
+├── gate-mingw.sh                 the Windows build's five gates
+├── package.py                    Stage + archive, cross-platform
+├── exe.name                      the shipped executable's name, in one file
+├── make_boxart.py                draw the launcher's hero art
 └── appimage/
-    ├── AppRun.in                the AppImage entry point (a template)
-    ├── build_appimage.sh        build the AppDir and package the AppImage
-    └── test_appimage_layout.sh  the AppDir's layout and run test
+    ├── AppRun.in                 the AppImage entry point (a template)
+    ├── build_appimage.sh         build the AppDir and package the AppImage
+    └── test_appimage_layout.sh   the AppDir's layout and run test
 ```
 
 ## The executable's name
@@ -39,15 +58,20 @@ packages (declarations only), the cheat file and the licences.
 It carries **no ROM**. The launcher asks the player for their own copy at
 first launch, and the engine verifies it against the SHA-256 baked into the
 binary. The ROM *is* needed at **build** time, because the build recompiles
-the cartridge's code into the executable — so CI reads it from a repository
-secret (`SDB_ROM_B64`, base64) and never commits it.
+the cartridge's code into the executable — so the build runs on the machine
+that owns it, and the ROM never leaves that machine. See "The ROM never
+leaves this machine" below.
 
 `package.py` refuses to write an archive that contains player data or a ROM:
 `.nes`, `.fds`, `.qd`, `.sav`, `.srm`, `.state`, `.cycstate`, `rom.cfg`,
 `config.ini`, `keybinds.ini`, `state.toml`, `launcher-window.ini`. The check
 is the same list the engine's own Windows packaging recipe uses.
 
-## Building
+## Building one artifact
+
+`release.sh` is the whole release; these are its parts, for when you want
+one of them — a quicker iteration on the Windows build, say, or a rebuild
+after touching a mod.
 
 ```bash
 # Linux
@@ -79,18 +103,19 @@ Windows route in this project.
 
 | | |
 |---|---|
-| where it runs | this machine, or a Linux CI runner |
-| needs the ROM in a secret store | **no** |
+| where it runs | this machine |
+| the ROM | stays on this machine, beside the build |
 | can be *run* before it ships | **yes**, under Wine |
 | the C++ runtime | static (mingw) |
 | the compiler | mingw-w64 GCC 13.2.0, win32 threads |
 | the SDL2.dll | the official mingw package, pinned by SHA-256 |
 
-**The reason it is cross-compiled is the ROM.** The build recompiles the
-cartridge's code, so it needs the ROM; the ROM is not in GitHub and one
-GitHub Actions secret cannot hold it (349,548 bytes of base64 against a
-48 KB cap — see `docs/plan.md` item 21). Cross-compiling keeps the ROM on
-the machine that owns it and needs no secret at all.
+**The reason it is cross-compiled is that there is no Windows machine.**
+The engine supports cross builds explicitly (`runner/cyc/project.cmake`:
+*"Cross builds require RECOMPILER pointing to a runnable host NESRecomp"*), and
+a cross-compiled binary can be **run here under Wine** before it ships —
+which the CI-with-MSVC route could never do, because nothing on a CI runner
+can execute a Windows binary.
 
 **What it costs, stated plainly:** it is a **mingw** binary, not an MSVC
 one. A different compiler, a different CRT and a different `SDL2.dll` from
@@ -162,6 +187,41 @@ that matters:
   `dummy` says *"SDL_CreateWindow failed"* and stops, and a launcher told
   to use `x11` says *"x11 not available"*. Both read like a broken build.
 
+## The ROM never leaves this machine
+
+A release build needs the ROM, because it recompiles the cartridge's code.
+The ROM is not in the repository — it is copyrighted, and a player supplies
+their own copy. So the build happens **on the machine that owns the ROM**,
+and the ROM never leaves it: not into the repository, not into a secret
+store, not onto a runner, not into an artifact.
+
+**This is a decision, and the alternative was designed and measured.** One
+GitHub Actions secret cannot hold this ROM — it is 262,160 bytes, its
+base64 is 349,548 bytes, and a secret is capped at 48 KB (seven times over;
+even xz-compressed and base64'd it is 118,060 bytes, still 2.4 times over).
+So it could have gone into the secret store as **eight parts**, reassembled
+by the CI job and checked against the cartridge's SHA-1 before the build
+read it. That route was built and tested, and it was **not taken**, for
+reasons that are about the copyright rather than the engineering:
+
+- A secret store puts a copy of a copyrighted cartridge on a third party's
+  servers, in the repository of a **public** project, and a workflow's log
+  is readable by any logged-in GitHub user. Secret redaction is by exact
+  string match, so a *partial* print of a part would not be masked. A
+  rights holder's real objection is to a copy of the game travelling, and
+  this is the one place in the project where one would.
+- The private-copying exception that makes a backup of a cartridge you own
+  lawful is narrower in the EU and the UK, and the "copy made on the
+  internet" question is live for cloud backups. A build that never uploads
+  the ROM does not have to rely on it.
+- The cross build removed the reason to want CI at all: the Windows
+  artifact now builds here too, so the release is built where the ROM
+  lives either way.
+
+`release.sh` therefore takes the ROM from `roms/` and checks it is the
+right cartridge (**SHA-1 `75dad8b4…`**, the whole file) before it builds
+anything. A wrong ROM would produce an artifact that is not this project.
+
 ## The AppImage, and why its AppRun is not a one-liner
 
 The AppImage payload is a read-only squashfs, and the engine writes three
@@ -218,10 +278,25 @@ flatpak-builder --user --install --force-clean \
     tools/release/flatpak/org.saftle.SuperDodgeBallRecomp.yml
 ```
 
+**`flatpak-builder` may be a program or the `org.flatpak.Builder` flatpak**,
+and `release.sh` finds either:
+
+```bash
+flatpak install --user flathub org.flatpak.Builder
+flatpak run org.flatpak.Builder --user --install --force-clean ...
+```
+
+The Builder flatpak's command *is* `flatpak-builder`, so the arguments pass
+straight through — do not put another `flatpak-builder` in front of them. It
+becomes a stray positional argument, and flatpak-builder then reads the
+*build directory* as the manifest and fails with *"Is a directory"*.
+
 It uses the same `AppRun` script, with the payload at `/app/bin` — which is
 read-only, exactly like the AppImage's — so the game runs from a writable
 copy in the app's data directory. The ROM is a build-time source (the
-manifest points at `roms/`), and the app ships without it.
+manifest points at `roms/`), and the app ships without it: the installed
+payload is the binary, the assets, the mod manifests, the cheat file and the
+licences, and **no `.nes`** (measured — `release.sh` looks).
 
 The manifest's `command:` is a **bare name**: flatpak-builder resolves it
 inside `/app/bin`, so `command: AppRun` finds `/app/bin/AppRun` and
@@ -231,65 +306,75 @@ Building the Flatpak is also the **strictest compiler gate in the project**:
 the SDK's GCC is newer than a typical desktop's, and it rejected a callback
 signature that every local compiler had only warned about.
 
-## The release workflow
+## The release
 
-`.github/workflows/release.yml` runs on a `v*` tag and produces:
+It is built and published from here — the SMB and Zelda model. The reasons
+are in "The ROM never leaves this machine" above: a CI build would need the
+ROM in GitHub's secret store, and the cross build means the Windows artifact
+builds here anyway.
+
+The four artifacts:
 
 | Artifact | Platform | Dependencies |
 |---|---|---|
 | `super-dodge-ball-recomp-<v>-linux-x86_64.tar.gz` | Linux x86-64 | SDL2 and OpenGL |
 | `super-dodge-ball-recomp-<v>-linux-x86_64.AppImage` | Linux x86-64 | none |
 | `super-dodge-ball-recomp-<v>-windows-x64.zip` | Windows x64 | none |
-| `org.saftle.SuperDodgeBallRecomp` (Flatpak) | Linux x86-64 | none |
+| `super-dodge-ball-recomp-<v>.flatpak` | Linux x86-64 | none |
 
 The tarball is the plain build; the AppImage bundles SDL2 and the other
-libraries, so it runs on a machine that has nothing installed. The Windows ZIP
-carries SDL2.dll and is statically linked against the mingw runtime — and it
-is **cross-compiled on the Linux runner**, not on a Windows one.
+libraries, so it runs on a machine that has nothing installed. The Windows
+ZIP carries SDL2.dll and is statically linked against the mingw runtime.
 
-**The workflow cannot build yet, and says so in its own header.** Every job
-needs the ROM at build time and reads it from the secret store, and the fetch
-step is not written: one GitHub Actions secret cannot hold this ROM (349,548
-bytes of base64 against a 48 KB cap), so it has to be reassembled from parts
-and checked against its SHA-1 first — `docs/plan.md` item 21 has the spec.
+### What `release.sh` does, and what each step is for
 
-**So there are two ways to publish, and they are not the same thing.**
+| step | what it is for |
+|---|---|
+| **preflight** | the tree is **clean**, the tag agrees with `VERSION`, the ROM is the right cartridge, the cross compiler is installed, `gh` is authenticated |
+| **build** | Linux, then the Windows cross build, then the AppImage and the Flatpak |
+| **gate** | the Windows build's **five gates**, before the ZIP is made |
+| **package** | the tarball and the ZIP, each through the guard that refuses a ROM |
+| **verify** | HEAD has not moved and the tree is still clean, so the artifacts are this commit; and **no artifact carries a ROM** |
+| **notes** | `release/RELEASE-NOTES.md`, with the artifact table and the checksums |
+| **publish** | the tag, the release and the assets — and then a check that the release really has the four assets |
 
-- **By hand, from this machine.** Build the artifacts here, tag, and upload
-  them yourself (`gh release create v1.0.0 release/*`). This is the
-  SMB/Zelda model: the release is built where the ROM lives, and the Windows
-  artifact needs no secret because it is cross-compiled.
-- **By the workflow, from a tag.** Once the split-secrets fetch exists, the
-  workflow builds all four artifacts itself, and nothing has to be built by
-  hand at all.
+**The ROM check looks inside all four artifacts**, not just the two
+archives: the tarball and the ZIP are listed, the AppImage is
+**extracted** (`--appimage-extract` reads the payload without FUSE, so it
+works on a machine with no FUSE), and the Flatpak's payload directory is
+listed. **A check that read nothing is not a check that passed** — the
+script dies if an extraction fails or a listing comes back empty, rather
+than reporting a clean pass it did not measure. (That is the same rule the
+project's other gates follow, and it is there because a gate that measures
+nothing is the failure mode that keeps coming back.)
 
-Either way the artifacts are the same files, and `tools/release/gate-mingw.sh`
-is the gate for the Windows one whichever route built it.
+**The clean-tree rule is the one that matters.** The build bakes the commit
+it came from into the binary (`NESRECOMP_BUILD_REVISION`) and prints it in
+the startup log, so an artifact built from a dirty tree names a commit that
+is not what you shipped. `release.sh` refuses to run on a dirty tree, and
+refuses to publish if HEAD moved while it was building.
 
-### Publishing by hand, today
+**The Flatpak needs `flatpak-builder`**, which may be a program or the
+`org.flatpak.Builder` flatpak — the script finds either, and tells you how
+to get one if there is neither. `--skip-flatpak` leaves it out, and says
+so in the release notes.
 
-**Build the artifacts after your last commit.** The build bakes the commit it
-came from into the binary (`NESRECOMP_BUILD_REVISION`) and prints it in the
-startup log, so an artifact built one commit before the tag names a commit
-that is not the tag. The build is quick once the code generator has run
-once — but the *Windows* build recompiles the generated C from scratch in a
-different tree, so allow it a few minutes.
+**Publishing is idempotent.** If the release already exists, its assets
+are replaced (`--clobber`) and its notes rewritten, rather than the
+release being deleted — which would take its URL and its discussion with
+it.
 
-The workflow's jobs all need the ROM, so a tag pushed **before** the
-split-secrets fetch exists produces a failed workflow and no release. The
-by-hand route is the one that works now:
-
-```bash
-git tag v1.0.0 && git push origin v1.0.0
-gh release create v1.0.0 \
-  release/super-dodge-ball-recomp-1.0.0-linux-x86_64.tar.gz \
-  release/super-dodge-ball-recomp-1.0.0-linux-x86_64.AppImage \
-  release/super-dodge-ball-recomp-1.0.0-windows-x64.zip \
-  release/super-dodge-ball-recomp-1.0.0.flatpak \
-  --title "Super Dodge Ball Recomp 1.0.0" --notes-file <notes>
-```
+**Without `--publish` nothing leaves the machine.** The script builds,
+verifies, writes `release/RELEASE-NOTES.md` and prints the command that
+would publish it, so the notes can be read before they are used. The
+release notes name every artifact and carry its SHA-256, and they say so
+when the Windows build was **not** gated (`--skip-gate`).
 
 ## Before you publish
+
+`release.sh` does all of these, and stops if any of them fails. They are
+listed here because they are the things that have to be true of a release,
+not because they are steps you have to remember.
 
 1. `tools/release/package.py` — the archive must contain no ROM and no player
    data. The guard fails the packaging, it does not warn.
@@ -303,7 +388,10 @@ gh release create v1.0.0 \
    cross build is the same machine, and it is the one a picture comparison
    would have stood in for.
 5. `VERSION` holds the release version, and it is baked into the binary
-   (`NESRECOMP_GAME_VERSION`) and printed in the startup log.
+   (`NESRECOMP_GAME_VERSION`) and printed in the startup log. The tag is
+   derived from it, so the two cannot disagree.
+6. The tree is clean and HEAD has not moved, so the commit the binary
+   names is the commit the release is tagged with.
 
 ## Provenance
 

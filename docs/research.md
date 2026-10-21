@@ -300,7 +300,8 @@ is not "byte-identical", and the docs should say so.
 - **Mapper**: 1 (MMC1 / NES-SLROM PCB, MMC1B2 variant)
 - **PRG ROM**: 128 KB (8 × 16KB banks) · **CHR ROM**: 128 KB (16 × 8KB banks)
 - **Mirroring**: Horizontal · **Battery**: None · **TV System**: NTSC
-- **CRC32**: `689971F9` · **SHA-1**: `42f954e9bd3256c011aba14c7e5b400abe35fde3`
+- **CRC32 of the payload** (after the 16-byte header): `689971F9` — the identity the mod packages target
+- **SHA-1 of the whole file**: `75dad8b461864ddd396c75bdb68378bb2bc47d99` · **CRC32 of the whole file**: `9400BA7F` · **SHA-256 of the whole file**: `36fe18ef11f9dc7ac1dc563f4b4a6af84fb48a04660f2cabe7885dc24983fa3a` (the build log's "ROM SHA256") · **SHA-256 of the payload**: `28ce7c337755f30a99cfbd1ad0bed56c8e43ee18b461b6dfcbbf77b7ddbcd035` (what the launcher checks)
 - **CIC chip**: 6113B1 · **File size**: 262,160 bytes
 
 ---

@@ -71,7 +71,7 @@ Building it yourself instead? [Quick start](#quick-start) below.
 ```bash
 # 1. Drop your legally obtained ROM here:
 #      roms/Super Dodge Ball (USA).nes
-#      CRC32 689971F9 · SHA-1 42f954e9bd3256c011aba14c7e5b400abe35fde3
+#      SHA-1 75dad8b461864ddd396c75bdb68378bb2bc47d99 · CRC32 9400BA7F
 
 # 2. One-time setup: submodules, engine, patches, MesenCE, first build
 ./setup.sh
@@ -475,7 +475,7 @@ by content.
 | [`CMakeLists.txt`](CMakeLists.txt) | The game project. Wraps the engine's own project file and adds what that file cannot express, which is why the submodule stays pristine |
 | [`VERSION`](VERSION) | The release version, baked into the binary |
 | [`tools/release/`](tools/release/) | The release recipe: the per-platform builds, the packager, the AppImage, the Flatpak manifest, and the box art |
-| [`tools/release/build-mingw.sh`](tools/release/build-mingw.sh) | The Windows build, cross-compiled from Linux — no ROM secret, and the result can be run under Wine before it ships |
+| [`tools/release/release.sh`](tools/release/release.sh) | **The release, in one command** — builds all four artifacts, gates them, verifies them and publishes them. The ROM never leaves the machine that owns it |
 | [`NOTICE.md`](NOTICE.md) · [`LICENSE.md`](LICENSE.md) | Attribution for everything this is built on, and the licence |
 | `external/nesrecomp/` | Pinned engine submodule, **pristine** — this port carries no engine patches |
 | `external/recomp-ui/` | Pinned launcher and in-game menu |
@@ -510,9 +510,8 @@ Super Dodge Ball Recomp/
 │   ├── mesence/                   # MesenCE (pinned submodule; binary fetched at setup)
 │   └── nes-test-roms/             # blargg suite (gitignored, via setup.sh)
 ├── tools/
-│   ├── release/                   # the release builds (including the
-│   │                              #   Linux -> Windows cross build), packaging
-│   │                              #   and the CI recipe
+│   ├── release/                   # the release: one command builds, gates
+│   │                              #   and publishes all four artifacts
 │   ├── widescreen/                # compositor measurement: nametable, objects,
 │   │                              #   margin audit, bounds, anchor, JSON trace
 │   ├── tas/                       # co-simulation harness (run_tas / diff_tas / judder)
@@ -530,7 +529,8 @@ Super Dodge Ball Recomp/
 ├── tas/
 │   ├── vectors/                   # recorded input vectors
 │   └── runs/                      # per-run artefacts (gitignored)
-├── .github/workflows/             # CI on every push; the release on a v* tag
+├── .github/workflows/             # CI on every push (there is no release
+│                                  #   workflow: the release is built by hand)
 ├── build-cycle/                   # the dev build (gitignored)
 ├── build-release/                 # the release build (gitignored)
 ├── release/                       # the staged archives (gitignored)
@@ -986,8 +986,11 @@ obtained copy, and the build reads it without ever committing it.
 | **Mirroring** | Horizontal |
 | **Battery** | None |
 | **TV System** | NTSC |
-| **PRG CRC32** | `689971F9` |
-| **SHA-1** | `42f954e9bd3256c011aba14c7e5b400abe35fde3` |
+| **Payload CRC32** | `689971F9` — the cartridge data after the 16-byte iNES header, and the identity the mod packages target |
+| **File SHA-1** | `75dad8b461864ddd396c75bdb68378bb2bc47d99` — the whole `.nes` file, as `sha1sum` prints it |
+| **File CRC32** | `9400BA7F` |
+| **File SHA-256** | `36fe18ef11f9dc7ac1dc563f4b4a6af84fb48a04660f2cabe7885dc24983fa3a` — what the build log prints |
+| **Payload SHA-256** | `28ce7c337755f30a99cfbd1ad0bed56c8e43ee18b461b6dfcbbf77b7ddbcd035` — what the launcher checks the picked ROM against |
 | **File size** | 262,160 bytes (16-byte header + 262,144 data) |
 
 ## Developer docs
