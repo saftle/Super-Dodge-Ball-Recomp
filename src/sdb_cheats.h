@@ -45,8 +45,11 @@ int sdb_cheats_enabled(void);
  * affordance with teeth, not a convenience: the menu is the only other way to
  * toggle a row, and it is not drivable headlessly, so without this the disarm
  * path -- which is the half that was wrong the first time -- has no automated
- * gate at all. Registered through CycHostExtras.tcp_setup. */
-void sdb_cheats_tcp_setup(void);
+ * gate at all. Registered through CycHostExtras.tcp_setup, whose callback
+ * takes the host's context pointer: the signature must match it exactly, or
+ * a C23 compiler (GCC 14 and later) rejects the assignment as an error
+ * rather than a warning. */
+void sdb_cheats_tcp_setup(void *ctx);
 
 /* ---- the in-game menu ----
  *

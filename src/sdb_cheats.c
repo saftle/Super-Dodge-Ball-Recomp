@@ -539,7 +539,8 @@ static int sdb_load_cht(const char *path)
             c->armed = 0;
             c->oneshot = once[i];
             c->fired = 0;
-            snprintf(c->desc, sizeof c->desc, "%s", desc[i][0] ? desc[i] : "structured");
+            snprintf(c->desc, sizeof c->desc, "%.*s", (int)sizeof c->desc - 1,
+                     desc[i][0] ? desc[i] : "structured");
             continue;
         }
         if (!code[i][0]) continue;
@@ -789,8 +790,9 @@ static void sdb_cheat_tcp(int id, const char *line)
     cyc_tcp_ok(id, f);
 }
 
-void sdb_cheats_tcp_setup(void)
+void sdb_cheats_tcp_setup(void *ctx)
 {
+    (void)ctx;
     cyc_tcp_register("cheat",
                      "cheats: op list|on|off|offall, index for on/off",
                      sdb_cheat_tcp);

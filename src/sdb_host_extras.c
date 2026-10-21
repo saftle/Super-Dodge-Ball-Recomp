@@ -4318,7 +4318,7 @@ static void sdb_ws_report(void)
      * leaving a still picture to be interpreted. `s=` is the world column the
      * canvas's column 0 held on the last composed frame. */
     if (s_trace && s_ws_lock && s_ws_composed)
-        fprintf(stderr, "camera: %ld of %ld frames anchored (%d left centred: menus "
+        fprintf(stderr, "camera: %d of %ld frames anchored (%d left centred: menus "
                         "and anything outside the camera window), court scroll %d, "
                         "canvas world [%d,%d), native block at column %d\n",
                 s_ws_anchored, s_ws_composed + s_ws_pillarboxed, s_ws_framed,
