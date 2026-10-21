@@ -1,0 +1,90 @@
+app-id: org.saftle.SuperDodgeBallRecomp
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Platform.GL
+  - org.freedesktop.Platform.GL.default
+
+# The launcher asks the player for their own ROM, so the app needs to read
+# files outside the sandbox. It writes nothing outside ~/.var/app/<id>.
+# The command is a bare name: flatpak-builder resolves it inside /app/bin.
+command: AppRun
+
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --device=dri
+  # The player's own copy of the cartridge. Read-only: the game writes only
+  # into its own data directory.
+  - --filesystem=home:ro
+  - --filesystem=xdg-documents
+  - --filesystem=xdg-download
+
+modules:
+  - name: super-dodge-ball-recomp
+    buildsystem: simple
+    build-commands:
+      # The repository is the module's source tree, so its contents are the
+      # build directory's contents: CMakeLists.txt sits at the root.
+      - |
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DNESRECOMP_ROM="$PWD/roms/Super Dodge Ball (USA).nes" \
+          -DNESRECOMP_GAME_CONFIG="$PWD/src/game.toml" \
+          -DNESRECOMP_HEADLESS=OFF \
+          -DNESRECOMP_RECOMP_UI="$PWD/external/recomp-ui" \
+          -DNESRECOMP_GAME_VERSION="$(head -n 1 VERSION | tr -d '[:space:]')" \
+          -DNESRECOMP_BUILD_REVISION="flatpak" \
+          -DNESRECOMP_EXE_NAME="$(cat tools/release/exe.name)" \
+          -DNESRECOMP_BOXART="$PWD/docs/assets/boxart.tga" \
+          -DSDL2_DIR=/usr/lib/x86_64-linux-gnu/cmake/SDL2
+      - cmake --build build --parallel 4
+      # The engine resolves the launcher assets, the mod catalog and the
+      # cheat file relative to the executable, so they travel with it.
+      # /app/bin is the Flatpak's executable directory and is on the PATH.
+      - install -Dm755 "build/$(cat tools/release/exe.name)" "/app/bin/$(cat tools/release/exe.name)"
+      - install -d /app/bin/assets /app/bin/mods /app/bin/cheats /app/bin/licenses
+      - cp -r build/assets/. /app/bin/assets/
+      - cp -r build/mods/packages /app/bin/mods/packages
+      - cp -r build/cheats/. /app/bin/cheats/
+      - install -Dm644 LICENSE.md /app/bin/licenses/Super-Dodge-Ball-Recomp-LICENSE.md
+      - install -Dm644 NOTICE.md /app/bin/licenses/Super-Dodge-Ball-Recomp-NOTICE.md
+      - install -Dm644 external/nesrecomp/LICENSE /app/bin/licenses/NESRecomp-LICENSE.txt
+      - install -Dm644 external/nesrecomp/runner/external/SDL2/COPYING.txt /app/bin/licenses/SDL2-COPYING.txt
+      - install -Dm644 external/recomp-ui/src/third_party/imgui/LICENSE.txt /app/bin/licenses/ImGui-LICENSE.txt
+      # The AppRun is the same script the AppImage uses: the engine writes
+      # its settings and the mod state next to its executable, and /app is
+      # read-only, so the game runs from a writable copy in the app's data
+      # directory. The payload sits in /app/bin, which is where the AppRun
+      # itself lives, so it is "." relative to the script.
+      - sed -e "s/@VERSION@/$(head -n 1 VERSION | tr -d '[:space:]')/g" -e "s/@EXE@/$(cat tools/release/exe.name)/g" -e 's|@PAYLOAD@|.|g' tools/release/appimage/AppRun.in > /app/bin/AppRun
+      - chmod 0755 /app/bin/AppRun
+      - install -d /app/share/applications /app/share/metainfo /app/share/icons/hicolor/256x256/apps
+      - sed "s|@EXE@|$(cat tools/release/exe.name)|g" tools/release/flatpak/org.saftle.SuperDodgeBallRecomp.desktop > /app/share/applications/org.saftle.SuperDodgeBallRecomp.desktop
+      - install -Dm644 tools/release/flatpak/org.saftle.SuperDodgeBallRecomp.metainfo.xml /app/share/metainfo/org.saftle.SuperDodgeBallRecomp.metainfo.xml
+      - install -Dm644 docs/assets/icon.png /app/share/icons/hicolor/256x256/apps/org.saftle.SuperDodgeBallRecomp.png
+    sources:
+      - type: dir
+        path: ../../..
+        skip:
+          - .git
+          - .github
+          - build-cycle
+          - build-release
+          - build-cyc-blargg
+          - external/mesence
+          - external/nes-test-roms
+          - generated
+          - logs
+          - roms
+          - tas/runs
+          - tmp
+          - venv
+      # The ROM is needed at BUILD time (the build recompiles the cartridge's
+      # code) and is never part of the app. It is not in the repository: the
+      # release workflow decodes it from a secret into roms/ first.
+      - type: file
+        path: ../../../roms/Super Dodge Ball (USA).nes
+        dest: roms

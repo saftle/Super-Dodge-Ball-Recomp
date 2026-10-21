@@ -47,6 +47,19 @@ jobs:
           bash -n build_and_run.sh
           bash -n tools/frame_gen/run_frames.sh
 
+      - name: Shell syntax (release scripts)
+        # These build and package what the releases page publishes, and a
+        # syntax error in them is only found on release day otherwise.
+        run: |
+          bash -n tools/release/build.sh
+          bash -n tools/release/appimage/build_appimage.sh
+          sh -n tools/release/appimage/AppRun.in || true   # a template, not a script
+          sh -n tools/release/appimage/test_appimage_layout.sh
+          sh -n tools/release/build.sh
+
+      - name: The release scripts parse
+        run: python3 -m compileall -q tools/release/
+
       - name: Python compiles
         run: python3 -m compileall -q tools/
 

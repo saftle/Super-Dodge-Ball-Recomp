@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.saftle.SuperDodgeBallRecomp</id>
+  <name>Super Dodge Ball Recomp</name>
+  <summary>Super Dodge Ball (USA), recompiled cycle-accurately</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>PolyForm-Noncommercial-1.0.0</project_license>
+  <description>
+    <p>
+      Super Dodge Ball for the NES, recompiled: the game's 6502 code is
+      translated ahead of time into native code and run cycle-accurately,
+      with the picture, sound and music the original cartridge produces.
+    </p>
+    <p>
+      The game needs no ROM to install, but it needs one to play: the
+      launcher asks for your own copy of Super Dodge Ball (USA) at first
+      launch and verifies it. No ROM is bundled.
+    </p>
+    <p>
+      This port also adds three optional enhancements, all off by default:
+      removal of the game's own sprite flicker, a widescreen presentation
+      that reveals the columns the NES could not show, and PPU overclocking.
+    </p>
+  </description>
+  <launchable type="desktop-id">org.saftle.SuperDodgeBallRecomp.desktop</launchable>
+  <url type="homepage">https://github.com/saftle/Super-Dodge-Ball-Recomp</url>
+  <developer_name>Saftle</developer_name>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-10-21"/>
+  </releases>
+</component>

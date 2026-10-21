@@ -1,0 +1,121 @@
+#!/bin/sh
+# AppRun for the Super Dodge Ball Recomp AppImage.
+#
+# WHY THIS SCRIPT EXISTS
+#
+# The AppImage payload is a read-only squashfs. The engine writes three
+# things next to its executable: config.ini (the launcher's settings), the
+# mod catalog's state.toml (which feature the player has switched on) and
+# rom.cfg (the ROM path the player picked). Those paths come from
+# /proc/self/exe, so running the game from inside the payload cannot work:
+# it exits with "mods: cannot write mod state" (measured, not inferred --
+# see tools/release/appimage/test_appimage_layout.sh).
+#
+# So the game runs from a WRITABLE COPY of the payload, next to the
+# .AppImage when that directory is writable and in the user's data
+# directory otherwise. The copy is refreshed when the AppImage's version
+# changes, and the player's own state (config.ini, mods/state.toml, any
+# mod packages they installed) is carried across the refresh.
+#
+# @VERSION@, @EXE@ and @PAYLOAD@ are substituted when the AppImage is built.
+# @PAYLOAD@ is the directory inside the bundle that holds the game and its
+# assets (usr/bin in an AppDir, bin in a Flatpak's /app).
+
+set -u
+
+HERE="$(dirname "$(readlink -f "$0")")"          # the mounted, read-only payload
+VERSION="@VERSION@"
+EXE="@EXE@"
+PAYLOAD="@PAYLOAD@"
+
+# The AppImage runtime exports APPDIR (the mount point) and APPIMAGE (the
+# file it was launched from). **Another AppImage exports APPIMAGE too** --
+# anything running inside one hands it down to its children -- and taking it
+# at face value puts the game's writable copy in an unrelated directory.
+# Believe it only when APPDIR is where this script lives.
+ROMDIR=""
+if [ -n "${APPDIR:-}" ] && [ "$HERE" = "$APPDIR" ] && [ -n "${APPIMAGE:-}" ]; then
+    ROMDIR="$(dirname "$APPIMAGE")"
+fi
+
+# recomp-ui spawns HOST tools (zenity, kdialog) for the file picker. Those
+# tools link the host's GTK/Qt and must not inherit this bundle's libraries,
+# so the launcher strips LD_LIBRARY_PATH from what it spawns and restores the
+# host's value from RECOMP_HOST_LD_LIBRARY_PATH. Save it before we change
+# ours.
+RECOMP_HOST_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+export RECOMP_HOST_LD_LIBRARY_PATH
+export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH:-}"
+
+# Where the writable copy lives: next to the .AppImage when that directory
+# is writable, in the user's data directory otherwise.
+if [ -n "$ROMDIR" ] && [ -w "$ROMDIR" ]; then
+    RUNTIME="$ROMDIR/.super-dodge-ball-recomp"
+else
+    RUNTIME="${XDG_DATA_HOME:-$HOME/.local/share}/super-dodge-ball-recomp"
+fi
+mkdir -p "$RUNTIME" 2>/dev/null
+
+INSTALLED_VERSION=""
+if [ -f "$RUNTIME/.payload-version" ]; then
+    INSTALLED_VERSION="$(cat "$RUNTIME/.payload-version" 2>/dev/null)"
+fi
+
+if [ ! -x "$RUNTIME/$EXE" ] || [ "$INSTALLED_VERSION" != "$VERSION" ]; then
+    STAGE="$RUNTIME.new.$$"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
+    cp -a "$HERE/$PAYLOAD/." "$STAGE/" || exit 1
+    # The payload is read-only and its modes are copied along with it, so the
+    # copy would be read-only too -- and the game could not write its own
+    # settings into it. The directories are opened first: a recursive chmod
+    # does not descend into a directory it cannot write, so one pass over the
+    # directories is needed before the recursive one.
+    find "$STAGE" -type d -exec chmod u+rwx {} + 2>/dev/null
+    chmod -R u+rwX "$STAGE" 2>/dev/null
+    printf '%s\n' "$VERSION" > "$STAGE/.payload-version"
+
+    # Carry the player's own state across the refresh. The payload holds only
+    # the release's own manifests, so these are the only things that can be
+    # the player's: the settings file, the mod state, and any package the
+    # player installed.
+    if [ -f "$RUNTIME/config.ini" ]; then
+        cp -a "$RUNTIME/config.ini" "$STAGE/config.ini" 2>/dev/null
+    fi
+    if [ -f "$RUNTIME/mods/state.toml" ]; then
+        cp -a "$RUNTIME/mods/state.toml" "$STAGE/mods/state.toml" 2>/dev/null
+    fi
+    if [ -d "$RUNTIME/mods/packages" ]; then
+        mkdir -p "$STAGE/mods/packages"
+        cp -a "$RUNTIME/mods/packages/." "$STAGE/mods/packages/" 2>/dev/null
+    fi
+
+    rm -rf "$RUNTIME.old"
+    if [ -d "$RUNTIME" ]; then
+        mv "$RUNTIME" "$RUNTIME.old"
+    fi
+    mv "$STAGE" "$RUNTIME"
+    rm -rf "$RUNTIME.old"
+fi
+
+# If a ROM sits next to the .AppImage, point the launcher at it so it opens
+# with that file selected. This does NOT bypass the launcher: the Mods
+# screen and the settings stay reachable, and the player still chooses.
+if [ -n "$ROMDIR" ] && [ -z "${NESRECOMP_NO_LAUNCHER:-}" ]; then
+    for candidate in "$ROMDIR"/*.nes "$ROMDIR"/*.NES; do
+        if [ ! -e "$candidate" ]; then
+            continue
+        fi
+        cached=""
+        if [ -f "$RUNTIME/rom.cfg" ]; then
+            cached="$(head -n1 "$RUNTIME/rom.cfg" 2>/dev/null | tr -d '\r\n')"
+        fi
+        if [ -z "$cached" ] || [ ! -f "$cached" ]; then
+            printf '%s\n' "$candidate" > "$RUNTIME/rom.cfg" 2>/dev/null
+        fi
+        break
+    done
+fi
+
+cd "$RUNTIME" || exit 1
+exec "$RUNTIME/$EXE" "$@"

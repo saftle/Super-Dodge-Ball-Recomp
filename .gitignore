@@ -40,6 +40,16 @@ build-blargg-diag/
 **/*.bin
 **/*.pal
 **/*.tga
+# ...but the launcher's own art is tracked: the hero image on the left of the
+# launcher. A player's own scan (art/boxart.tga) is not -- see tools/release/.
+!docs/assets/*.tga
+
+# Release staging and archives (anchored to the repo root: an unanchored
+# "release/" would swallow tools/release/ as well).
+/release/
+/build-release/
+# A player's own box art, used by the release build when it is present.
+/art/
 
 # IDE / editor
 .idea/

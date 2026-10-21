@@ -1,0 +1,269 @@
+name: Release
+
+# A release is built from a tag: v1.0.0 -> version 1.0.0.
+#
+# The ROM is NOT in the repository and never in the artifact. It is needed at
+# BUILD time only, because the build recompiles the cartridge's code into the
+# executable; the published archive carries no ROM and the launcher asks the
+# player for their own copy at first launch.
+#
+# The build needs that ROM, and it is fetched from the secret store -- but
+# that step is NOT WRITTEN YET, so this workflow cannot build as it stands.
+# A single secret cannot hold this ROM: its base64 is 349,548 bytes and a
+# GitHub Actions secret is capped at 48 KB. It has to be reassembled from
+# parts, and the ROM's identity checked against its SHA-1 before the build
+# reads it. See docs/plan.md item 21 for the spec, and item 22 for the
+# alternative that needs no secret at all: cross-compiling the Windows
+# build from Linux.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # A manual run builds every artifact and stops without publishing. It is how
+  # the Windows build gets exercised before 1.0 is tagged. The version comes
+  # from the VERSION file, which is the single source of truth.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ROM_NAME: Super Dodge Ball (USA).nes
+  ROM_SHA1: 42f954e9bd3256c011aba14c7e5b400abe35fde3
+  ROM_CRC32: 689971F9
+
+jobs:
+  linux:
+    name: Linux (tarball + AppImage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -qy cmake ninja-build libsdl2-dev libgl1-mesa-dev python3
+
+      # The ROM is a build input, and it is fetched from the secret store
+      # HERE -- but that step is not written yet. A single secret cannot hold
+      # this ROM (349,548 bytes of base64 against a 48 KB cap), so it has to
+      # be reassembled from parts. See docs/plan.md item 21 for the spec.
+      # Until then the build step below fails on the missing ROM, which is
+      # the honest failure.
+
+      - name: Build
+        run: ./tools/release/build.sh --build-dir build-release
+
+      # The ROM is a build input, not a build output. Delete it from the
+      # workspace before anything can be uploaded: a later edit to an upload
+      # path (a stray glob) would otherwise sweep a copyrighted file into a
+      # public artifact, and the packaging's own guard cannot see an Actions
+      # upload at all.
+      - name: Remove the ROM from the workspace
+        run: rm -f "roms/${ROM_NAME}"
+
+      - name: Package (tarball)
+        run: ./tools/release/package.py --build-dir build-release --platform linux --arch x86_64
+
+      - name: Package (AppImage)
+        run: ./tools/release/appimage/build_appimage.sh --build-dir build-release
+
+      # The generated C is the TRANSLATED GAME (7.9 MB of it). It is a build
+      # output, so it goes the same way the ROM went: gone before anything
+      # can be uploaded.
+      - name: Remove the generated code from the workspace
+        run: rm -rf build-release/cycle-nes_game
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: |
+            release/super-dodge-ball-recomp-*-linux-x86_64.tar.gz
+            release/super-dodge-ball-recomp-*-linux-x86_64.AppImage
+          if-no-files-found: error
+
+  windows:
+    name: Windows (zip)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # The ROM is a build input, and it is fetched from the secret store
+      # HERE -- but that step is not written yet. A single secret cannot hold
+      # this ROM (349,548 bytes of base64 against a 48 KB cap), so it has to
+      # be reassembled from parts. See docs/plan.md item 21 for the spec.
+      # Until then the build step below fails on the missing ROM, which is
+      # the honest failure.
+
+      - name: Build
+        shell: pwsh
+        run: ./tools/release/build.ps1 -Rom 'roms/Super Dodge Ball (USA).nes'
+
+      # The ROM and the translated game code are build inputs and outputs,
+      # not artifacts. Delete both before anything can be uploaded, so a
+      # stray glob in a later edit cannot publish either.
+      - name: Remove the ROM and the generated code from the workspace
+        shell: pwsh
+        run: |
+          Remove-Item -Force 'roms/Super Dodge Ball (USA).nes' -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force 'build-release/cycle-nes_game' -ErrorAction SilentlyContinue
+
+      - name: Package
+        shell: pwsh
+        run: |
+          python tools/release/package.py --build-dir build-release --platform windows --arch x64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: release/super-dodge-ball-recomp-*-windows-x64.zip
+          if-no-files-found: error
+
+  flatpak:
+    name: Linux (Flatpak)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install the Flatpak tooling
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -qy flatpak-builder
+          flatpak remote-add --if-not-exists --user flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+          # The runtime and SDK the manifest names, and the GL extension the
+          # launcher needs. This is a large download; the Flatpak is the
+          # slowest of the four artifacts and the one that depends on a
+          # third party being up.
+          flatpak install --user -y flathub \
+            org.freedesktop.Sdk//26.08 \
+            org.freedesktop.Platform//26.08 \
+            org.freedesktop.Platform.GL//26.08
+
+      # The ROM is a build input, and it is fetched from the secret store
+      # HERE -- but that step is not written yet. A single secret cannot hold
+      # this ROM (349,548 bytes of base64 against a 48 KB cap), so it has to
+      # be reassembled from parts. See docs/plan.md item 21 for the spec.
+      # Until then the build step below fails on the missing ROM, which is
+      # the honest failure.
+
+      - name: Build the Flatpak
+        run: |
+          flatpak-builder --user --install --force-clean --disable-cache \
+            --repo=flatpak-repo flatpak-build \
+            tools/release/flatpak/org.saftle.SuperDodgeBallRecomp.yml
+
+      # The ROM and the translated game code are build inputs and outputs,
+      # not artifacts. Delete both before anything can be uploaded.
+      - name: Remove the ROM and the generated code from the workspace
+        run: |
+          rm -f "roms/${ROM_NAME}"
+          rm -rf flatpak-build/.flatpak-builder build-flatpak
+
+      - name: Bundle it as a single file
+        run: |
+          version="$(head -n 1 VERSION | tr -d '[:space:]')"
+          flatpak build-bundle flatpak-repo \
+            "super-dodge-ball-recomp-${version}.flatpak" \
+            org.saftle.SuperDodgeBallRecomp
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-x86_64
+          path: super-dodge-ball-recomp-*.flatpak
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: [linux, windows, flatpak]
+    # Only a tag publishes. A manual dispatch builds the artifacts and stops:
+    # it is how the Windows build gets exercised before 1.0 is tagged, and
+    # it must not create a release named after a branch.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download the artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List the artifacts
+        run: ls -la artifacts/
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # The VERSION file is the single source of truth for the version
+          # every artifact was built with. The tag has to agree with it: a
+          # release tagged v1.0.1 while the file says 1.0.0 would publish
+          # artifacts labelled 1.0.0 under a 1.0.1 heading.
+          version="$(head -n 1 VERSION | tr -d '[:space:]')"
+          if [ "${TAG#v}" != "${version}" ]; then
+            echo "::error::The tag is ${TAG} but VERSION says ${version}. Fix the file or the tag." >&2
+            exit 1
+          fi
+          {
+            echo "Super Dodge Ball Recomp ${version}."
+            echo
+            echo "The game is a cycle-accurate recompilation of Super Dodge Ball (USA)."
+            echo "**No ROM is included.** The launcher asks for your own copy at first launch."
+            echo
+            echo "| Artifact | Platform |"
+            echo "|---|---|"
+            for f in artifacts/*; do
+              case "$f" in
+                *.tar.gz) echo "| $(basename "$f") | Linux x86-64 (tarball) |" ;;
+                *.AppImage) echo "| $(basename "$f") | Linux x86-64 (AppImage) |" ;;
+                *.zip) echo "| $(basename "$f") | Windows x64 |" ;;
+                *.flatpak) echo "| $(basename "$f") | Linux x86-64 (Flatpak) |" ;;
+              esac
+            done
+            echo
+            echo "Checksums:"
+            echo
+            echo '```'
+            (cd artifacts && sha256sum * 2>/dev/null || shasum -a 256 *)
+            echo '```'
+          } > release-notes.md
+          cat release-notes.md
+          # A re-run of a tag that already has a release would fail here
+          # ("release already exists"), and the point of a re-run is to
+          # replace the artifacts. The TAG is left alone: it is the release's
+          # identity, and the commit it names is what the binaries were
+          # built from.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "replacing the existing release for ${TAG}"
+            gh release delete "${TAG}" --yes
+          fi
+          gh release create "${TAG}" \
+            --title "Super Dodge Ball Recomp ${version}" \
+            --notes-file release-notes.md \
+            artifacts/*
+
+      - name: Upload the release notes as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: warn

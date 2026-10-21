@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Super Dodge Ball Recomp
+Comment=Super Dodge Ball (USA), recompiled cycle-accurately
+Exec=@EXE@
+Icon=org.saftle.SuperDodgeBallRecomp
+Categories=Game;
+Terminal=false
