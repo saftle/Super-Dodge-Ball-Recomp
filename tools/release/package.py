@@ -21,6 +21,7 @@ import hashlib
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import time
@@ -55,15 +56,25 @@ cartridge's, so you need your own copy of the ROM to play.
      (Super Dodge Ball (USA).nes) when it asks.
   3. Play.
 
-No ROM is included in this archive and none is needed to install it.
+No ROM is included in this archive and none is needed to install it. The
+launcher checks the copy you select, and reads the cartridge's graphics and
+music out of it while the game runs -- which is why the archive is not a
+substitute for the original.
+
+If the launcher says the ROM is "not recognized", check that you have the
+right file before anything else:
+    CRC32  689971F9
+    SHA-1  42f954e9bd3256c011aba14c7e5b400abe35fde3
 
 Controls
   Arrow keys  D-pad          Z  A            X  B
   Enter      Start          \\  Select       Esc  in-game menu
   Hold Tab   fast-forward   F8 / F9  save / load a cycle state
+  F11        fullscreen     F12  screenshot
 
 Gamepads work too; the launcher (Controls) remaps them. Settings live in
-config.ini next to the executable.
+config.ini next to the executable -- which, for the AppImage and the Flatpak,
+is inside the writable copy the launcher makes, not the read-only one.
 
 Mods
   The Mods screen in the launcher toggles the three features this port adds:
@@ -75,7 +86,7 @@ Cheats
   cheats/Super Dodge Ball (USA).cht and every entry ships disabled.
 
 Licences are in the licenses/ directory. The game itself is not ours to
-licence: see NOTICE.md for who owns it.
+licence: see licenses/Super-Dodge-Ball-Recomp-NOTICE.md for who owns it.
 
 This build was made from revision {revision}.
 """
@@ -134,6 +145,54 @@ def epoch() -> int:
     if value and value.isdigit():
         return int(value)
     return int(time.time())
+
+
+def git_revision(root: Path) -> str:
+    """The short commit the build came from, and whether the tree was dirty.
+
+    Reading .git/HEAD is not enough: it holds "ref: refs/heads/master", and
+    a release that says it was built from "ref: refs/he" is worse than one
+    that says nothing. Resolve the ref, and say so plainly when the working
+    tree carried changes the commit does not -- a release built from an
+    uncommitted tree must not claim to be the commit.
+    """
+    try:
+        out = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=30)
+        if out.returncode == 0 and out.stdout.strip():
+            sha = out.stdout.strip()
+            dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                                   capture_output=True, text=True, timeout=30)
+            if dirty.returncode == 0 and dirty.stdout.strip():
+                return f"{sha} (with uncommitted changes)"
+            return sha
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # No git: read the refs by hand.
+    git_dir = root / ".git"
+    if git_dir.is_file():
+        try:
+            git_dir = Path(git_dir.read_text().split("gitdir:", 1)[1].strip())
+        except (OSError, IndexError):
+            return ""
+    head = git_dir / "HEAD"
+    if not head.is_file():
+        return ""
+    text = head.read_text().strip()
+    if text.startswith("ref:"):
+        ref = text.split(":", 1)[1].strip()
+        loose = git_dir / ref
+        if loose.is_file():
+            text = loose.read_text().strip()
+        else:
+            packed = git_dir / "packed-refs"
+            if packed.is_file():
+                for line in packed.read_text().splitlines():
+                    parts = line.split()
+                    if len(parts) == 2 and parts[1] == ref:
+                        text = parts[0]
+                        break
+    return text[:12] if text else ""
 
 
 def make_tar(stage: Path, out: Path) -> None:
@@ -201,11 +260,7 @@ def main() -> int:
     # AppImage beside it is x86_64, so the two must not disagree.
     arch = args.arch or ("x64" if args.platform == "windows" else "x86_64")
 
-    revision = args.revision
-    if not revision:
-        revision_file = root / ".git/HEAD"
-        if revision_file.is_file():
-            revision = revision_file.read_text().strip()[:12]
+    revision = args.revision or git_revision(root)
 
     exe_name = args.exe_name or (root / "tools/release/exe.name").read_text().strip()
     if not exe_name:
@@ -284,7 +339,7 @@ def main() -> int:
 
     # 7. the readme
     (stage / "README.txt").write_text(
-        README_TEMPLATE.format(version=version, platform=args.platform, arch=args.arch,
+        README_TEMPLATE.format(version=version, platform=args.platform, arch=arch,
                                 exe=exe_name,
                                 exe_suffix=".exe" if args.platform == "windows" else "",
                                 revision=revision or "unknown"),
