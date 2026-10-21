@@ -5064,3 +5064,183 @@ clean too, so being off by one cannot make it pass.
   and 21:9/32:9 were not played by hand after this change.
 - The gate baselines in (2) and (3) need re-establishing against a recorded window
   before any of these numbers is quoted as a pass.
+
+## 35. A character split down the middle: the margin and the machine on different clocks
+
+Found 2026-10-21, on a **played 16:9 session** with all three mods on
+(`tools/play_record.sh`, `SDB_ASPECT=16:9`, `SDB_CAMERA=follow`). The symptom
+is a player **torn in half vertically** for a few frames: the machine draws one
+half of the character and the margin draws the other, and the two are not eight
+columns apart, so there is a gap (or an overlap) straight through the body.
+
+The character is the first one to the right of player 1, on the far side of the
+court — the one that straddles the machine's 256-column edge.
+
+### The mechanism
+
+The game emits a character as **eight sprites in two columns of four**, and it
+hides any sprite whose accumulator is outside `[4,255]`. So a character
+straddling the edge is **one sprite drawn by two renderers**: the machine draws
+the half that is inside its viewport, and the margin draws the half the game
+culled. The two halves have to be eight columns apart.
+
+The margin placed its half at
+
+    record_X + part_offset - scroll - 4
+
+which is the part's **LIVE world position** put through the frame's scroll. The
+machine's copy of the same sprite is **frozen** at the emission that produced
+it: the game writes an OAM entry and the PPU draws it at that column until the
+game rewrites it, and the game rewrites an object's sprites every **four**
+frames while it rewrites the display **record** every frame. The record runs
+ahead of the picture, and the two halves are on different clocks.
+
+Measured, from the trace of the session (frame numbers are the trace's):
+
+| frame | what the game did | the machine's half | the margin's half |
+|---|---|---|---|
+| 548 | emitted the character, accumulators `259/251/257/249/257/249/256/248` | OAM X `247/245/245/244` | culled (accumulator > 255) |
+| 549 | — | `247/245/245/244` | `255/253/253/252` — **eight apart, whole** |
+| 550 | the record's X moved `355 → 359` | `247/245/245/244` | `259/257/257/256` — **four apart, a gap** |
+| 552 | the game culled **all eight**; the camera had stepped `102 → 95` and the scroll had not caught up | the f=548 entries, stale | `259/257/257/256` — **one apart, collapsed** |
+
+The record's X moving four columns in one frame is the whole story: the
+character was running, the record tracked it, and the margin's half followed the
+record while the machine's half stayed where the game had put it.
+
+### The fix
+
+**The anchor is taken at the emission, not at the draw.** Each margin part
+remembers the record's X as of the capture that produced it (`SdbMargin.rec_x`),
+and the placement is
+
+    record_X_at_capture + part_offset - scroll - 4
+
+so the margin's copy and the machine's copy are on the same clock. The part
+stands where the object stood when the game last emitted it, which is where the
+machine's copy of it is.
+
+That is one field and one helper (`sdb_margin_col()`), with the four draw sites
+going through it.
+
+Verified on the session's own vector, headless, **before vs after, same
+machine**:
+
+- the tear at frames 550/551 is gone, at the pixel level (the hair and the body
+  are contiguous; before, there is a four-column gap between them);
+- the **guest is untouched** — a `--frame-log` with the margin on and off is
+  byte-identical;
+- the **machine's own 256 columns** are unchanged — `native_cols.py` reports
+  **0 px** inside the machine's run, before and after;
+- `dupes.py` is unchanged (202 stacked, 0 pairs closer than 8);
+- `margin_track.py` reports the **same 10 anomalies**, the same set;
+- 99 of 1459 frames differ from the build before.
+
+### 21:9 is not different, and that is worth knowing
+
+The tear is **aspect-independent**, and it was measured rather than assumed. The
+old build drifts identically at 21:9 (`29/27/27/26` at frames 550/551) and the
+fixed build holds `23/23/22`. The margin's geometry in native columns does not
+depend on the aspect: the canvas is wider, the native block is centred in it,
+and the columns the two halves land on are the same.
+
+A session that shows it at 16:9 and not at 21:9 is a **different run** — the
+game is random, and it takes a character straddling the edge at the right
+moment. Nothing about 21:9 hides it.
+
+### What was tried and rejected, and why it matters
+
+**The game's own accumulator** — the machine's exact OAM X — is the obvious
+answer and it is *almost* right. It puts the margin's half exactly where the
+machine's is, at every frame, and it fixes the f=552 collapse as well as the
+f=550 gap. It was implemented, measured, and **rejected**, for two reasons:
+
+1. **A character the machine draws none of must keep the live position.** The
+   accumulator is camera-relative and frozen at the emission, so it drifts.
+   Measured: object 3 was emitted at frame 544 with the camera at 108 and was not
+   emitted again for 880 frames while the camera walked to 40 — on the
+   accumulator it was drawn at screen column 278, **68 columns** from where the
+   object was. Its live position is 346.
+2. **The ownership map does not answer the question the picture asks.** The map
+   (`sdb_ws_build_owner`) is built from the machine's **fresh** frame, but the
+   presented sprite layer inside the native 256 is the **flicker mod's published
+   list, which is one build old** — its wide path replaces the native columns with
+   a sprite-free redraw and redraws its own list over them. So "the machine
+   painted here" (fresh) and "the picture shows something here" (one build old)
+   are different questions, and the margin's blit clips against the first while
+   painting into the second. With the accumulator placement a part lands on a
+   column the map calls owned, the blit skips it, and the picture shows
+   background there anyway because the flicker mod's older list does not have
+   that sprite either: **the sprite vanishes.** Measured at sweep frame 225 — 247
+   px gone at the right seam and 44 px at the left band, a player's head missing.
+   It is **not** the flicker mod: a control with the flicker feature off shows
+   the same head missing, so the flicker mod is a party to the mismatch, not the
+   cause.
+
+   The placement was identical in all three builds — the same columns, the same
+   rows, the same tiles — so the difference is in the **paint**, and it is not
+   explained. That is the blocker, and it is the first thing to crack.
+
+**The per-object rule** (the accumulator for a character the machine shares, the
+live position for one it does not) is the shape the fix has to take, and it needs
+a per-object "the machine drew part of this character" flag. The build counter
+was tried as the discriminator and it is fragile: the flag has to survive a list
+boundary without being clobbered by a capture that arrives before the emission
+that sets it.
+
+### What is still open
+
+**The camera-lag class.** The disagreement between the margin's half and the
+machine's half has a second term, and it is the bigger one:
+
+    margin_column − machine_column = (camera at the emission) − (scroll now)
+
+which is zero when the camera has not stepped since the emission and **one camera
+step (6-7 columns)** on the frames where it has. The fix above removes the
+*object's movement* term; this one is the camera's.
+
+Over the session's own vector, the shared-character parts that disagree with the
+machine break down as:
+
+| cause | parts | status |
+|---|---|---|
+| the object's movement since the emission (±4) | 33 | **fixed** — 0 now |
+| the camera's movement since the emission (±6/7) | ~400 | **open** |
+
+So there is a second, larger tear class, and it is the one the f=552 frame
+belongs to. It needs the accumulator placement, and with it the per-object rule
+and the ownership-map question above.
+
+The instrument for it is `tools/widescreen/basis_check.py`, which splits the
+shared objects (the machine drew part of the character too — the ones that can
+tear) from the margin-only ones (the machine drew none, and the accumulator is
+wrong for them) and reports where each was placed. It is a **report, not a
+gate**: a delta of one camera step is not a defect on its own, and what a defect
+looks like is a delta that tracks the object's own movement.
+
+**Do the three pieces in this order, and gate each one:**
+
+1. **The ownership map has to answer the question the picture asks.** Build it
+   from what is actually presented — the flicker mod's published sprite layer
+   when the flicker mod is on, the machine's frame when it is off — so "owned"
+   means "there is something there to paint over". Until this is right, any
+   placement change is measured against a map that does not describe the
+   picture, and the symptom is a sprite vanishing rather than a sprite in the
+   wrong place.
+2. **The per-object flag**, with a discriminator that survives a list boundary.
+3. **The accumulator placement** for the shared objects.
+
+**Any new work on the compositor has to be gated with the flicker mod ON as
+well** — that is §28's lesson and this is the second time it has cost something.
+The gate that found the head-loss was a pixel comparison, not a trace.
+
+### A note on what a capture is worth
+
+The numbers above come from a **headless replay** of the session's recorded
+vector, compared before and after on the **same machine** — which is sound,
+because both sides are the same replay. They are not the windowed session: a
+headless replay of a recorded vector is a different machine from frame 4
+(§33), so the frame numbers in the replay are not the window's frame numbers.
+**The tear was found in the windowed session, in the pictures, and reproduced in
+the replay.** The vector is committed as `tas/vectors/sdb_16x9.input` so the
+replay side is reproducible.

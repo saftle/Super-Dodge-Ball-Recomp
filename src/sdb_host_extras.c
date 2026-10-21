@@ -173,6 +173,30 @@ typedef struct { uint8_t y, tile, attr, x; } SdbSprite;
  * which of them reach OAM. */
 typedef struct {
     int16_t dx;         /* part column RELATIVE to its object's record anchor */
+    /* THE OBJECT'S WORLD COLUMN AT THE EMISSION THAT PRODUCED THIS PART.
+     *
+     * The margin places a part at `this + part_offset - scroll - 4`, and the
+     * anchor used to be the record's X read LIVE at presentation time. The
+     * machine's own copy of the same sprite is FROZEN at the emission that
+     * produced it -- the game rewrites the record every frame and emits an
+     * object's sprites every four -- so the two were on different time bases
+     * the moment the object moved, and a character straddling the machine's
+     * 256-column edge came apart.
+     *
+     * MEASURED on a played 16:9 capture, object 5 at frames 549-552: the game
+     * emitted the character at frame 548 with accumulators 259/251/257/249/
+     * 257/249/256/248, so the machine drew the LEFT half at OAM X 247/245/245/
+     * 244 and the game culled the RIGHT half (accumulator > 255), which the
+     * margin drew. The record's X moved 355 -> 359 at frame 550, so the
+     * margin's half moved +4 to 259/257/257/256 while the machine's half
+     * stayed at 247: a four-column GAP straight through the character. At 552
+     * the two halves overlapped instead.
+     *
+     * So the anchor is taken at the capture, not at the draw, and the part
+     * stands where the object stood when the game last emitted it -- the same
+     * time base the machine's copy of it is on.
+     */
+    uint16_t rec_x;     /* the record's X at the emission this part came from */
     int16_t y;          /* screen row of the sprite's FIRST line, from $06/$07 */
     uint8_t tile;
     uint8_t attr;
@@ -788,6 +812,49 @@ static int sdb_world_match(int world, int row, uint8_t tile, int scroll,
     return 0;
 }
 
+/* WHERE A MARGIN PART GOES.
+ *
+ * `record_X + part_offset - scroll - 4`, with the anchor taken AT THE EMISSION
+ * rather than at the draw.
+ *
+ * The machine's own copy of a sprite is FROZEN at the emission that produced
+ * it: the game writes an OAM entry and the PPU draws it at that column until
+ * the game rewrites it, and the game rewrites an object's sprites every four
+ * frames while it rewrites the display RECORD every frame. So the record runs
+ * ahead of the picture, and a part placed from the LIVE record ends up on a
+ * different time base from the machine's copy of the same sprite.
+ *
+ * MEASURED on a played 16:9 capture, object 5 at frames 549-552: the game
+ * emitted the character at frame 548 with accumulators 259/251/257/249/257/
+ * 249/256/248, so the machine drew the LEFT half at OAM X 247/245/245/244 and
+ * the game culled the RIGHT half (accumulator > 255), which the margin drew.
+ * The record's X moved 355 -> 359 at frame 550, so the margin's half moved +4
+ * to 259/257/257/256 while the machine's half stayed at 247: a four-column GAP
+ * straight through the character, and at 552 the two halves overlapped
+ * instead. With the anchor taken at the emission the margin's half stays at
+ * 255/253/253/252, which is the machine's half plus eight columns, and the
+ * character is whole.
+ *
+ * WHAT THIS IS NOT. It is not "the game's own placement" (the accumulator the
+ * emitter computed): that is camera-relative and frozen at the emission, so a
+ * character the game stopped emitting drifts away from where it is as the
+ * camera moves -- measured on the same capture, object 3, emitted at frame 544
+ * with the camera at 108 and not emitted again for 880 frames while the
+ * camera walked to 40, and on the accumulator it was drawn 68 columns from
+ * where the object was. It is also not safe on its own: placing a part where
+ * the game put it puts it on a column the machine may have painted with a
+ * STALE sprite, and the ownership test then stands the margin down and the
+ * sprite's head goes missing.
+ *
+ * The anchor at the emission keeps the part where the OBJECT was when the game
+ * last emitted it, on the frame's own scroll -- which is the machine's basis
+ * for the copy of it that the PPU is drawing, without giving up the margin's
+ * own scroll-relative placement for the objects only it draws. */
+static int sdb_margin_col(const SdbMargin *m, int scroll)
+{
+    return (int)m->rec_x + m->dx - scroll - 4;
+}
+
 /* The one correction to make to this object's record anchor this frame, or 0.
  *
  * THE PROBLEM. The margin places a part with the latched scroll
@@ -829,7 +896,7 @@ static int sdb_world_match(int world, int row, uint8_t tile, int scroll,
  * two parts must agree the machine's copy sits N rows away. The vote window
  * itself bounds it (|N| <= SDB_RECONCILE_ROW), so a genuinely different
  * animation cel -- rows further out than that -- is never touched. */
-static int sdb_object_delta(int rec_x, const SdbMarginObj *ob, int *row_corr)
+static int sdb_object_delta(const SdbMarginObj *ob, int *row_corr)
 {
     /* Only objects the machine cannot be painting. The correction moves parts
      * onto the machine's columns; for a part the machine already paints that
@@ -848,11 +915,14 @@ static int sdb_object_delta(int rec_x, const SdbMarginObj *ob, int *row_corr)
     for (int i = 0; i < ob->n; i++) {
         const SdbMargin *m = &ob->parts[i];
         int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
-        int sx = rec_x + m->dx - cyc_render_line_scroll_x(prow) - 4;
+        /* THE PART'S SCREEN COLUMN, on whichever basis this object is on.
+         * See sdb_margin_col: the game's own placement when the machine drew
+         * part of this character, the live world position when it did not. */
+        int scroll = cyc_render_line_scroll_x(prow);
+        int sx = sdb_margin_col(m, scroll);
         if (sx >= 8 && sx <= 251) { *row_corr = 0; return 0; }
         int dc, dr;
-        if (sdb_world_match(rec_x + m->dx, m->y, m->tile,
-                            cyc_render_line_scroll_x(prow), &dc, &dr)) {
+        if (sdb_world_match(sx + scroll + 4, m->y, m->tile, scroll, &dc, &dr)) {
             seen[dc + SDB_MATCH_SLOP]++;
             rseen[dr + SDB_RECONCILE_ROW]++;
         }
@@ -1115,6 +1185,9 @@ static int sdb_margin_capture(uint16_t addr)
                      * At f=808 the machine has not painted there yet and the
                      * part is owed; at f=813 it has, and the part is retired. */
                     m->dx = (int16_t)(x - (rcx - ccam));
+                    /* The anchor, refreshed with the rest of the geometry:
+                     * this emission's record X. See SdbMargin. */
+                    m->rec_x = (uint16_t)rcx;
                     m->y = (int16_t)(SDB_MARGIN_Y0 - y);
                     m->tile = cyc_mod_peek((uint16_t)(at + 1));
                     m->attr = cyc_mod_peek((uint16_t)(at + 2));
@@ -1275,6 +1348,9 @@ static int sdb_margin_capture(uint16_t addr)
     m->b = s_margin_build;
     m->own = 0;
     m->dx = dx;
+    /* The object's world column at this emission -- the anchor the part is
+     * placed from. See SdbMargin. */
+    m->rec_x = (uint16_t)rec_x;
     /* Record identity, so a recycled slot is not drawn wearing the previous
      * occupant's tiles. See SdbMarginObj. */
     o->id0 = cyc_mod_peek(s_margin_rec);
@@ -1825,10 +1901,8 @@ static void sdb_ws_prune_margin(void)
         uint16_t rec = (uint16_t)(SDB_REC_BASE + SDB_REC_STRIDE * o);
         if (!sdb_margin_live(ob, rec)) continue;        /* a recycled slot */
         ob->pruned = ob->build;
-        int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
-                        | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
         int row_corr = 0;
-        int corr = sdb_object_delta(rec_x, ob, &row_corr);
+        int corr = sdb_object_delta(ob, &row_corr);
         int keep = 0;
         for (int i = 0; i < ob->n; i++) {
             const SdbMargin *m = &ob->parts[i];
@@ -1840,7 +1914,7 @@ static void sdb_ws_prune_margin(void)
             int prow = m->y + row_corr;
             prow = prow < 0 ? 0 : (prow >= 240 ? 239 : prow);
             int scroll = cyc_render_line_scroll_x(prow);
-            int sx = (rec_x + corr) + m->dx - scroll - 4;
+            int sx = sdb_margin_col(m, scroll) + corr;
             /* RETIRE ONLY IF THE MACHINE OWNS *ALL* OF THE PART.
              *
              * This was "did the machine paint ANY of this part's columns", and
@@ -1956,10 +2030,8 @@ static int sdb_ws_margin_pass(uint32_t *canvas, int cw)
                         s_frame, o, s_frame - ob->seen, ob->seen);
             continue;
         }
-        int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
-                        | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
         int row_corr = 0;
-        int corr = sdb_object_delta(rec_x, ob, &row_corr);
+        int corr = sdb_object_delta(ob, &row_corr);
         for (int i = 0; i < ob->n; i++) {
             const SdbMargin *m = &ob->parts[i];
             SdbMargin pm = *m;
@@ -1968,7 +2040,8 @@ static int sdb_ws_margin_pass(uint32_t *canvas, int cw)
             int prow = m->y < 0 ? 0 : (m->y >= 240 ? 239 : m->y);
             int scroll = cyc_render_line_scroll_x(prow);
             int rx0 = sdb_ws_row_x0(prow);
-            int sx = (rec_x + corr) + m->dx - scroll - 4;
+            /* Where this part goes -- see sdb_margin_col. */
+            int sx = sdb_margin_col(m, scroll) + corr;
             int px0 = sx + rx0 + sdb_ws_margin_shift(prow, rx0 - scroll);
             /* ONLY parts that STRADDLE THE RIGHT EDGE of the native block, and
              * only the columns inside it. Three restrictions, each earned:
@@ -2391,7 +2464,7 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
         /* Once per object, as at the draw site: the correction is a property of the
          * object, and recomputing it per part is a parts-squared OAM scan. */
         int row_corr = 0;
-        int corr = sdb_object_delta(rec_x, ob, &row_corr);
+        int corr = sdb_object_delta(ob, &row_corr);
         int placed = 0;
         /* Mirrors the draw site's decision EXACTLY, in the same order, and says
          * which branch each part took. Reporting a 0/1 "drawn" here instead
@@ -2409,7 +2482,10 @@ static void sdb_json_margin(int x0, int width, long diff, int n)
             int my = m->y + row_corr;
             int prow = my < 0 ? 0 : (my >= 240 ? 239 : my);
             int scroll = cyc_render_line_scroll_x(prow);
-            int sx = (rec_x + corr) + m->dx - scroll - 4;
+            /* Where this part goes -- see sdb_margin_col. The reporter mirrors
+             * the draw site's decision EXACTLY, so it has to place the part the
+             * same way. */
+            int sx = sdb_margin_col(m, scroll) + corr;
             int px0 = sx + x0;
             const char *st;
             /* Mirrors the draw site as it now stands, which asks OWNERSHIP rather
@@ -3753,12 +3829,9 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                             s_frame, o, s_frame - ob->seen, ob->seen);
                 continue;
             }
-            /* The anchor, read live. */
-            int rec_x = (int)(cyc_mod_peek((uint16_t)(rec + 3))
-                            | (cyc_mod_peek((uint16_t)(rec + 4)) << 8));
             /* The anchor, corrected only on a whole-object basis disagreement. */
             int row_corr = 0;
-            int corr = sdb_object_delta(rec_x, ob, &row_corr);
+            int corr = sdb_object_delta(ob, &row_corr);
             /* Only when it acted. Printing the zeroes too would fill the trace with
              * `[corr+0]` per object per frame, which reads as a column of data and
              * is none -- the same "a green line that measured nothing" shape this
@@ -3854,7 +3927,22 @@ static int sdb_ws_composite(uint32_t *out, int width, int height, int native_x0,
                  * court band's columns move and the held band's do not, and the
                  * two are read together with the scroll above. */
                 int rx0 = sdb_ws_row_x0(prow);
-                int sx = (rec_x + corr) + m->dx - scroll - 4
+                /* WHERE THIS PART GOES. See sdb_margin_col: the anchor is
+                 * the object's world column AT THE EMISSION, not the record's
+                 * live value, so that the margin's copy of a sprite and the
+                 * machine's copy of it are on the same time base and a
+                 * character straddling the machine's 256-column edge stays
+                 * whole.
+                 *
+                 * Measured on a played 16:9 capture, object 5, frames
+                 * 549-552: the game emitted the character at frame 548 with
+                 * accumulators 259/251/257/249/257/249/256/248, so the machine
+                 * drew the LEFT half at OAM X 247/245/245/244 and culled the
+                 * RIGHT half (accumulator > 255), which the margin drew. The
+                 * record's X moved 355 -> 359 at frame 550, so the margin's half
+                 * moved +4 while the machine's stayed at 247: a four-column gap
+                 * straight through the character. */
+                int sx = sdb_margin_col(m, scroll) + corr
                        + sdb_ws_margin_shift(prow, rx0 - scroll);
                 /* Completing a sprite the PPU clipped is the one case the margin
                  * owns rather than the machine. */

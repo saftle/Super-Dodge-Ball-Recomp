@@ -1,0 +1,97 @@
+# Super Dodge Ball (USA) - a recorded playthrough, 16:9 widescreen session.
+#
+# Written by `nes_game --record-input` from a windowed session. One
+# "<frame> <BUTTONS>" line per state change, absolute state, "-" is
+# release -- the same schedule format `--input` replays, where frame 0
+# is the first post-power frame. It records exactly the bytes the guest
+# read each frame, so the replay takes the same path.
+#
+# REPLAY IT (the last line of this file has the frame count for
+# --frames; --ram-init zeros is REQUIRED, not a default):
+#
+#     ./build-cycle/nes_game "roms/Super Dodge Ball (USA).nes" \
+#         --frames 1459 --input tas/vectors/sdb_16x9.input --ram-init zeros
+#
+# The game is random, so a replay without --ram-init zeros diverges and
+# this vector will not reproduce.
+#
+# MEASURED 2026-10-13: a headless replay of such a vector is NOT faithful
+# to the windowed recording it came from. Two windowed runs of one
+# schedule are byte-identical to each other, but a headless replay of the
+# recorded vector diverges from both at frame 4 and ends up on different
+# game state. It is not the input -- the recorded frames are the frames
+# the schedule fired on, and the divergence starts four frames before the
+# first press -- so the window and the headless host are simply not running
+# the same machine yet. That is an open engine question (research 33).
+#
+# Until it is settled, analyse the recording where it was made: its SDB_TRACE
+# log is the ground truth for what was on screen. A replay is fine for a
+# BEFORE/AFTER comparison of two builds on the same machine, which is what
+# research 35 used it for.
+#
+# This vector is the one the margin's split-character artefact was found on
+# (research 35). The session was played at 16:9 with all three mods on.
+120 START
+129 -
+195 START
+203 -
+282 B
+291 -
+322 START
+330 -
+490 RIGHT
+510 -
+512 LEFT
+579 DOWN+LEFT
+607 LEFT
+623 UP+LEFT
+633 UP
+635 RIGHT
+729 LEFT
+763 -
+767 LEFT
+780 -
+791 RIGHT
+794 -
+799 LEFT
+836 -
+841 RIGHT
+844 -
+854 RIGHT
+889 B+RIGHT
+913 B
+917 B+DOWN
+918 DOWN
+935 -
+944 DOWN
+951 -
+956 UP
+975 -
+985 LEFT
+993 -
+1005 LEFT
+1014 -
+1027 LEFT
+1051 -
+1052 LEFT
+1053 -
+1069 LEFT
+1080 -
+1081 LEFT
+1082 -
+1097 LEFT
+1105 -
+1108 LEFT
+1109 B+LEFT
+1114 LEFT
+1116 -
+1119 A
+1125 -
+1156 A
+1157 A+LEFT
+1161 LEFT
+1167 A+LEFT
+1168 LEFT
+1363 -
+
+# 1459 frames, 62 input steps
