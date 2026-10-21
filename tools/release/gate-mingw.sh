@@ -227,6 +227,67 @@ fi
 
 echo ""
 echo "=============================================================="
+echo " 5. the launcher opens"
+echo "=============================================================="
+# The launcher is the FIRST thing a player sees, and it is a different code
+# path from the headless one: Direct2D, DirectWrite, OpenGL and SDL's
+# window. A headless run touches none of it, so a binary that passes the
+# first four gates can still show a player a black rectangle.
+#
+# It runs from a COPY of the build tree. The engine writes config.ini,
+# rom.cfg and the mod catalog's state.toml next to its executable, and
+# that state is the PLAYER's -- putting it in the build tree would leave
+# a second run reading a state this gate wrote.
+if [ -z "${WINE_BIN}" ]; then
+    fail "no wine: the launcher gate needs it"
+elif ! command -v Xvfb >/dev/null 2>&1 || ! command -v xwininfo >/dev/null 2>&1; then
+    fail "the launcher gate needs Xvfb and xwininfo (sudo apt install xvfb x11-utils)"
+else
+    RUN_DIR="${WORK}/launcher-run"
+    rm -rf "${RUN_DIR}"
+    mkdir -p "${RUN_DIR}"
+    cp "${WIN_EXE}" "${RUN_DIR}/"
+    [ -f "${BUILD_DIR}/SDL2.dll" ] && cp "${BUILD_DIR}/SDL2.dll" "${RUN_DIR}/"
+    [ -d "${BUILD_DIR}/assets" ] && cp -r "${BUILD_DIR}/assets" "${RUN_DIR}/"
+    [ -d "${BUILD_DIR}/mods" ] && cp -r "${BUILD_DIR}/mods" "${RUN_DIR}/"
+    [ -d "${BUILD_DIR}/cheats" ] && cp -r "${BUILD_DIR}/cheats" "${RUN_DIR}/"
+
+    XVFB_DISPLAY=":97"
+    Xvfb "${XVFB_DISPLAY}" -screen 0 1024x768x24 >/dev/null 2>&1 &
+    XVFB_PID=$!
+    sleep 2
+    # The headless gates above set SDL_VIDEODRIVER=dummy, and the launcher
+    # cannot make a window on the dummy driver -- it says so, and stops.
+    # It wants SDL's DEFAULT driver, which for a Windows build is "windows"
+    # (Wine's win32 layer draws it on X11 underneath). Naming "x11" is
+    # wrong: a Windows SDL2 has no x11 driver to name.
+    ( cd "${RUN_DIR}" && env -u SDL_VIDEODRIVER DISPLAY="${XVFB_DISPLAY}" \
+        "${WINE_BIN}" "${WIN_EXE}" "${ROM}" \
+        > "${WORK}/launcher.log" 2>&1 ) &
+    WINE_PID=$!
+    # Poll for the window rather than sleeping a fixed time: the launcher
+    # takes a moment, and how long depends on the machine.
+    FOUND=""
+    for _ in $(seq 1 30); do
+        sleep 1
+        if xwininfo -root -tree -display "${XVFB_DISPLAY}" 2>/dev/null | grep -q "Launcher"; then
+            FOUND=yes; break
+        fi
+    done
+    kill "${WINE_PID}" 2>/dev/null || true
+    sleep 1
+    kill "${XVFB_PID}" 2>/dev/null || true
+    if [ -n "${FOUND}" ]; then
+        pass "the launcher window opened"
+        grep -i "launcher\|emoji" "${WORK}/launcher.log" 2>/dev/null | head -n 4 | sed 's/^/  | /'
+    else
+        fail "no launcher window appeared"
+        tail -n 12 "${WORK}/launcher.log" 2>/dev/null | sed 's/^/  | /'
+    fi
+fi
+
+echo ""
+echo "=============================================================="
 if [ "${FAILED}" = "0" ]; then
     echo " all gates passed"
     exit 0

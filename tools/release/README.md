@@ -112,7 +112,7 @@ tools/release/package.py --build-dir build-release/mingw --platform windows
 and it answers a 64-bit executable with *"Bad EXE format"* — which reads
 like a broken binary and is not.
 
-### The four gates
+### The five gates
 
 `gate-mingw.sh` is the Windows build's gate, and the fourth one is the one
 that matters:
@@ -130,8 +130,16 @@ that matters:
 4. **The guest state matches.** `--frame-log` over 3000 frames of
    `sdb_throw`: **381,900,012 bytes on each side, byte-identical**. The
    cross build executes the same machine.
+5. **The launcher opens.** The launcher is the *first* thing a player sees,
+   and it is a different code path from the headless one — Direct2D,
+   DirectWrite, OpenGL and SDL's window. A headless run touches none of
+   it, so a binary can pass the first four gates and still show a player a
+   black rectangle. The gate runs it on an Xvfb display and looks for the
+   window. It runs from a **copy** of the build tree: the engine writes
+   `config.ini`, `rom.cfg` and the mod catalog's `state.toml` next to its
+   executable, and that state is the *player's*.
 
-### Two traps, each of which reads like a broken build
+### Three traps, each of which reads like a broken build
 
 - **The engine's vendored MSVC SDL2 wins the `find_package(SDL2 CONFIG)`
   search on every platform**, because the engine puts its cmake dir on
@@ -145,6 +153,13 @@ that matters:
   and a prefix created by the 32-bit loader is refused by it (*"is a
   32-bit installation"*). The gate names the loader and rebuilds the prefix
   rather than reporting either as a failure of the binary.
+- **SDL's video driver is named for the target, not the display.** A Windows
+  SDL2 has no `x11` driver to name — its default is `windows`, which Wine
+  draws on X11 underneath. So the launcher gate *unsets*
+  `SDL_VIDEODRIVER` rather than setting it: the headless gates set it to
+  `dummy` (a windowless run needs no display), and a launcher told to use
+  `dummy` says *"SDL_CreateWindow failed"* and stops, and a launcher told
+  to use `x11` says *"x11 not available"*. Both read like a broken build.
 
 ## The AppImage, and why its AppRun is not a one-liner
 
@@ -248,6 +263,29 @@ and checked against its SHA-1 first — `docs/plan.md` item 21 has the spec.
 
 Either way the artifacts are the same files, and `tools/release/gate-mingw.sh`
 is the gate for the Windows one whichever route built it.
+
+### Publishing by hand, today
+
+The workflow's jobs all need the ROM, so a tag pushed **before** the
+split-secrets fetch exists produces a failed workflow and no release. The
+by-hand route is the one that works now:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+gh release create v1.0.0 \
+  release/super-dodge-ball-recomp-1.0.0-linux-x86_64.tar.gz \
+  release/super-dodge-ball-recomp-1.0.0-linux-x86_64.AppImage \
+  release/super-dodge-ball-recomp-1.0.0-windows-x64.zip \
+  release/super-dodge-ball-recomp-1.0.0.flatpak \
+  --title "Super Dodge Ball Recomp 1.0.0" --notes-file <notes>
+```
+
+**The two Windows routes produce an archive with the same name**, so publish
+one of them, not both: `…-windows-x64.zip` is either the MSVC build or the
+mingw one, and the second upload would silently replace the first. The
+README.txt inside says nothing about which, because a player does not care
+— but the release notes might, and it is worth a line if the MSVC build is
+the one that ships.
 
 ## Before you publish
 
