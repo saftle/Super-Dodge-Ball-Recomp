@@ -140,9 +140,58 @@ to the game itself.
 
 A build of this project produces a statically recompiled — machine-translated —
 build of the original 6502 code. That is inherent to static recompilation and is
-the distribution model used by other recompilation projects. No prebuilt binary is
-distributed here: the generated C, the built executable and the build directory are
-gitignored, and the game's code and assets are not included in any form.
+the distribution model used by other recompilation projects. **The repository
+itself carries no prebuilt binary**: the generated C, the built executable and
+the build directory are gitignored, and the game's code and assets are not
+committed in any form.
+
+## What a release contains, and what it does not
+
+The releases page publishes built binaries. Each one carries:
+
+| | |
+|---|---|
+| the **recompiled game code** | the cartridge's 6502 instructions, translated to C and compiled — this is what a recompilation *is*, and it is the same model as every other recompilation project |
+| the **launcher assets, the mod manifests and the cheat file** | ours, or third-party code under its own licence (see above) |
+| **no ROM** | the packaging refuses to write one: a `.nes` in the stage fails the build |
+| **no game assets** | no graphics, no music, no text, no palettes |
+
+The point of that last row is what makes the distribution defensible rather
+than merely customary: **the release cannot substitute for the cartridge.** The
+graphics, the music and the text are read out of the player's own ROM while
+the game runs — a release with the ROM's CHR zeroed renders a blank screen.
+There is nothing in the artifact that plays Super Dodge Ball without a copy of
+the original, and no way to obtain one from us.
+
+**The translation's source form is not published.** The build generates the
+translated game as C (`game_cyc*.c`, 8 MB) and that file is where the game's
+*data* lives in readable form — the codegen folds constant ROM bytes into
+immediates, so roughly 28% of the cartridge's PRG appears in it as literal
+constants alongside the translated instructions. The release carries the
+compiled translation only; the source form stays in the build tree, is
+gitignored, and is not published in any artifact.
+
+That is a deliberate line, and the reason is not squeamishness. The
+*verification* is ours and is published — the tools, the frame-log comparisons,
+the byte-exact diffs against MesenCE — so a reader can check that this is the
+same game, translated honestly, without ever seeing a line of the
+translation. The translation itself is the game's, and the less of it that
+travels, the better. (Other recompilation projects do commit their generated
+C; that is their call, not a precedent that makes it risk-free.)
+
+The project is independent, non-commercial and unaffiliated. Trade and brand
+names are used nominatively, to identify the hardware and software being
+recompiled and to credit the tools this is built on.
+
+## Requests from rights holders
+
+If you hold rights in anything covered here and want it taken down, open an
+issue on the repository (or contact the maintainer directly through the
+repository's own contacts). Verified requests from a rights holder are
+honoured: the release is withdrawn and the affected material removed, without
+argument and without asking for anything in return. This project exists
+because someone loved a game; nothing about it is worth a fight with the
+people who made it.
 
 ## AI disclosure
 

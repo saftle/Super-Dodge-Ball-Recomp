@@ -27,6 +27,45 @@ Built with [NESRecomp](https://github.com/mstan/nesrecomp) by Matthew Stanley �
 
 # Playing
 
+## Releases
+
+Prebuilt binaries are published on the
+[releases page](https://github.com/saftle/Super-Dodge-Ball-Recomp/releases).
+The latest is **1.0.0**:
+
+| Platform | File | What it needs |
+|---|---|---|
+| Linux x86-64 | `super-dodge-ball-recomp-1.0.0-linux-x86_64.AppImage` | nothing — one file: `chmod +x` it and run it |
+| Linux x86-64 | `super-dodge-ball-recomp-1.0.0-linux-x86_64.tar.gz` | SDL2 and OpenGL |
+| Windows x64 | `super-dodge-ball-recomp-1.0.0-windows-x64.zip` | nothing — unpack and run `SuperDodgeBallRecomp.exe` |
+
+**No ROM is included, and none is needed to install.** Start the game and the
+launcher asks for your own copy of Super Dodge Ball (USA), then verifies it
+against the checksum compiled into the binary.
+
+Where the launcher keeps its settings depends on how you installed it:
+
+| Install | Settings, mod state and the picked ROM path |
+|---|---|
+| Tarball / Windows ZIP | next to the executable, in the folder you unpacked it into |
+| AppImage | in a `.super-dodge-ball-recomp` folder next to the `.AppImage` |
+| Flatpak | `~/.var/app/org.saftle.SuperDodgeBallRecomp/data/super-dodge-ball-recomp/` |
+
+Two things worth knowing about the packaged builds:
+
+- **The AppImage writes its settings next to itself**, in a
+  `.super-dodge-ball-recomp` folder. The engine keeps `config.ini`, the mod
+  catalog's state and the ROM path beside its executable, and an AppImage's
+  payload is read-only — so the game runs from a writable copy of itself.
+  Delete that folder to reset the launcher to its defaults.
+- **The launcher shows our own box art.** Replace
+  `assets/img/boxart.tga` with a 24-bit TGA of your own to change it. We do
+  not ship the retail cover: it carries the Nintendo Seal of Quality and
+  the line *"Licensed by Nintendo for Play on The Nintendo Entertainment
+  System"*, and this program is neither licensed nor endorsed by Nintendo.
+
+Building it yourself instead? [Quick start](#quick-start) below.
+
 ## Quick start
 
 ```bash
@@ -402,7 +441,9 @@ The cartridge's 6502 machine code is translated to C at build time — one label
 block per ROM instruction, with every CPU cycle's bus activity written out — then
 compiled to native code and run against a cycle-accurate model of the NES: 6502,
 PPU, APU, DMAs and the MMC1 mapper. There is no interpreter in the hot path and
-nothing is decoded at runtime.
+nothing is decoded at runtime: **99.8%** of the executed instructions run as
+native code, and the 0.2% that do not are the game's own routines executing from
+RAM, which no compiled view covers.
 
 Two consequences shape everything else in this repo:
 
@@ -428,7 +469,7 @@ by content.
 | [`src/game.toml`](src/game.toml) | Recompiler config — window title, discovery roots, and twelve content-keyed hook sites |
 | [`src/sdb_host_extras.c`](src/sdb_host_extras.c) | **All three mods.** Presentation and timing only — never writes the guest |
 | [`src/sdb_cheats.c`](src/sdb_cheats.c) | **The cheat engine.** Separate because it is the one thing here that writes guest RAM |
-| [`src/cycle_seeds.txt`](src/cycle_seeds.txt) | Discovery roots that make the hooked sprite emitters recompiled rather than interpreted |
+| [`src/cycle_seeds.txt`](src/cycle_seeds.txt) | Discovery roots that make the hooked sprite emitters recompiled rather than interpreted, plus a coverage list of every other address that ran interpreted |
 | [`cheats/`](cheats/) | The `.cht` cheat file, copied beside the executable at build time. Every entry ships off |
 | `mods/packages/` | One manifest-only package per mod, copied beside the executable at build time |
 | [`CMakeLists.txt`](CMakeLists.txt) | The game project. Wraps the engine's own project file and adds what that file cannot express, which is why the submodule stays pristine |
@@ -500,8 +541,12 @@ The subtle part: **a hook site only exists in recompiled code.** Five of the
 addresses the mods need sit in routines that static discovery never reaches, so they
 ran on the interpreter — where a hook compiles, binds, and never fires. That is what
 `src/cycle_seeds.txt` is for: six roots that make them native, at an unchanged total
-cycle count. A hook declared at an address that discovery never reached looks
-completely healthy and does nothing.
+cycle count, plus a coverage list of every other address that ran interpreted
+(14,087 of them, from eight vectors' `--miss-log` runs). With the coverage list the
+native share over a match is **99.8%**, and the guest cannot tell: the
+`--frame-log` over 3000 frames on four vectors is byte-identical between the two
+builds, cycle count included. A hook declared at an address that discovery
+never reached looks completely healthy and does nothing.
 
 **`src/sdb_host_extras.c`** is the flicker mod's sprite capture, host-side redraw
 and culling override; the overclocking mod, which is just a value handed to the
@@ -1058,7 +1103,12 @@ What a build produces is a statically recompiled — machine-translated — buil
 original 6502 code. That is inherent to static recompilation and is the same
 distribution model as other recompilation projects, including NESRecomp and
 N64: Recompiled. The generated C, the built executable and the build directory are
-gitignored, and no prebuilt binary is published here. The license here covers the
+gitignored, and no prebuilt binary is committed here — the
+[releases page](https://github.com/saftle/Super-Dodge-Ball-Recomp/releases)
+carries the built ones. **A release contains no ROM and no game assets** — no
+graphics, no music, no text: the packaging refuses to write a `.nes`, and the
+graphics are read out of the player's own ROM while the game runs, so a release
+cannot substitute for the cartridge. The license here covers the
 source code in this repository and grants no rights to the game itself.
 
 ## License

@@ -217,6 +217,61 @@
 
     The vector the session produced is committed as `tas/vectors/sdb_16x9.input`, so the replay side is reproducible. A headless replay is a different machine from frame 4 (§33), so it is a before/after instrument on one machine, not a substitute for the window.
 
+21. **Release 1.0 — the first published build.** `tools/release/` builds and packages what the releases page publishes: a Linux tarball, a Linux AppImage, a Windows ZIP and a Flatpak, from a `v*` tag. The release artifact carries **no ROM** (the launcher asks the player for their own copy), but the **build needs one** — the build recompiles the cartridge's code — so CI reads it from the secret store, in **parts** (one secret cannot hold it; see the note at the end of this item), and checks its SHA-1 before anything else runs. Three things cost a real bug each, and all three are the same shape:
+
+    - **The engine writes beside its executable** (`config.ini`, the mod catalog's `state.toml`, `rom.cfg`, all resolved from `/proc/self/exe`). A **read-only payload therefore cannot start the game**: it exits 2 with *"mods: cannot write mod state"*. Measured, not inferred. The AppImage and the Flatpak both run the game from a **writable copy**, and `tools/release/appimage/test_appimage_layout.sh` asserts the run left a settings file and a mod state in a writable directory — the assertion the reference Super Mario Bros. layout test omits (it runs the game with `|| true` and never reads the exit code).
+    - **`$APPIMAGE` is not ours.** Another AppImage exports it — anything running inside one hands it down — and the first AppRun took it at face value and put the game's writable copy in an unrelated directory. Believe it only when `APPDIR` is where the script lives.
+    - **`linuxdeploy` leaves `AppRun` as a symlink to the executable**, so writing it without removing the link replaces the game with the script. The layout test now asserts the executable is an ELF and not a script.
+
+    The build also caught a **C23 portability bug** that the local compiler only warned about: `CycHostExtras.tcp_setup` takes a `void *`, and our callback did not, which GCC 14+ rejects as an error. The same build found a `%ld` on an `int` in the trace line the margin gates parse. Both fixed; the build is warning-free.
+
+    **The hero art is ours** (`docs/assets/boxart.tga`, drawn by `tools/release/make_boxart.py`): the retail cover carries the Nintendo Seal of Quality and the line *"Licensed by Nintendo for Play on The Nintendo Entertainment System"*, and this program is neither licensed nor endorsed by Nintendo. A player who has a scan can drop it at `art/boxart.tga` (gitignored) and the build uses it.
+
+    **The ROM in CI: a single secret cannot hold it, so it goes in as several.** `SDB_ROM_B64` as one secret is impossible — the ROM is 262,160 bytes, its base64 is **349,548 bytes, and a GitHub Actions secret is capped at 48 KB** (7.1x over; even xz-compressed and base64'd it is 118,060 bytes, still 2.4x over). The ROM therefore goes into the secret store **as several parts that combine into one ROM**, and the reassembled file is checked against the cartridge's SHA-1 before the build reads it. That keeps the ROM out of every repository — it is never committed, never an asset, and never in a public surface.
+
+    **What the next agent has to write** (the workflow's fetch step still reads a single `SDB_ROM_B64`, which cannot work and must be replaced):
+
+    1. A helper that splits the ROM's base64 into N parts, each under 48,000 bytes, and prints the `gh secret set SDB_ROM_B64_<i> < part` commands. `base64 -w0` so the parts hold no newlines: the workflow concatenates and decodes once, and a newline in the middle would change the bytes. Eight parts of ~43.7 KB is enough for this ROM; the helper should refuse a part count that would exceed the limit rather than produce a secret GitHub will reject.
+    2. The workflow's fetch step: read the parts in order, concatenate, `base64 -d` into `roms/`, delete the intermediate, and verify the SHA-1 (`42f954e9bd3256c011aba14c7e5b400abe35fde3`) before anything else runs. A mismatch must fail the job with a clear message — a truncated or mis-ordered set of parts is exactly the failure a secret of this size invites.
+    3. Keep the existing guard: the ROM is deleted from the runner's workspace before any upload.
+
+    A single `SDB_ROM_B64` will simply not be accepted by GitHub, so the job fails with the "secret is not set" instruction until the parts are in place. Nothing else about the workflow changes.
+
+    Whatever route the ROM travels, the workflow already deletes it from the runner's workspace before any upload, and it deletes `build-release/cycle-nes_game` — the **generated C, which is the translated game in readable form** (the codegen folds constant ROM bytes into immediates, so ~28% of the cartridge's PRG appears in it as literal constants; measured). That source form is never published: not in the repo (gitignored by policy), not in any release archive, and now not in a workflow artifact either. **Publish the verification, not the translation** — the tools, the frame-log comparisons and the MesenCE diffs are ours, and they let a reader confirm the translation is faithful without ever seeing a line of it.
+
+22. **The Windows build, cross-compiled from Linux — IN PROGRESS, and the point is that no ROM has to leave the machine.** The alternative to putting the ROM in GitHub is not "find a Windows box": the engine **explicitly supports cross builds** (`runner/cyc/project.cmake`: *"Cross builds require RECOMPILER pointing to a runnable host NESRecomp"*), and the code is portable enough to cross-compile. Measured, in order:
+
+    - **The engine's `_MSC_VER` uses are all guarded feature switches**, not blockers: `__forceinline` vs `static inline`, `_BitScanForward` vs `__builtin_ctz` (GCC has it), and the legacy runner's symbol aliasing is in a branch this project does not build. `runner/cyc/cyc_host_extras_none.c`, `hw_internal.h`, `ppu_hle_kernel.h` and `vendor/emu2413/emu2413.c` all have a working `#else`.
+    - **Our own code is portable.** `src/sdb_host_extras.c` uses an MSVC linker-section trick (`__declspec(allocate(".CRT$XCU"))`) to get a static constructor; the `#else` is `__attribute__((constructor))`, which GCC and mingw support, so the mod registration behaves identically.
+    - **recomp-ui's Direct2D/DirectWrite use is basic** — `D2D1CreateFactory`, `DWriteCreateFactory`, `IDWriteTextFormat`, `IDWriteTextLayout`, `ID2D1RenderTarget`, `ID2D1SolidColorBrush` — all present in mingw-w64's `d2d1.h`/`dwrite.h` with their import libraries.
+
+    **The pieces, and where each comes from:**
+
+    | piece | source | note |
+    |---|---|---|
+    | cross compiler | `apt install g++-mingw-w64-x86-64` | 13.2.0 in apt; **needs the maintainer's password** — `sudo` is not passwordless here |
+    | SDL2 for mingw | `SDL2-devel-2.30.0-mingw.tar.gz` | the engine's vendored SDL2 is the **MSVC** one (SDL2.lib + SDL2.dll) and is useless for mingw. SHA-256 `d44bd8cd869219f43634a898d7735d0c92d4b2cca129f709dc8b98402b36d5f3`, 15,904,676 bytes — **fetched and checksummed in this session, so the number is measured, not looked up**. It unpacks to `x86_64-w64-mingw32/{bin/SDL2.dll, include/SDL2, lib/cmake/SDL2}` |
+    | host recompiler | `cmake -S external/nesrecomp/recompiler -B build-recompiler` | **must be built for Linux**: with a toolchain file the engine's own bootstrap would build a *Windows* recompiler, which is why the engine refuses a cross build without `NESRECOMP_HOST_COMPILER` |
+    | CRT | `-static-libgcc -static-libstdc++` | the MSVC static-CRT advice does not apply to mingw; without it the exe needs two DLLs beside it |
+    | smoke test | `apt install wine` (9.0 in apt) | lets the Windows exe be **run** on this machine, which neither the CI route nor a Windows box would have done for us |
+
+    **What the cross build buys, and what it costs.** The ROM never leaves the machine, no CI runner is needed for the Windows artifact, no secret exists, and (with Wine) the artifact can be *run* before it ships — a runtime check the CI-MSVC route cannot give. The cost is honest: it is a **mingw** binary, not MSVC, so it is not the same artifact SMB and Zelda ship — a different CRT, a different `SDL2.dll`, and a different compiler. Both routes should therefore exist: the cross build for the release, MSVC on CI when an MSVC binary is wanted.
+
+    **Order of work, and the gates:**
+
+    1. `sudo apt install g++-mingw-w64-x86-64 wine` (the maintainer runs this; `sudo` needs a password here).
+    2. Fetch and unpack the mingw SDL2 to a **pinned, checksummed** location, the way `tools/release/appimage/build_appimage.sh` pins linuxdeploy and appimagetool.
+    3. Write `tools/release/mingw-toolchain.cmake` (compiler set, `CMAKE_SYSTEM_NAME Windows`, `CMAKE_FIND_ROOT_PATH` at the SDL2 prefix, `CMAKE_FIND_ROOT_PATH_MODE_*` so host tools are still found).
+    4. Build the **host** recompiler for Linux and pass `-DNESRECOMP_HOST_COMPILER=<path>`.
+    5. Configure and build the game with the toolchain file, `-DSDL2_DIR=<mingw sdl2>/lib/cmake/SDL2`, and the static-libgcc/libstdc++ flags.
+    6. **Gate: the executable is a PE32+ binary, and it links.** `file SuperDodgeBallRecomp.exe` must say PE32+; `x86_64-w64-mingw32-objdump -p` must show the imports the runtime needs (`SDL2.dll`, `opengl32.dll`, `dwrite.dll`, `d2d1.dll`, `ws2_32.dll`) and **no** `libgcc_s_*.dll` / `libstdc++-6.dll`.
+    7. **Gate: it runs.** Under Wine, with the mingw `SDL2.dll` beside it, `--frames 200` must exit 0 and print the same cycle count as the Linux build over the same vector. A Wine failure is **not** proof the exe is broken (Wine is not Windows) — but a *pass* is a real signal, and a failure must be diagnosed before shipping, not dismissed.
+    8. **Gate: the guest state matches.** `--frame-log` from the Windows binary over 3000 frames must be **byte-identical** to the Linux build's (the same 381,900,012 bytes the native/interpreted comparison produced). This is the real test: it says the cross build executes the same machine.
+    9. Package it as `super-dodge-ball-recomp-<v>-windows-x64.zip` with the mingw `SDL2.dll` beside the exe, and **nothing else** — no `libgcc`/`libstdc++` DLLs, because they are static.
+    10. Record the result here, and in `tools/release/README.md`, with the exact toolchain versions.
+
+    **If it fails**, the fallback is the documented one: CI with MSVC and the ROM fetched from a private repository (option A above). The cross build is an improvement, not a dependency — the release must not depend on it.
+
 ## What Other Successful NESRecomp Projects Do Differently
 
 ### Zelda 1 (mstan/LegendOfZeldaNESRecomp) — 100% playable

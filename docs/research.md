@@ -145,6 +145,14 @@ bound, and never fired: the instruction was emitted as an orphan entry with noth
 it. `4k:14:8040`, `4k:14:821E` and `4k:1E:E32D` (measured with `--miss-log`) fix that;
 native share went 62.4% -> 65.1% and the total cycle count did not move.
 
+**Later (2026-10-21):** the same miss-log trick was applied to *everything* else that ran
+interpreted, and the file now carries 14,087 more addresses on top of the six. The native
+share over a 3000-frame match went from ~55% to **99.8%**, and the guest could not tell:
+the `--frame-log` over four vectors is byte-identical between the two builds (381,900,012
+bytes each) with the cycle count identical to the digit, and with the three mods enabled
+both report the same 107,417 hook callbacks and 157 handled. It costs no measurable
+speed. See the summary in §19 and AGENTS.md's Model Notes.
+
 **Gotcha, cost one build:** `$E35F-$E36C` is `LDA $49 / BPL +5 / LDA #$00 / STA $067D,X` then
 `BEQ +5 / LDA #$FF / STA $067D,X`. So `$49` zero leaves `$48` alone and any other positive
 value forces `$FF`. Read it the other way round and the restored entry gets sort key `$FF`,
@@ -903,7 +911,7 @@ backend this project plays on. The full attribution is in `NOTICE.md`.
 - **Builds**: `build-cycle/` only (the legacy `build/` and `build-diag/` are gone with the legacy runner)
 - **Config**: `src/game.toml` carries the display name plus twelve `[[mod_function_hook]]` sites (ten for the character-flicker mod, two for the widescreen margins) and a `cycle_seed_file`; no `extra_func`, no `force_interp`, no discovery tuning needed for the stock ROM
 - **Mods**: `super-dodge-ball.character-flicker`, `super-dodge-ball.ppu-overclock` and `super-dodge-ball.widescreen`, all off by default; the widescreen package is **one feature** (`widescreen`, with an `aspect` choice) that also reveals the clipped left-hand columns and draws the off-screen players. Packages preloaded into `build-cycle/mods/` at build time; window picks them up via the launcher, headless needs `--mods-root build-cycle/mods`. A `state.toml` naming a feature this build does not have (e.g. one written before the overscan fold) **hard-fails the whole catalog** rather than degrading — delete it and let the launcher rewrite it. VSync is a launcher Graphics setting (upstream PR #67), not a mod. Reproduction vector for both flicker fixes: `tas/vectors/sdb_idle.input`
-- **Native share**: ~60–77% of cycles run recompiled code, the rest via the interpreter — bit-exact either way, informational only, never a gate. `src/cycle_seeds.txt` roots the sprite emitter natively so the mod's hooks can exist there at all; total cycle count unchanged by it
+- **Native share**: **99.8%** of cycles run recompiled code, the rest via the interpreter (the game's own routines executing from RAM, which no compiled view covers) — bit-exact either way, informational only, never a gate. `src/cycle_seeds.txt` roots the sprite emitter natively so the mod's hooks can exist there at all, and carries a coverage list of every other address that ran interpreted (14,087, merged from eight vectors' `--miss-log` runs), which takes the share from ~55% to 99.8%. **The guest cannot tell**: the `--frame-log` over 3000 frames on four vectors is byte-identical between the two builds (381,900,012 bytes each: RAM, OAM, CIRAM, palette, picture) and the total cycle count is identical to the digit. It costs no measurable speed (11.5s vs 11.7s per 3000 frames — the PPU's per-scanline work dominates), and it doubles the binary (3.7 MB -> 7.6 MB)
 - **Verification**: 400-frame TAS byte-exact vs Mesen from boot (RAM/OAM/palette/CIRAM); blargg cpu tier 25/25
 - **Venv**: `nesasm` 0.0.8 only (pip broken); system `python3` has Pillow + numpy
 - **MesenCE binary**: `external/mesence/Mesen` (pre-built, fetched by `setup.sh`)
