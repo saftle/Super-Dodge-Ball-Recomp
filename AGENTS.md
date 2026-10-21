@@ -120,7 +120,7 @@ Three options (setup.sh uses Option C by default):
 `tools/release/` builds and packages what the releases page publishes. The full recipe is in `tools/release/README.md`.
 
 - **The archive carries no ROM; the BUILD needs one.** The build recompiles the cartridge's code, so the ROM is a build input; the published artifact has none, and the launcher asks the player for their own copy. **The release is built and published BY HAND, on the machine that owns the ROM** — `tools/release/release.sh`, one command — and **the ROM never leaves that machine**: not into the repository, not into a secret store, not onto a CI runner, not into an artifact. **There is no release workflow**, and the split-secrets route (one secret cannot hold this ROM: 349,548 bytes of base64 against a 48 KB cap) was built, tested and **deliberately not taken** — `docs/plan.md` item 21 says why. A rights holder's real objection is to a copy of the game travelling, and the project's whole posture is that less of it does.
-- **`release.sh` refuses to run on a dirty tree**, and refuses to publish if HEAD moved while it built. The build bakes the commit it came from into the binary (`NESRECOMP_BUILD_REVISION`) and prints it in the startup log, so an artifact built from a dirty tree names a commit that is not what you shipped.
+- **The clean-tree rule belongs to PUBLISHING, not to building.** `tools/release/release.sh` records the tree's state when it starts and checks it again at the end: if the tree **changed** during the build, the artifacts are not what was built, and the run stops. If the tree is dirty at the start, the build is refused — unless `--allow-dirty` is passed, which builds anyway (for testing) and says loudly that the artifacts name a commit they do not match. **The publish step refuses a dirty tree whatever the preflight let through.** The reason: the build bakes the commit it came from into the binary (`NESRECOMP_BUILD_REVISION`) and prints it in the startup log, so an artifact built from a dirty tree names a commit that is not what you shipped.
 - **The cartridge has FOUR identities and they had been conflated.** The file's SHA-1 `75dad8b4…` and CRC-32 `9400BA7F`; the **payload's** (after the 16-byte iNES header) CRC-32 `689971F9`, which is what the mod packages target; and the payload's SHA-256 `28ce7c33…`, which is what the launcher checks. The SHA-1 this project used to document — `42f954e9…` — **matches nothing** and was in a player-facing file; it is gone.
 - **The engine writes BESIDE ITS EXECUTABLE** — `config.ini`, the mod catalog's `state.toml`, `rom.cfg` — resolved from `/proc/self/exe`. **A read-only payload therefore cannot start the game**: it exits 2 with *"mods: cannot write mod state"*. The AppImage and the Flatpak both run the game from a writable copy (`tools/release/appimage/AppRun.in`), and `test_appimage_layout.sh` asserts the run left a settings file and a mod state in a writable directory — the check the reference layout test omits.
 - **Never ship `mods/state.toml`.** It is the player's (which features they have switched on). The packages ship; the state does not.
@@ -176,6 +176,28 @@ Three options (setup.sh uses Option C by default):
 - **nesrecomp submodule tracks pristine `origin/master`** (currently `mstan/nesrecomp` @ `f15f1c4` — the pin must stay fetchable upstream; never commit in the submodule). **The tree is expected to be CLEAN**: this project carries no active submodule patches, so `git -C external/nesrecomp status` must show nothing. (A dirty tree means a patch is still applied — `patches/*.patch` — and `setup.sh` re-applies them after every checkout.) Any future patch must be **strictly additive** and headed for an upstream PR — see `patches/README.md`
 
 ## Known Issues (Current State)
+
+### A path with a space breaks an unquoted expansion — and this repository's own path has one
+
+**The repository lives at `/home/alex/Documents/Super Dodgeball Recomp`.** Any
+shell expansion of a path that is not quoted splits at that space, and the
+first word becomes a command. The symptom is unmistakable once you have seen
+it once: `/home/alex/Documents/Super: Is a directory`.
+
+It bit `tools/release/appimage/build_appimage.sh`, where
+`${LINUXDEPLOY}` held a path *and* an argument
+(`linuxdeploy-x86_64.AppImage --appimage-extract-and-run`) and was used
+unquoted. **It had worked for a long time** because the script was only ever
+called with a *relative* build directory; the moment the release script
+called it with an absolute one, it broke. A command that has only ever been
+run one way is untested the other way.
+
+Rules: quote every path expansion, and use an **array** when a variable
+holds a program plus its arguments (`LINUXDEPLOY=(… --appimage-extract-and-run)`
+— a string is split on whitespace, which a path cannot survive). The same
+applies to `release.sh`'s `FLATPAK_BUILDER`. When a script is given an
+absolute path for the first time, that is the moment to find this class of
+bug — not the moment somebody else finds it.
 
 ### Windowed `--present-out` runs the game in slow motion — pin the capture resolution
 

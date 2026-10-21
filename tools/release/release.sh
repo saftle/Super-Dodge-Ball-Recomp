@@ -15,8 +15,9 @@
 #
 # What it does, in order, and what each step is for:
 #
-#   preflight   the tree is clean, the tag agrees with VERSION, the ROM is
-#               the right ROM, the toolchain is installed
+#   preflight   the tag agrees with VERSION, the ROM is the right ROM, the
+#               toolchain is installed, and the tree is clean (or
+#               --allow-dirty says otherwise)
 #   build       Linux, then the Windows cross build, then the AppImage and
 #               the Flatpak
 #   gate        the Windows build's five gates, before the ZIP is made
@@ -25,10 +26,21 @@
 #   notes       the release notes, with the checksums
 #   publish     the tag, the release, and the assets
 #
-# The clean-tree and HEAD-unchanged checks are the point of the "verify"
-# step: the build bakes the commit it came from into the binary, so an
-# artifact built from a dirty tree names a commit that is not what you
-# shipped. A release must not be made from a tree that is not the tag.
+# The tree and HEAD checks are the point of the "verify" step: the build
+# bakes the commit it came from into the binary, so an artifact built from
+# a dirty tree names a commit that is not what you shipped. BUILDING from a
+# dirty tree is allowed (--allow-dirty, for testing); PUBLISHING one is
+# not, and the publish step refuses it whatever the preflight let through.
+#
+# Options:
+#   --publish        tag, create the release, upload the assets
+#   --allow-dirty    build from a dirty tree (publishing still refuses it)
+#   --skip-gate      do not run the Windows build's five gates
+#   --skip-flatpak   do not build the Flatpak
+#   --version V      the version to build (default: the VERSION file)
+#   --tag T          the tag to use (default: v<version>)
+#   --out DIR        where the artifacts go (default: release/)
+#   --jobs N         parallelism
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +65,14 @@ ROM="${NESRECOMP_ROM:-${ROOT}/roms/Super Dodge Ball (USA).nes}"
 
 EXE_NAME="$(tr -d '[:space:]' < "${SCRIPT_DIR}/exe.name")"
 
+# The tree must be clean to PUBLISH, and the check lives in two places: the
+# preflight (so a dirty tree is not built and then discovered at the end)
+# and the publish step (which refuses whatever the preflight let through).
+#
+# --allow-dirty builds from a dirty tree anyway, for testing. The artifacts
+# it produces name a commit they do not match, and the publish step still
+# refuses them.
+ALLOW_DIRTY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --version)      VERSION="$2"; shift 2 ;;
@@ -60,9 +80,10 @@ while [ $# -gt 0 ]; do
         --out)          OUT="$2"; shift 2 ;;
         --jobs)         JOBS="$2"; shift 2 ;;
         --publish)      PUBLISH=1; shift ;;
+        --allow-dirty)  ALLOW_DIRTY=1; shift ;;
         --skip-flatpak) DO_FLATPAK=0; shift ;;
         --skip-gate)    DO_GATE=0; shift ;;
-        -h|--help)      sed -n '2,30p' "$0"; exit 0 ;;
+        -h|--help)      sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -94,16 +115,27 @@ info "tag      ${TAG}"
 # The tree must be clean, and must stay clean. The build bakes the commit
 # into the binary, and a dirty tree means the binary is not the commit.
 if [ -n "$(git status --porcelain)" ]; then
-    echo "error: the working tree has changes." >&2
-    git status --short >&2
-    echo "       A release must be built from a clean tree: the build bakes" >&2
-    echo "       the commit into the binary, and an artifact built from a" >&2
-    echo "       dirty tree names a commit that is not what you shipped." >&2
-    echo "       Commit or stash first." >&2
-    exit 2
+    if [ "${ALLOW_DIRTY}" != "1" ]; then
+        echo "error: the working tree has changes." >&2
+        git status --short >&2
+        echo "       A release must be built from a clean tree: the build bakes" >&2
+        echo "       the commit into the binary, and an artifact built from a" >&2
+        echo "       dirty tree names a commit that is not what you shipped." >&2
+        echo "       Commit or stash first, or pass --allow-dirty to build" >&2
+        echo "       anyway (the publish step refuses a dirty tree either way)." >&2
+        exit 2
+    fi
+    printf '\n\033[1m!! the working tree has changes\033[0m\n'
+    git status --short | sed 's/^/   /'
+    echo "   Building anyway (--allow-dirty). The artifacts will name a commit"
+    echo "   they do not match, and publishing will be refused."
 fi
 HEAD_SHA="$(git rev-parse HEAD)"
 HEAD_SHORT="$(git rev-parse --short HEAD)"
+# The tree's state is RECORDED, not required to be clean: what matters is
+# that it does not CHANGE while the build runs, because then the artifacts
+# are not what was built. (Being clean is the publish step's requirement.)
+TREE_BEFORE="$(git status --porcelain)"
 info "commit   ${HEAD_SHORT}"
 
 # The tag, if it exists, has to be this commit.
@@ -128,29 +160,49 @@ command -v x86_64-w64-mingw32-g++ >/dev/null 2>&1 || die "no mingw-w64 cross com
        sudo apt install g++-mingw-w64-x86-64
        The Windows build is cross-compiled from here; there is no other route."
 
+# Wine, for the Windows build's gates. Checked here rather than left to the
+# gate, so a missing loader is a preflight message and not a failure
+# fifteen minutes into the build.
+if [ "${DO_GATE}" = "1" ]; then
+    WINE_FOUND=""
+    for candidate in /usr/lib/wine/wine64 "$(command -v wine64 || true)" "$(command -v wine || true)"; do
+        if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then WINE_FOUND="${candidate}"; break; fi
+    done
+    if [ -z "${WINE_FOUND}" ]; then
+        die "no wine: the Windows build's gates run the executable under it.
+       sudo apt install wine wine64
+       (wine64 is not optional -- 'wine' alone installs only the 32-bit
+       loader, and it answers a 64-bit executable with \"Bad EXE format\")
+       Or skip the gate:  --skip-gate"
+    fi
+    info "wine     ${WINE_FOUND}"
+fi
+
 if [ "${PUBLISH}" = "1" ]; then
     command -v gh >/dev/null 2>&1 || die "gh is not installed (needed to publish)"
     gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
 fi
 
-# flatpak-builder, as a program or as the Builder flatpak.
-FLATPAK_BUILDER=""
+# flatpak-builder, as a program or as the Builder flatpak. An ARRAY, not a
+# string: a string is split on whitespace, which is fine for a bare command
+# but breaks the moment one of the words is a path with a space in it.
+FLATPAK_BUILDER=()
 if [ "${DO_FLATPAK}" = "1" ]; then
     if command -v flatpak-builder >/dev/null 2>&1; then
-        FLATPAK_BUILDER="flatpak-builder"
+        FLATPAK_BUILDER=(flatpak-builder)
     elif flatpak list --user 2>/dev/null | grep -q "org.flatpak.Builder"; then
         # The Builder flatpak's command IS flatpak-builder, so the arguments
         # pass straight through -- do not put another "flatpak-builder" in
         # front of them, or it becomes a stray positional argument and
         # flatpak-builder reads the build directory as the manifest.
-        FLATPAK_BUILDER="flatpak run org.flatpak.Builder"
+        FLATPAK_BUILDER=(flatpak run org.flatpak.Builder)
     else
         die "no flatpak-builder, and the Builder flatpak is not installed.
        Either:  sudo apt install flatpak-builder
        Or:      flatpak install --user flathub org.flatpak.Builder
        Or skip the Flatpak:  --skip-flatpak"
     fi
-    info "flatpak  ${FLATPAK_BUILDER}"
+    info "flatpak  ${FLATPAK_BUILDER[*]}"
 fi
 
 # =================================================================== the build
@@ -178,7 +230,7 @@ say "Building the AppImage"
 FLATPAK_BUNDLE=""
 if [ "${DO_FLATPAK}" = "1" ]; then
     say "Building the Flatpak"
-    ${FLATPAK_BUILDER} --user --install --force-clean --disable-cache \
+    ${FLATPAK_BUILDER[@]} --user --install --force-clean --disable-cache \
         --repo="${ROOT}/tmp/flatpak-repo" "${ROOT}/tmp/flatpak-build" \
         "${ROOT}/tools/release/flatpak/org.saftle.SuperDodgeBallRecomp.yml" | tail -3
     FLATPAK_BUNDLE="${OUT}/super-dodge-ball-recomp-${VERSION}.flatpak"
@@ -198,7 +250,11 @@ python3 "${SCRIPT_DIR}/package.py" --build-dir "${MINGW_BUILD_DIR}" --platform w
 # ================================================================== the verify
 say "Verifying"
 [ "${HEAD_SHA}" = "$(git rev-parse HEAD)" ] || die "HEAD moved during the build -- the artifacts are not this commit"
-[ -z "$(git status --porcelain)" ] || die "the working tree changed during the build -- the artifacts are not this commit"
+# The tree must be the SAME as it was when the build started. It does not
+# have to be clean -- the publish step requires that -- but if it changed,
+# what was built is not what is on disk now.
+TREE_AFTER="$(git status --porcelain)"
+[ "${TREE_BEFORE}" = "${TREE_AFTER}" ] || die "the working tree changed during the build -- the artifacts are not this commit"
 
 ARTIFACTS=(
     "${OUT}/super-dodge-ball-recomp-${VERSION}-linux-x86_64.tar.gz"
@@ -296,6 +352,13 @@ if [ "${PUBLISH}" != "1" ]; then
 fi
 
 say "Publishing"
+# The clean-tree rule, enforced again at the last moment: whatever the
+# preflight let through, a release is not made from a tree that is not the
+# commit being tagged.
+if [ -n "$(git status --porcelain)" ]; then
+    die "the working tree has changes; a release is not published from one.
+       The artifacts name a commit they do not match."
+fi
 if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
     git tag -a "${TAG}" -m "Super Dodge Ball Recomp ${VERSION}"
     git push origin "${TAG}"

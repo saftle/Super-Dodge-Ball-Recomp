@@ -163,6 +163,15 @@ the game runs — a release with the ROM's CHR zeroed renders a blank screen.
 There is nothing in the artifact that plays Super Dodge Ball without a copy of
 the original, and no way to obtain one from us.
 
+**Where the ROM goes, and where it does not.** The release is built on the
+maintainer's own machine, from a copy of the cartridge they own. The
+cartridge is read from `roms/`, checked against the cartridge's identity,
+and **never leaves that machine** — it is not committed, not stored in a
+secret store, not sent to a CI runner, not put in a build artifact and not
+in any published file. There is no release workflow, and there is no secret
+to unlock. A rights holder asking where a copy of the game might be found
+in this project's infrastructure has the answer: nowhere.
+
 **The translation's source form is not published.** The build generates the
 translated game as C (`game_cyc*.c`, 8 MB) and that file is where the game's
 *data* lives in readable form — the codegen folds constant ROM bytes into

@@ -267,6 +267,18 @@ And one that is not about the modes at all:
   into the player's `~/Downloads`). Believe `$APPIMAGE` only when `$APPDIR`
   is where the script itself lives.
 
+And one that is about the build script, and cost a real bug:
+
+- **This repository's own path contains a space**, so an unquoted expansion
+  of it splits and the first word becomes a command: `/home/alex/Documents/Super:
+  Is a directory`. `LINUXDEPLOY` held a path *and* an argument
+  (`linuxdeploy-x86_64.AppImage --appimage-extract-and-run`) and was used
+  unquoted — and it **worked for a long time**, because the script was only
+  ever called with a *relative* build directory. The release script calls it
+  with an absolute one, and that is what broke it. Both are arrays now
+  (`LINUXDEPLOY=(… --appimage-extract-and-run)`), because a string is split
+  on whitespace and a path cannot survive that.
+
 ## The Flatpak
 
 `flatpak/org.saftle.SuperDodgeBallRecomp.yml` builds the same program into
@@ -351,8 +363,18 @@ nothing is the failure mode that keeps coming back.)
 **The clean-tree rule is the one that matters.** The build bakes the commit
 it came from into the binary (`NESRECOMP_BUILD_REVISION`) and prints it in
 the startup log, so an artifact built from a dirty tree names a commit that
-is not what you shipped. `release.sh` refuses to run on a dirty tree, and
-refuses to publish if HEAD moved while it was building.
+is not what you shipped. So the rule is enforced in two places, and they
+are not the same place:
+
+- **Building** records the tree's state and checks it at the end. If the
+  tree *changed* while the build ran, the artifacts are not what was built
+  and the run stops. A tree that is dirty at the start is refused, unless
+  `--allow-dirty` is passed — which builds anyway, prints a loud warning
+  that the artifacts name a commit they do not match, and is for testing.
+- **Publishing** refuses a dirty tree whatever the preflight let through.
+
+The split is deliberate: building from a dirty tree is a reasonable thing
+to want while you are working on something. Publishing one is not.
 
 **The Flatpak needs `flatpak-builder`**, which may be a program or the
 `org.flatpak.Builder` flatpak — the script finds either, and tells you how
@@ -369,6 +391,27 @@ verifies, writes `release/RELEASE-NOTES.md` and prints the command that
 would publish it, so the notes can be read before they are used. The
 release notes name every artifact and carry its SHA-256, and they say so
 when the Windows build was **not** gated (`--skip-gate`).
+
+### The flags
+
+| flag | what it does |
+|---|---|
+| `--publish` | tag, create the release, upload the assets |
+| `--allow-dirty` | build from a dirty tree, for testing. The publish step still refuses it |
+| `--skip-gate` | do not run the Windows build's five gates. The release notes say so |
+| `--skip-flatpak` | do not build the Flatpak. The release notes say so |
+| `--version V` | the version to build (default: the `VERSION` file) |
+| `--tag T` | the tag to use (default: `v<version>`, so it cannot disagree with `VERSION`) |
+| `--out DIR` | where the artifacts go (default: `release/`) |
+| `--jobs N` | parallelism |
+
+**What the preflight needs:** cmake, a C++ compiler, the mingw-w64 cross
+compiler (`g++-mingw-w64-x86-64`), Wine with its **64-bit** loader
+(`wine wine64` — `wine` alone installs only the 32-bit one), `gh`
+authenticated (only for `--publish`), and `flatpak-builder` (either the
+program or the `org.flatpak.Builder` flatpak). Each missing one is
+reported by name, with the command that installs it, before anything is
+built.
 
 ## Before you publish
 

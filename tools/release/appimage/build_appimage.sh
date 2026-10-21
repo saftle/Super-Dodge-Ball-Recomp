@@ -75,8 +75,13 @@ fetch_tool "${LINUXDEPLOY_URL}" "${LINUXDEPLOY_SHA}" "${LINUXDEPLOY_BIN}"
 fetch_tool "${APPIMAGETOOL_URL}" "${APPIMAGETOOL_SHA}" "${APPIMAGETOOL_BIN}"
 # Both are AppImages themselves. --appimage-extract-and-run makes them work
 # on a machine with no FUSE, which is most CI runners.
-LINUXDEPLOY="${LINUXDEPLOY_BIN} --appimage-extract-and-run"
-APPIMAGETOOL="${APPIMAGETOOL_BIN} --appimage-extract-and-run"
+#
+# They are ARRAYS, not strings: each is a program plus an argument, and a
+# string would be split on the space in this repository's own path
+# ("/home/.../Super Dodgeball Recomp/...") -- which turns the path into two
+# words and the first one into a command that does not exist.
+LINUXDEPLOY=("${LINUXDEPLOY_BIN}" --appimage-extract-and-run)
+APPIMAGETOOL=("${APPIMAGETOOL_BIN}" --appimage-extract-and-run)
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
@@ -98,7 +103,7 @@ Terminal=false
 EOF
 
 echo "=== Assembling the AppDir ==="
-${LINUXDEPLOY} --appdir "${APPDIR}" --executable "${BIN}" \
+"${LINUXDEPLOY[@]}" --appdir "${APPDIR}" --executable "${BIN}" \
     --desktop-file "${WORK}/super-dodge-ball-recomp.desktop" \
     --icon-file "${ICON}" \
     --icon-filename super-dodge-ball-recomp \
@@ -144,6 +149,6 @@ echo "=== Packaging the AppImage ==="
 mkdir -p "${OUT}"
 APP="${OUT}/super-dodge-ball-recomp-${VERSION}-linux-x86_64.AppImage"
 rm -f "${APP}"
-ARCH=x86_64 ${APPIMAGETOOL} "${APPDIR}" "${APP}"
+ARCH=x86_64 "${APPIMAGETOOL[@]}" "${APPDIR}" "${APP}"
 chmod 0755 "${APP}"
 echo "BUILT: ${APP} ($(du -h "${APP}" | cut -f1))"
