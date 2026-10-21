@@ -266,6 +266,13 @@ is the gate for the Windows one whichever route built it.
 
 ### Publishing by hand, today
 
+**Build the artifacts after your last commit.** The build bakes the commit it
+came from into the binary (`NESRECOMP_BUILD_REVISION`) and prints it in the
+startup log, so an artifact built one commit before the tag names a commit
+that is not the tag. The build is quick once the code generator has run
+once — but the *Windows* build recompiles the generated C from scratch in a
+different tree, so allow it a few minutes.
+
 The workflow's jobs all need the ROM, so a tag pushed **before** the
 split-secrets fetch exists produces a failed workflow and no release. The
 by-hand route is the one that works now:
