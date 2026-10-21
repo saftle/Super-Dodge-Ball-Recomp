@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # Gate the Windows cross build.
 #
-# Four gates, in the order they can fail:
+# Five gates, in the order they can fail:
 #
 #   1. The executable is a PE32+ binary and links.
 #   2. Its imports are right: the DLLs the runtime needs are there, and the
 #      ones a published build must not need (libgcc_s_*, libstdc++-6.dll,
 #      libwinpthread-1.dll) are not.
 #   3. It RUNS -- under Wine, on this machine, which is the one check the
-#      CI-with-MSVC route cannot give.
+#      CI-with-MSVC route cannot give -- and it costs the same cycles as
+#      the Linux build.
 #   4. Its guest state is byte-identical to the Linux build's. This is the
 #      gate that matters: it says the cross build executes the same machine.
+#   5. The LAUNCHER opens. The launcher is the first thing a player sees
+#      and it is a different code path from the headless one -- Direct2D,
+#      DirectWrite, OpenGL and SDL's window -- so the first four gates can
+#      all pass and a player still gets a black rectangle.
 #
 # A Wine failure is not proof the exe is broken -- Wine is not Windows. But a
 # pass is a real signal, and a failure has to be diagnosed, not dismissed.

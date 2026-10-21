@@ -262,7 +262,7 @@
     | `tools/release/mingw-toolchain.cmake` | the toolchain: `CMAKE_SYSTEM_NAME Windows`, the mingw compilers, the sysroot as `CMAKE_FIND_ROOT_PATH`, `-static-libgcc -static-libstdc++`, and the find-root modes (`PROGRAM NEVER` — the host's python3 runs the code generator; `LIBRARY`/`INCLUDE ONLY` — nothing of the host's can be linked into a PE) |
     | `tools/release/fetch_mingw_sdl2.sh` | fetches and checksums the mingw SDL2 into `build-release/mingw-tools`, the way `build_appimage.sh` pins linuxdeploy |
     | `tools/release/build-mingw.sh` | builds the **host** recompiler for Linux, then the game with the toolchain file |
-    | `tools/release/gate-mingw.sh` | the four gates below |
+    | `tools/release/gate-mingw.sh` | the five gates below |
 
     **The gates, and their measured results** (mingw GCC 13.2.0, binutils 2.41.90, cmake 3.28.3, Wine 9.0, SDL2 2.30.0-mingw):
 

@@ -9,7 +9,7 @@ tools/release/
 ├── build-mingw.sh               Windows: the same, cross-compiled from Linux
 ├── mingw-toolchain.cmake        the mingw-w64 toolchain file
 ├── fetch_mingw_sdl2.sh          fetch and checksum the mingw SDL2
-├── gate-mingw.sh                the Windows build's four gates
+├── gate-mingw.sh                the Windows build's five gates
 ├── package.py                   Stage + archive, cross-platform
 ├── exe.name                     the shipped executable's name, in one file
 ├── make_boxart.py               draw the launcher's hero art
